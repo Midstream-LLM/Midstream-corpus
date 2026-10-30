@@ -7,6 +7,7 @@ from midstream.export import Recipe, _assign_split
 from midstream.ingest import _cleaned_metadata, _prepare
 from midstream.adapters.base import ParsedRecord
 from midstream.query import Filters, where_clause
+from midstream.rules import RULES
 
 
 def test_codec_round_trip():
@@ -24,6 +25,18 @@ def test_assess_flags():
     assert clean.assess("莊皇帝:廣本莊作章")[1] == ["embedded_collation_note"]
     assert clean.assess("abc def ghi 甲")[1] == ["low_cjk_ratio"]
     assert clean.assess("甲乙�丙丁")[0] == "flagged"
+
+
+def test_wanli_collation():
+    rule = RULES["wanli-collation-v1"]
+    for before, after in (
+        ("緊要緊要:抱本作要緊。宜併成造", "緊要宜併成造"),
+        ("賈三近參賈三近參:廣本抱本近下有奏字。新推", "賈三近參新推"),
+        ("朝埨朝埨:廣本抱本埨作。明史諸王表與館本同。永寧府", "朝埨永寧府"),
+    ):
+        assert rule.apply({"text": before}).text == after
+    assert rule.apply({"text": "緊要:抱本作要緊。宜併成造"}) is None
+    assert rule.apply({"text": "緊要緊要:抱本作" + "甲" * 70 + "。"}) is None
 
 
 def test_era_unknown_is_not_guessed():

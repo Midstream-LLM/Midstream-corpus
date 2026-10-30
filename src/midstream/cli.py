@@ -8,8 +8,9 @@ from pathlib import Path
 
 import psycopg
 
-from . import config, export, ingest, query
+from . import config, export, ingest, query, reprocess
 from .adapters import ADAPTERS
+from .rules import RULES
 
 
 def _print(data) -> None:
@@ -40,6 +41,11 @@ def _search(conn, args) -> int:
         include_unknown_years=args.include_unknown_years,
     )
     _print(query.search(conn, filters, limit=args.limit, after_doc=args.after))
+    return 0
+
+
+def _reprocess(conn, args) -> int:
+    _print(reprocess.reprocess(conn, RULES[args.rule], dry_run=not args.apply))
     return 0
 
 
@@ -85,6 +91,11 @@ def main() -> int:
     p.add_argument("source", choices=sorted(ADAPTERS))
     p.add_argument("--path", action="append", default=[])
     p.set_defaults(handler=_ingest)
+
+    p = commands.add_parser("reprocess", help="按规则生成新版本，默认只预览")
+    p.add_argument("rule", choices=sorted(RULES))
+    p.add_argument("--apply", action="store_true")
+    p.set_defaults(handler=_reprocess)
 
     p = commands.add_parser("search", help="按元数据查询当前版本")
     p.add_argument("--source", action="append", default=[])

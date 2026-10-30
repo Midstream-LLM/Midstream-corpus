@@ -6,12 +6,12 @@ clean-v1 只修明确的技术问题。繁简、异体字、标点和全角空�
 import re
 
 RULE_VERSION = "clean-v1"
-QUALITY_RULE_VERSION = "quality-v1"
+QUALITY_RULE_VERSION = "quality-v2"
 
 _CONTROL = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f-\x9f]")
 _CJK = re.compile(r"[㐀-䶿一-鿿\U00020000-\U0002ffff]")
 # 《明实录》校勘记混在正文里，形如“莊皇帝:廣本莊作章”
-_COLLATION_NOTE = re.compile(r"[:：](?:廣本|抱本|閣本|中本|館本|禮本)")
+_COLLATION_NOTE = re.compile(r":[㐀-䶿一-鿿\U00020000-\U0002ffff「]")
 
 MIN_CJK_RATIO = 0.3
 FLAGGED_BY = {"replacement_char", "low_cjk_ratio", "embedded_collation_note"}

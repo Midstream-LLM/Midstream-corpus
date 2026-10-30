@@ -8,8 +8,9 @@ import psycopg
 import pyarrow.parquet as pq
 import pytest
 
-from midstream import export, ingest, query
+from midstream import clean, export, ingest, query, reprocess
 from midstream.adapters import ADAPTERS
+from midstream.rules import RULES
 
 DSN = os.environ.get("MIDSTREAM_TEST_DSN")
 pytestmark = pytest.mark.skipif(not DSN, reason="未设置 MIDSTREAM_TEST_DSN")
@@ -129,3 +130,56 @@ def test_failed_stage_leaves_no_partition(conn, tmp_path):
         "SELECT status FROM source_batch ORDER BY batch_id DESC LIMIT 1"
     ).fetchone()[0] == "failed"
     assert conn.execute("SELECT count(*) FROM document").fetchone()[0] == 0
+
+
+def test_reprocess(conn, tmp_path, monkeypatch):
+    path = write(tmp_path / "wanli.jsonl", [json.dumps({
+        "id": "m1", "title": "神宗顯皇帝實錄 卷九",
+        "raw_text": "朝埨朝埨:廣本抱本埨作。明史諸王表與館本同。永寧府",
+    }, ensure_ascii=False)])
+    # 模拟旧质量规则发布的版本。
+    with monkeypatch.context() as patch:
+        patch.setattr(clean, "assess", lambda text: ("ok", []))
+        ingest.ingest(conn, ADAPTERS["wanli"], [path])
+
+    def current():
+        return conn.execute(
+            "SELECT doc_id, version_id, version_no, parent_version_id, text_hash"
+            " FROM document_version WHERE is_current"
+        ).fetchone()
+
+    def counts():
+        return conn.execute(
+            "SELECT (SELECT count(*) FROM document_version),"
+            " (SELECT count(*) FROM processing_run), (SELECT count(*) FROM text_blob)"
+        ).fetchone()
+
+    original = current()
+    before_counts = counts()
+    quality = RULES["quality-v2"]
+    preview = reprocess.reprocess(conn, quality, dry_run=True)
+    assert preview["changed"] == 1
+    assert counts() == before_counts and current() == original
+    assert reprocess.reprocess(conn, quality)["changed"] == 1
+    metadata_only = current()
+    assert metadata_only[2] == original[2] + 1
+    assert metadata_only[3] == original[1]
+    assert metadata_only[4] == original[4]
+    assert reprocess.reprocess(conn, quality)["changed"] == 0
+
+    collation = RULES["wanli-collation-v1"]
+    before_counts = counts()
+    preview = reprocess.reprocess(conn, collation, dry_run=True)
+    assert preview == reprocess.reprocess(conn, collation, dry_run=True)
+    assert preview["changed"] == 1
+    assert preview["samples"][0]["after"] == "朝埨永寧府"
+    assert counts() == before_counts and current() == metadata_only
+    assert reprocess.reprocess(conn, collation)["changed"] == 1
+    updated = current()
+    assert updated[2] == metadata_only[2] + 1
+    assert updated[3] == metadata_only[1]
+    assert updated[4] != metadata_only[4]
+    document = query.get_text(conn, updated[0])
+    assert document["text"] == "朝埨永寧府"
+    assert document["quality_status"] == "ok" and document["quality_flags"] == []
+    assert reprocess.reprocess(conn, collation)["changed"] == 0
