@@ -4,16 +4,15 @@
 """
 
 from pathlib import Path
-from typing import Iterator
 
 from ..config import JISHUI_RAW
-from .base import ParsedRecord, iter_jsonl
+from .base import JsonlAdapter, JsonlChunk, ParsedRecord, iter_jsonl
 
 TEXT_FIELD = "raw_text"
 WORK_TITLE = "神宗顯皇帝實錄"
 
 
-class WanliAdapter:
+class WanliAdapter(JsonlAdapter):
     name = "wanli"
     parser_version = "wanli-v1"
     description = "万历朝语料，条目标题为《神宗顯皇帝實錄》"
@@ -22,20 +21,21 @@ class WanliAdapter:
     def default_paths(self) -> list[Path]:
         return [JISHUI_RAW / "wanli-dibao-corpus/wanli_shilu_corpus.jsonl"] if JISHUI_RAW else []
 
-    def parse(self, path: Path) -> Iterator[ParsedRecord]:
-        for line_no, offset, record, error in iter_jsonl(path):
+    def parse_chunk(self, chunk: JsonlChunk) -> list[ParsedRecord]:
+        records = []
+        for line_no, offset, record, error in iter_jsonl(chunk):
             locator = {"line": line_no, "offset": offset}
             if record is None:
-                yield ParsedRecord(f"line:{line_no}", locator, {}, error=error)
+                records.append(ParsedRecord(f"line:{line_no}", locator, {}, error=error))
                 continue
             key = record.get("id")
             if not key:
-                yield ParsedRecord(f"line:{line_no}", locator, record, error="缺少 id")
+                records.append(ParsedRecord(f"line:{line_no}", locator, record, error="缺少 id"))
                 continue
             text = record.get(TEXT_FIELD)
             raw_fields = {k: v for k, v in record.items() if k != TEXT_FIELD}
             if not isinstance(text, str) or not text:
-                yield ParsedRecord(str(key), locator, raw_fields, error="正文为空")
+                records.append(ParsedRecord(str(key), locator, raw_fields, error="正文为空"))
                 continue
             metadata = {
                 "title": record.get("title") or None,
@@ -53,4 +53,5 @@ class WanliAdapter:
                 },
                 "field_basis": {"title": "source", "license": "legacy_manifest"},
             }
-            yield ParsedRecord(str(key), locator, raw_fields, text=text, metadata=metadata)
+            records.append(ParsedRecord(str(key), locator, raw_fields, text=text, metadata=metadata))
+        return records

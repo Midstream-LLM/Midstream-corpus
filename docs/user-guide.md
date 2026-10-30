@@ -100,8 +100,8 @@ midstream stats
 | `MIDSTREAM_ALEMBIC_URL` | `midstream` 库，host 为 `MIDSTREAM_HOME/run` | Alembic 的 SQLAlchemy URL。与 DSN 分开配置；使用外部库时两者须指向同一库。 |
 | `MIDSTREAM_JISHUI_RAW` | 无默认值 | 默认输入的根目录。未设置时必须显式传入 `ingest --path`。 |
 | `MIDSTREAM_EXPORT_ROOT` | `MIDSTREAM_HOME/exports` | CLI 导出根目录，数据集写到其下的配方名称目录。 |
-| `MIDSTREAM_WORKERS` | `8` | 入库和重新处理时压缩正文的 Python 工作进程数，使用正整数。 |
-| `MIDSTREAM_CHUNK_DOCS` | `2000` | Python 流程的分块记录数，也用于查重验证批量大小，使用正整数。 |
+| `MIDSTREAM_WORKERS` | `8` | 入库解析、清洗、质量判定和压缩，以及重新处理压缩正文的 Python 工作进程数，使用正整数。 |
+| `MIDSTREAM_CHUNK_DOCS` | `2000` | 发布压缩和其他 Python 流程的分块记录数，也用于查重验证批量大小；JSONL 解析按约 8 MiB 原始字节分块，使用正整数。 |
 | `RAYON_NUM_THREADS` | Rayon 默认线程数 | Rust 查重扩展的线程数；与 `MIDSTREAM_WORKERS` 分开控制。 |
 | `MIDSTREAM_TEST_DSN` | 未设置时跳过端到端测试 | 只用于测试。必须指向专用测试库，测试会清空其 `public` schema。 |
 
@@ -124,11 +124,13 @@ midstream ingest ccc_corpus --path /path/to/corpus.jsonl
 midstream ingest wanli --path /path/to/part-1.jsonl --path /path/to/part-2.jsonl
 ```
 
-适配器按 JSONL 逐行解析，空行跳过。现有两个适配器都要求非空 `id`；`ccc_corpus` 的正文字段为 `content`，`wanli` 为 `raw_text`。同一批次中的 `source_key` 必须唯一，包括多个输入文件之间。
+JSONL 按约 8 MiB、完整行边界分块；同一个 spawn 进程池并行解析、清洗、判定质量和计算哈希，并在发布时压缩正文。主进程按文件及块的原始顺序 COPY，空行跳过。现有两个适配器都要求非空 `id`；`ccc_corpus` 的正文字段为 `content`，`wanli` 为 `raw_text`。同一批次中的 `source_key` 必须唯一，包括多个输入文件之间；重复键触发 COPY 唯一约束错误，暂存事务回滚，批次标为 `failed`。
+
+迁移 `0004` 要求 `staging_text` 为空，升级前应完成已有暂存批次。暂存的两步均保存 UTF-8 SHA-256 `text_hash` 和字符数 `char_count`；清洗正文与原始版相同时，清洗行的 `content` 为 NULL、哈希相同。发布仍生成原始版和清洗版两个版本。
 
 ### 查看入库结果和批次状态
 
-成功时命令打印 JSON 报告，包括 `batch_id`、`status`、`records_ok`、`records_failed`、`new_documents`、`new_versions`、`unchanged`、新增正文的 `plain_bytes` / `stored_bytes` 和 `dedup`（文档级）、`dedup_spans`（段落级）查重结果。字节统计只计算本批次新增到正文存储的内容，不是所有记录的正文总量。
+成功时命令打印 JSON 报告，包括 `batch_id`、`status`、`records_ok`、`records_failed`、`new_documents`、`new_versions`、`unchanged`、新增正文的 `plain_bytes` / `stored_bytes`、`timings`（登记、暂存、验证、发布及 `publish.*` 各步骤的秒数）和 `dedup`（文档级）、`dedup_spans`（段落级）查重结果。字节统计只计算本批次新增到正文存储的内容，不是所有记录的正文总量。
 
 | 状态 | 含义 |
 |---|---|
@@ -283,7 +285,7 @@ midstream dedup --spans
 
 匹配保证归一化字符逐字相同；原文切片仍可能有繁简、标点差异。目标片段为 `text[start_char:end_char]`，出处从 `source_start_char` 开始，取相同数量的归一化字符。删除被完全覆盖的重复区间；不同出处的部分重叠区间保留，确保每条记录的整段出处都能核验，不能将它们的原文长度直接相加作为重复字符总数。
 
-指纹、种子分 256 区写到 `tempfile.mkdtemp` 创建的目录，结束或异常时删除。通常分区直接读入排序；超过 64 MiB 时按固定块排序、64 路归并，避免模板集中造成内存膨胀。正文先以压缩形式暂存，确认阶段按需解压，同一批复用；文本批次预算 256 MiB，单篇超大正文仍需容纳至少一对文档。Rust 线程由 `RAYON_NUM_THREADS` 控制，例如服务器设为 `20`。临时磁盘可用 `TMPDIR` 选择；种子数量随重复分布增长，可能远大于指纹数量。
+指纹、种子分 256 区写到 `tempfile.mkdtemp` 创建的目录，结束或异常时删除。通常分区直接读入排序；超过 64 MiB 时按固定块排序、64 路归并，避免模板集中造成内存膨胀。正文先以压缩形式暂存，种子围绕每对中正文较大的文档、按其连续编号聚集，同一文档的候选尽量在同批确认。每批涉及的文档各解压归一化一次，以共享只读结构供 Rayon 并行扩展匹配；线程内缓冲结果后按块写出，最后按目标文档统一删除被覆盖区间。文本批次预算仍为 256 MiB，单篇超大正文仍需容纳至少一对文档，批次结束即释放归一化正文。Rust 线程由 `RAYON_NUM_THREADS` 控制，例如服务器设为 `20`。临时磁盘可用 `TMPDIR` 选择；种子数量随重复分布增长，可能远大于指纹数量。
 
 报告包括 compare-v1 新缓存数、代表数、足够长的文档数、指纹数、种子数、模板哈希数、确认匹配数、最终区间数，以及缓存、指纹、种子、确认、写入和总耗时。当前 `representatives` 只统计原文至少 64 字符的代表。每次成功运行在独立事务内 `TRUNCATE dup_span` 并通过二进制 COPY 写入最新快照，运行信息保存为 `processing_run.rule_version='span-v1'`。正文和结果行均由 Rust 解析或生成，Python 只传递 COPY 字节。
 
@@ -399,21 +401,24 @@ midstream record-training small-sources-v1 run-name
 | `description` | 来源说明。 |
 | `license_note` | 数据来源的许可证记录；未知情况如实说明。 |
 | `default_paths()` | 返回默认输入文件的 `list[Path]`。 |
-| `parse(path)` | 逐条产出 `ParsedRecord` 的迭代器。 |
+| `iter_chunks(path)` | 按文件顺序产出可 pickle 的原始块，在主进程运行。 |
+| `parse_chunk(chunk)` | 将一个原始块解析成 `list[ParsedRecord]`，在工作进程运行。 |
+| `parse(path)` | 依次调用上述两方法，逐条产出 `ParsedRecord`；供直接读取适配器使用。 |
 
 `ParsedRecord` 的字段为 `source_key`、`locator`、`raw_fields`、`text`、`error`、`metadata`。成功记录需有稳定且在批次内唯一的来源键、正文和可用元数据。失败记录也要产出，填写 `error`，以便登记；不要为单条可记录的解析错误直接终止整个迭代器。
+
+`JsonlAdapter` 提供公共 `iter_chunks()` 和 `parse()` 实现：按字节读取约 8 MiB，在完整行边界切开，`JsonlChunk` 包含原始 `data`、起始行号 `line` 和字节偏移 `offset`。`iter_jsonl(chunk)` 保留每行在原文件中的行号与字节偏移，空行照常计数，坏行作为错误产出。其他格式自行实现这三个方法。适配器类及块类型需定义在可导入模块顶层，以便 spawn 进程 pickle；块只携带原始数据，不携带打开的文件或数据库连接。
 
 下面是读取 UTF-8 JSONL 的最小示例。输入使用非空字符串 `id` 和 `text`，可选 `title`。保存为 `src/midstream/adapters/example.py`：
 
 ```python
 from pathlib import Path
-from typing import Iterator
 
 from ..config import JISHUI_RAW
-from .base import ParsedRecord, iter_jsonl
+from .base import JsonlAdapter, JsonlChunk, ParsedRecord, iter_jsonl
 
 
-class ExampleAdapter:
+class ExampleAdapter(JsonlAdapter):
     name = "example"
     parser_version = "example-v1"
     description = "示例 JSONL 来源"
@@ -422,28 +427,30 @@ class ExampleAdapter:
     def default_paths(self) -> list[Path]:
         return [JISHUI_RAW / "example.jsonl"] if JISHUI_RAW else []
 
-    def parse(self, path: Path) -> Iterator[ParsedRecord]:
-        for line_no, offset, record, error in iter_jsonl(path):
+    def parse_chunk(self, chunk: JsonlChunk) -> list[ParsedRecord]:
+        records = []
+        for line_no, offset, record, error in iter_jsonl(chunk):
             locator = {"line": line_no, "offset": offset}
             if record is None:
-                yield ParsedRecord(f"invalid:{line_no}", locator, {}, error=error)
+                records.append(ParsedRecord(f"invalid:{line_no}", locator, {}, error=error))
                 continue
             key = record.get("id")
             text = record.get("text")
             fields = {k: v for k, v in record.items() if k != "text"}
             if not isinstance(key, str) or not key:
-                yield ParsedRecord(
+                records.append(ParsedRecord(
                     f"invalid:{line_no}", locator, fields, error="缺少字符串 id"
-                )
+                ))
                 continue
             if not isinstance(text, str) or not text:
-                yield ParsedRecord(key, locator, fields, error="正文为空或不是字符串")
+                records.append(ParsedRecord(key, locator, fields, error="正文为空或不是字符串"))
                 continue
             title = record.get("title")
-            yield ParsedRecord(
+            records.append(ParsedRecord(
                 key, locator, fields, text=text,
                 metadata={"title": title if isinstance(title, str) else None},
-            )
+            ))
+        return records
 ```
 
 示例中的 `invalid:` 前缀须为错误记录保留，不能与有效 ID 冲突；多文件批次也须保证键不重复。之后在 `src/midstream/adapters/__init__.py` 导入 `ExampleAdapter`，将 `ExampleAdapter()` 加入构建 `ADAPTERS` 的现有实例元组。注册后即可运行：

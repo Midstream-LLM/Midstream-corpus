@@ -9,7 +9,7 @@ import psycopg
 import pyarrow.parquet as pq
 import pytest
 
-from midstream import clean, dedup, export, ingest, query, reprocess
+from midstream import dedup, export, ingest, query, reprocess
 from midstream.adapters import ADAPTERS
 from midstream.rules import RULES
 
@@ -40,6 +40,7 @@ def conn():
         for statement in SCHEMA.with_name("0003_dup_span.sql").read_text(encoding="utf-8").split(";\n"):
             if statement.strip():
                 connection.execute(statement)
+        connection.execute(SCHEMA.with_name("0004_staging_hash.sql").read_text(encoding="utf-8"))
         connection.commit()
         yield connection
 
@@ -139,15 +140,17 @@ def test_failed_stage_leaves_no_partition(conn, tmp_path):
     assert conn.execute("SELECT count(*) FROM document").fetchone()[0] == 0
 
 
-def test_reprocess(conn, tmp_path, monkeypatch):
+def test_reprocess(conn, tmp_path):
     path = write(tmp_path / "wanli.jsonl", [json.dumps({
         "id": "m1", "title": "神宗顯皇帝實錄 卷九",
         "raw_text": "朝埨朝埨:廣本抱本埨作。明史諸王表與館本同。永寧府",
     }, ensure_ascii=False)])
+    ingest.ingest(conn, ADAPTERS["wanli"], [path])
     # 模拟旧质量规则发布的版本。
-    with monkeypatch.context() as patch:
-        patch.setattr(clean, "assess", lambda text: ("ok", []))
-        ingest.ingest(conn, ADAPTERS["wanli"], [path])
+    conn.execute(
+        "UPDATE document_version SET quality_status = 'ok', quality_flags = '{}' WHERE is_current"
+    )
+    conn.commit()
 
     def current():
         return conn.execute(

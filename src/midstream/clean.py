@@ -10,6 +10,7 @@ QUALITY_RULE_VERSION = "quality-v2"
 
 _CONTROL = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f-\x9f]")
 _CJK = re.compile(r"[㐀-䶿一-鿿\U00020000-\U0002ffff]")
+_SPACE = re.compile(r"\s+")
 # 《明实录》校勘记混在正文里，形如“莊皇帝:廣本莊作章”
 _COLLATION_NOTE = re.compile(r":[㐀-䶿一-鿿\U00020000-\U0002ffff「]")
 
@@ -29,7 +30,7 @@ def assess(text: str) -> tuple[str, list[str]]:
         flags.append("replacement_char")
     if _COLLATION_NOTE.search(text):
         flags.append("embedded_collation_note")
-    visible = sum(1 for ch in text if not ch.isspace())
+    visible = len(_SPACE.sub("", text))
     if visible and len(_CJK.findall(text)) / visible < MIN_CJK_RATIO:
         flags.append("low_cjk_ratio")
     status = "flagged" if FLAGGED_BY.intersection(flags) else "ok"

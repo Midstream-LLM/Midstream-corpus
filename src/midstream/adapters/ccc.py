@@ -1,10 +1,9 @@
 """Chinese Classical Corpus 的 corpus.jsonl。"""
 
 from pathlib import Path
-from typing import Iterator
 
 from ..config import JISHUI_RAW
-from .base import ParsedRecord, iter_jsonl
+from .base import JsonlAdapter, JsonlChunk, ParsedRecord, iter_jsonl
 
 TEXT_FIELD = "content"
 
@@ -25,7 +24,7 @@ def _unit_type(record: dict) -> str:
     return "section"
 
 
-class CccCorpusAdapter:
+class CccCorpusAdapter(JsonlAdapter):
     name = "ccc_corpus"
     parser_version = "ccc-corpus-v1"
     description = "Chinese Classical Corpus：十三经、说文解字、资治通鉴和二十四史前 15 部"
@@ -34,20 +33,21 @@ class CccCorpusAdapter:
     def default_paths(self) -> list[Path]:
         return [JISHUI_RAW / "chinese-classical-corpus/corpus.jsonl"] if JISHUI_RAW else []
 
-    def parse(self, path: Path) -> Iterator[ParsedRecord]:
-        for line_no, offset, record, error in iter_jsonl(path):
+    def parse_chunk(self, chunk: JsonlChunk) -> list[ParsedRecord]:
+        records = []
+        for line_no, offset, record, error in iter_jsonl(chunk):
             locator = {"line": line_no, "offset": offset}
             if record is None:
-                yield ParsedRecord(f"line:{line_no}", locator, {}, error=error)
+                records.append(ParsedRecord(f"line:{line_no}", locator, {}, error=error))
                 continue
             key = record.get("id")
             if not key:
-                yield ParsedRecord(f"line:{line_no}", locator, record, error="缺少 id")
+                records.append(ParsedRecord(f"line:{line_no}", locator, record, error="缺少 id"))
                 continue
             text = record.get(TEXT_FIELD)
             raw_fields = {k: v for k, v in record.items() if k != TEXT_FIELD}
             if not isinstance(text, str) or not text:
-                yield ParsedRecord(str(key), locator, raw_fields, error="正文为空")
+                records.append(ParsedRecord(str(key), locator, raw_fields, error="正文为空"))
                 continue
             author = record.get("author")
             metadata = {
@@ -67,4 +67,5 @@ class CccCorpusAdapter:
                     "license": "source",
                 },
             }
-            yield ParsedRecord(str(key), locator, raw_fields, text=text, metadata=metadata)
+            records.append(ParsedRecord(str(key), locator, raw_fields, text=text, metadata=metadata))
+        return records

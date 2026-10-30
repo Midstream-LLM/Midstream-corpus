@@ -356,6 +356,7 @@ impl SpanDeduper {
             self.input = CopyInput::default();
             let partitions = Partitions::new(&self.dir, "seed");
             let (mut count, mut templates) = (0, 0);
+            let documents = &self.documents;
             for partition in 0..256 {
                 let mut input = sorted(
                     &self.dir.join(format!("fingerprint{partition}")),
@@ -396,10 +397,17 @@ impl SpanDeduper {
                                         if a[2] == b[2] {
                                             continue;
                                         }
-                                        // 文档按 version_id 递增输入；按目标文档分区，方便最终区间去重。
+                                        // 围绕解压成本较大的文档聚集候选，与版本方向无关。
+                                        let (a, b) = if documents[a[2] as usize].bytes
+                                            >= documents[b[2] as usize].bytes
+                                        {
+                                            (a, b)
+                                        } else {
+                                            (b, a)
+                                        };
                                         writer.push(
-                                            (mix(b[2] as u64) >> 56) as usize,
-                                            &[b[2], a[2], a[3], b[3]],
+                                            a[2] as usize * 256 / documents.len(),
+                                            &[a[2], b[2], a[3], b[3]],
                                         );
                                         count += 1;
                                     }
@@ -450,9 +458,8 @@ impl SpanDeduper {
     fn verify_all(&mut self) -> (usize, usize) {
         let mut output = BufWriter::new(File::create(self.dir.join("output")).unwrap());
         let (mut matches, mut spans) = (0, 0);
+        let matched = Partitions::new(&self.dir, "match");
         for partition in 0..256 {
-            let path = self.dir.join(format!("match{partition}"));
-            let mut matched = BufWriter::new(File::create(&path).unwrap());
             let mut seeds = sorted(
                 &self.dir.join(format!("seed{partition}")),
                 |r: &[u32; 4]| {
@@ -527,56 +534,69 @@ impl SpanDeduper {
                     }
                 }
                 starts.push(batch.len());
-                let matched = Mutex::new(&mut matched);
                 matches += starts
                     .par_windows(2)
-                    .map(|range| {
-                        let rows = &batch[range[0]..range[1]];
-                        let [b, a, _, _] = rows[0];
-                        let left = &texts[slots[&a]];
-                        let right = &texts[slots[&b]];
-                        let mut covered = 0;
-                        let mut count = 0;
-                        for &[_, _, pa, pb] in rows {
-                            let (pa, pb) = (pa as usize, pb as usize);
-                            if pa + K <= covered {
-                                continue;
+                    .map_init(
+                        || Writer::new(&matched),
+                        |writer, range| {
+                            let rows = &batch[range[0]..range[1]];
+                            let [a, b, _, _] = rows[0];
+                            let left = &texts[slots[&a]];
+                            let right = &texts[slots[&b]];
+                            let mut covered = 0;
+                            let mut count = 0;
+                            for &[_, _, pa, pb] in rows {
+                                let (pa, pb) = (pa as usize, pb as usize);
+                                if pa + K <= covered {
+                                    continue;
+                                }
+                                if left.chars[pa..pa + K] != right.chars[pb..pb + K] {
+                                    continue;
+                                }
+                                let (mut la, mut lb, mut end) = (pa, pb, pa + K);
+                                while la > 0 && lb > 0 && left.chars[la - 1] == right.chars[lb - 1]
+                                {
+                                    la -= 1;
+                                    lb -= 1;
+                                }
+                                while end < left.chars.len()
+                                    && pb + end - pa < right.chars.len()
+                                    && left.chars[end] == right.chars[pb + end - pa]
+                                {
+                                    end += 1;
+                                }
+                                covered = end;
+                                if end - la >= MIN_SPAN {
+                                    let row = if a < b {
+                                        [
+                                            b,
+                                            right.positions[lb],
+                                            right.positions[pb + end - pa - 1] + 1,
+                                            a,
+                                            left.positions[la],
+                                        ]
+                                    } else {
+                                        [
+                                            a,
+                                            left.positions[la],
+                                            left.positions[end - 1] + 1,
+                                            b,
+                                            right.positions[lb],
+                                        ]
+                                    };
+                                    writer.push((mix(row[0] as u64) >> 56) as usize, &row);
+                                    count += 1;
+                                }
                             }
-                            if left.chars[pa..pa + K] != right.chars[pb..pb + K] {
-                                continue;
-                            }
-                            let (mut la, mut lb, mut end) = (pa, pb, pa + K);
-                            while la > 0 && lb > 0 && left.chars[la - 1] == right.chars[lb - 1] {
-                                la -= 1;
-                                lb -= 1;
-                            }
-                            while end < left.chars.len()
-                                && pb + end - pa < right.chars.len()
-                                && left.chars[end] == right.chars[pb + end - pa]
-                            {
-                                end += 1;
-                            }
-                            covered = end;
-                            if end - la >= MIN_SPAN {
-                                write_record(
-                                    &mut **matched.lock().unwrap(),
-                                    &[
-                                        b,
-                                        right.positions[lb],
-                                        right.positions[pb + end - pa - 1] + 1,
-                                        a,
-                                        left.positions[la],
-                                    ],
-                                );
-                                count += 1;
-                            }
-                        }
-                        count
-                    })
+                            count
+                        },
+                    )
                     .sum::<usize>();
             }
-            matched.flush().unwrap();
-            drop(matched);
+        }
+        matched.finish();
+        for partition in 0..256 {
+            let path = self.dir.join(format!("match{partition}"));
             // 同一起点最长者优先，删除被完整覆盖的区间；交叠且出处不同的区间保留证明。
             let mut document = u32::MAX;
             let mut covered = 0;
