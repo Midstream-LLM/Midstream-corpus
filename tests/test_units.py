@@ -1,4 +1,9 @@
 import json
+import random
+import struct
+from itertools import combinations
+
+import midstream_dedup
 
 from midstream import clean, eras, textcodec
 from midstream.adapters import ADAPTERS
@@ -103,3 +108,94 @@ def test_split_assignment_is_stable_and_rejects_bad_ratio():
     first = [_assign_split(recipe, group) for group in range(200)]
     assert first == [_assign_split(recipe, group) for group in range(200)]
     assert set(first) == {"train", "val"}
+
+
+def test_dedup_recall():
+    rng = random.Random(762)
+    alphabet = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
+    texts = []
+    # 独立文本各配一个变体，覆盖短文、长文和多个已知编辑比例。
+    for i in range(1000):
+        length = (65, 128, 256, 512)[i % 4]
+        original = "".join(rng.choices(alphabet, k=length))
+        edited = list(original)
+        ratio = (0, 0.002, 0.005, 0.01, 0.025, 0.05)[i % 6]
+        for position in rng.sample(range(length), round(length * ratio)):
+            edited[position] = rng.choice(alphabet.replace(edited[position], ""))
+        texts.extend((original, "".join(edited)))
+    sets = [{text[i:i + 8] for i in range(len(text) - 7)} for text in texts]
+    # 独立用原始字符切片暴力对比，不借用 Rust 的哈希或 Jaccard 实现。
+    truth = {}
+    for a, left in enumerate(sets):
+        for b in range(a + 1, len(sets)):
+            intersection = len(left & sets[b])
+            if intersection:
+                truth[a, b] = intersection / (len(left) + len(sets[b]) - intersection)
+    header = b"PGCOPY\n\xff\r\n\0" + bytes(8)
+
+    def encode(rows):
+        return header + b"".join(
+            struct.pack("!h", len(row)) + b"".join(struct.pack("!i", len(f)) + f for f in row)
+            for row in rows
+        ) + b"\xff\xff"
+
+    def decode(data):
+        offset = 19
+        while (count := struct.unpack_from("!h", data, offset)[0]) != -1:
+            offset += 2
+            fields = []
+            for _ in range(count):
+                size = struct.unpack_from("!i", data, offset)[0]
+                offset += 4
+                fields.append(data[offset:offset + size])
+                offset += size
+            yield fields
+
+    def feed(method, data):
+        # 头、行、字段和结束标志都可能跨块。
+        parts = [data[:1], *(data[i:min(i + 4093, len(data) - 1)]
+                            for i in range(1, len(data) - 1, 4093)), data[-1:]]
+        return b"".join(method(part) or b"" for part in parts)
+
+    def run(state, blobs):
+        state.group_exact()
+        state.build_lsh()
+        while state.next_round():
+            while batch := state.next_batch(100):
+                feed(state.blobs, encode(
+                    (version, blobs[int.from_bytes(version, "big")])
+                    for [version] in reversed(list(decode(batch)))
+                ))
+                state.verify_batch()
+        count, _, candidates, _ = state.clusters()
+        members = feed(state.members, encode((i.to_bytes(8, "big"),) for i in range(count)))
+        clusters = {}
+        for cluster, version, _ in decode(header + members + b"\xff\xff"):
+            clusters.setdefault(cluster, []).append(int.from_bytes(version, "big"))
+        return {tuple(sorted(pair)) for group in clusters.values() for pair in combinations(group, 2)}, candidates
+
+    blobs = [textcodec.compress(text) for text in texts]
+    state = midstream_dedup.Deduper("recall-test", 32, 4, 0.8)
+    fingerprints = feed(state.fingerprints, encode(
+        (i.to_bytes(32, "big"), blob) for i, blob in enumerate(blobs)
+    ))
+    records = list(decode(header + fingerprints + b"\xff\xff"))
+    assert state.fingerprinted == len(texts)
+    assert all(rule == b"recall-test" for _, rule, _, _ in records)
+    feed(state.versions, encode((h[-8:], compare, sig) for h, _, compare, sig in reversed(records)))
+    found, _ = run(state, blobs)
+    expected = {pair for pair, score in truth.items() if score >= 0.85}
+    recall = len(found & expected) / len(expected)
+    assert recall >= 0.99, recall
+    assert all(truth.get(pair, 0) >= 0.8 for pair in found)
+
+    # a 占住同一个桶却与 b/c 都不重复；第二轮仍须验证真实重复对 b–c。
+    state = midstream_dedup.Deduper("recall-test", 32, 4, 0.8)
+    base = texts[6]
+    blocked = [textcodec.compress(text) for text in
+               ("Z" * len(base), base, base[:-1] + ("X" if base[-1] != "X" else "Y"))]
+    feed(state.versions, encode(
+        (i.to_bytes(8, "big"), i.to_bytes(16, "big"), struct.pack("<128I", *([1] * 128)))
+        for i in range(3)
+    ))
+    assert run(state, blocked) == ({(1, 2)}, 3)

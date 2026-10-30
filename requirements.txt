@@ -4,3 +4,4 @@ pyarrow>=17.0             # 导出 Parquet
 alembic>=1.13,<2          # schema 迁移
 SQLAlchemy>=2.0,<3        # Alembic 依赖
 pytest>=8.0,<10           # 测试
+maturin>=1.8,<2           # 构建 Rust 查重扩展

@@ -8,7 +8,7 @@ from pathlib import Path
 
 import psycopg
 
-from . import config, export, ingest, query, reprocess
+from . import config, dedup, export, ingest, query, reprocess
 from .adapters import ADAPTERS
 from .rules import RULES
 
@@ -46,6 +46,11 @@ def _search(conn, args) -> int:
 
 def _reprocess(conn, args) -> int:
     _print(reprocess.reprocess(conn, RULES[args.rule], dry_run=not args.apply))
+    return 0
+
+
+def _dedup(conn, _args) -> int:
+    _print(dedup.dedup(conn))
     return 0
 
 
@@ -96,6 +101,9 @@ def main() -> int:
     p.add_argument("rule", choices=sorted(RULES))
     p.add_argument("--apply", action="store_true")
     p.set_defaults(handler=_reprocess)
+
+    p = commands.add_parser("dedup", help="当前版本的文档级精确和近重复查重")
+    p.set_defaults(handler=_dedup)
 
     p = commands.add_parser("search", help="按元数据查询当前版本")
     p.add_argument("--source", action="append", default=[])

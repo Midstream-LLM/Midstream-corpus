@@ -8,13 +8,13 @@ import hashlib
 import json
 import multiprocessing
 from concurrent.futures import ProcessPoolExecutor
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Iterator
 
 import psycopg
 
-from . import clean, eras, textcodec
+from . import clean, dedup, eras, textcodec
 from .adapters.base import Adapter, ParsedRecord
 from .config import CHUNK_DOCS, WORKERS
 
@@ -38,6 +38,7 @@ class IngestReport:
     unchanged: int
     plain_bytes: int
     stored_bytes: int
+    dedup: dict | None = None
 
 
 def _sha256_file(path: Path) -> bytes:
@@ -453,4 +454,5 @@ def ingest(conn: psycopg.Connection, adapter: Adapter, paths: list[Path]) -> Ing
     # psycopg 带后台线程，fork 有死锁风险
     context = multiprocessing.get_context("spawn")
     with ProcessPoolExecutor(max_workers=WORKERS, mp_context=context) as pool:
-        return publish(conn, batch_id, pool)
+        report = publish(conn, batch_id, pool)
+    return replace(report, dedup=dedup.dedup(conn))

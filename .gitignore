@@ -4,5 +4,6 @@ __pycache__/
 .pytest_cache/
 *.egg-info/
 build/
+rust/target/
 AGENTS.md
 CLAUDE.md

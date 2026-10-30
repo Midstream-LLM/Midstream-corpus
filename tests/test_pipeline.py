@@ -2,13 +2,14 @@
 
 import json
 import os
+import random
 from pathlib import Path
 
 import psycopg
 import pyarrow.parquet as pq
 import pytest
 
-from midstream import clean, export, ingest, query, reprocess
+from midstream import clean, dedup, export, ingest, query, reprocess
 from midstream.adapters import ADAPTERS
 from midstream.rules import RULES
 
@@ -31,6 +32,9 @@ def conn():
         connection.execute("DROP SCHEMA public CASCADE")
         connection.execute("CREATE SCHEMA public")
         for statement in SCHEMA.read_text(encoding="utf-8").split(";\n"):
+            if statement.strip():
+                connection.execute(statement)
+        for statement in SCHEMA.with_name("0002_fingerprint.sql").read_text(encoding="utf-8").split(";\n"):
             if statement.strip():
                 connection.execute(statement)
         connection.commit()
@@ -183,3 +187,48 @@ def test_reprocess(conn, tmp_path, monkeypatch):
     assert document["text"] == "朝埨永寧府"
     assert document["quality_status"] == "ok" and document["quality_flags"] == []
     assert reprocess.reprocess(conn, collation)["changed"] == 0
+
+
+def test_document_dedup(conn, tmp_path):
+    rng = random.Random(762)
+    alphabet = "天地玄黄宇宙洪荒日月盈昃辰宿列张寒来暑往秋收冬藏"
+    base = "齐" + "".join(rng.choices(alphabet, k=1000))
+    texts = [base, "齊，" + base[1:] + "！", base[:500] + "山川" + base[502:],
+             "".join(rng.choices(alphabet, k=1000)), "齊，國！", "齐国"]
+    path = write(tmp_path / "dedup.jsonl", [row(f"d#{i}", text) for i, text in enumerate(texts)])
+    first = ingest.ingest(conn, ADAPTERS["ccc_corpus"], [path]).dedup
+    # 本例只检查重复簇对导出的影响。
+    conn.execute("DELETE FROM document_work")
+    conn.commit()
+    assert first["fingerprinted"] == 6
+    assert first["clusters"] == 2 and first["members"] == 5
+    members = conn.execute(
+        """SELECT d.source_key, m.kind, v.is_current FROM dup_cluster_member m
+           JOIN dup_cluster c USING (cluster_id) JOIN document_version v USING (version_id)
+           JOIN document d USING (doc_id) WHERE c.run_id = %s ORDER BY d.source_key""",
+        (first["run_id"],),
+    ).fetchall()
+    assert members == [("d#0", "exact", True), ("d#1", "exact", True),
+                       ("d#2", "near_candidate", True), ("d#4", "exact", True),
+                       ("d#5", "exact", True)]
+    second = dedup.dedup(conn)
+    assert second["fingerprinted"] == 0
+    assert second["clusters"] == first["clusters"]
+    docs = dict(conn.execute("SELECT source_key, doc_id FROM document"))
+    before = export._group_keys(conn, list(docs.values()))
+    assert before[docs["d#0"]] == before[docs["d#1"]] == before[docs["d#2"]]
+    assert before[docs["d#4"]] == before[docs["d#5"]]
+    replacements = {doc_id: "".join(rng.choices(alphabet, k=1000)) for doc_id in docs.values()}
+    reprocess.reprocess(conn, reprocess.Rule(
+        "dedup-test-v1", None, lambda doc: reprocess.Change(text=replacements[doc["doc_id"]])
+    ))
+    third = dedup.dedup(conn)
+    assert third["clusters"] == 0 and third["fingerprinted"] == 6
+    assert export._group_keys(conn, list(docs.values())) == {doc_id: doc_id for doc_id in docs.values()}
+    release = export.create_release(conn, export.Recipe.load({
+        "name": "dedup-latest", "seed": "s", "splits": {"train": 0.5, "val": 0.5},
+    }))
+    assert export.verify_release(conn, release)
+    assert conn.execute(
+        "SELECT count(*) FROM dup_cluster WHERE run_id = %s", (first["run_id"],)
+    ).fetchone()[0] == 0

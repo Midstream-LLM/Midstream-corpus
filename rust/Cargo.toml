@@ -1,0 +1,18 @@
+[package]
+name = "midstream_dedup"
+version = "0.1.0"
+edition = "2021"
+license = "GPL-3.0-only"
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+pyo3 = "0.25"
+rayon = "1.10"
+zstd = "0.13"
+xxhash-rust = { version = "0.8", features = ["xxh3"] }
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
