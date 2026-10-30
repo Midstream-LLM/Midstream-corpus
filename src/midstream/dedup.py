@@ -1,5 +1,7 @@
-"""当前版本的文档级查重，每次运行写一份完整快照。"""
+"""当前版本的文档级和段落级查重，各自保存最新快照。"""
 
+import shutil
+import tempfile
 from time import perf_counter
 
 import midstream_dedup
@@ -34,24 +36,28 @@ def _transform(source, conn, query, params, table, transform):
         copy.write(midstream_dedup.Deduper.copy_end())
 
 
+def _fingerprints(source, conn, state):
+    _transform(
+        source, conn,
+        """COPY (SELECT b.text_hash, b.content FROM text_blob b
+           WHERE NOT EXISTS (SELECT 1 FROM text_fingerprint f
+                             WHERE f.text_hash = b.text_hash AND f.rule_version = %s)
+             AND EXISTS (SELECT 1 FROM document_version v
+                         WHERE v.text_hash = b.text_hash AND v.is_current)
+           ORDER BY b.text_hash) TO STDOUT (FORMAT BINARY)""",
+        (RULE_VERSION,),
+        "text_fingerprint (text_hash, rule_version, compare_hash, signature)",
+        state.fingerprints,
+    )
+
+
 def dedup(conn: psycopg.Connection) -> dict:
     started = perf_counter()
     state = midstream_dedup.Deduper(RULE_VERSION, BANDS, ROWS, THRESHOLD)
     report = {"rule_version": RULE_VERSION, "threshold": THRESHOLD, "bands": BANDS, "rows": ROWS}
     # 同一连接不能同时 COPY 读写。source 只读取已经提交的正文。
     with conn.transaction(), psycopg.connect(conn.info.dsn) as source:
-        _transform(
-            source, conn,
-            """COPY (SELECT b.text_hash, b.content FROM text_blob b
-               WHERE NOT EXISTS (SELECT 1 FROM text_fingerprint f
-                                 WHERE f.text_hash = b.text_hash AND f.rule_version = %s)
-                 AND EXISTS (SELECT 1 FROM document_version v
-                             WHERE v.text_hash = b.text_hash AND v.is_current)
-               ORDER BY b.text_hash) TO STDOUT (FORMAT BINARY)""",
-            (RULE_VERSION,),
-            "text_fingerprint (text_hash, rule_version, compare_hash, signature)",
-            state.fingerprints,
-        )
+        _fingerprints(source, conn, state)
         report["fingerprinted"] = state.fingerprinted
         report["fingerprint_seconds"] = perf_counter() - started
         stage = perf_counter()
@@ -122,3 +128,65 @@ def dedup(conn: psycopg.Connection) -> dict:
         )
     conn.commit()
     return {"run_id": run_id, **report}
+
+
+def dedup_spans(conn: psycopg.Connection) -> dict:
+    started = perf_counter()
+    report = {"rule_version": "span-v1", "k": 32, "w": 32, "min_span": 64}
+    directory = tempfile.mkdtemp(prefix="midstream-spans-")
+    try:
+        with conn.transaction(), psycopg.connect(conn.info.dsn) as source:
+            fingerprints = midstream_dedup.Deduper(RULE_VERSION, BANDS, ROWS, THRESHOLD)
+            _fingerprints(source, conn, fingerprints)
+            report["compare_fingerprinted"] = fingerprints.fingerprinted
+            report["compare_fingerprint_seconds"] = perf_counter() - started
+            del fingerprints
+            stage = perf_counter()
+            state = midstream_dedup.SpanDeduper(directory)
+            # 与 Deduper.group_exact 同样按 compare_hash 取最小 version_id；
+            # 由 PostgreSQL 分组，避免为段落查重加载无用的 512 字节 OPH 签名。
+            _read(
+                conn,
+                """COPY (SELECT v.version_id, b.content
+                   FROM (SELECT min(v.version_id) AS version_id
+                         FROM document_version v JOIN text_fingerprint f USING (text_hash)
+                         WHERE v.is_current AND v.char_count >= 64 AND f.rule_version = %s
+                         GROUP BY f.compare_hash) rep
+                   JOIN document_version v USING (version_id)
+                   JOIN text_blob b USING (text_hash)
+                   ORDER BY v.version_id) TO STDOUT (FORMAT BINARY)""",
+                (RULE_VERSION,), state.fingerprints,
+            )
+            (report["representatives"], report["eligible_documents"],
+             report["fingerprints"]) = state.counts()
+            report["fingerprint_seconds"] = perf_counter() - stage
+            stage = perf_counter()
+            report["seeds"], report["template_hashes"] = state.seeds()
+            report["seed_seconds"] = perf_counter() - stage
+            stage = perf_counter()
+            report["matches"], report["spans"] = state.verify()
+            report["verify_seconds"] = perf_counter() - stage
+            stage = perf_counter()
+            run_id = conn.execute(
+                "INSERT INTO processing_run (kind, rule_version) VALUES ('dedup', 'span-v1')"
+                " RETURNING run_id"
+            ).fetchone()[0]
+            conn.execute("TRUNCATE dup_span")
+            with conn.cursor() as cursor, cursor.copy(
+                "COPY dup_span (run_id, version_id, start_char, end_char,"
+                " source_version_id, source_start_char) FROM STDIN (FORMAT BINARY)"
+            ) as copy:
+                copy.write(midstream_dedup.Deduper.copy_header())
+                while block := state.next_output(run_id):
+                    copy.write(block)
+                copy.write(midstream_dedup.Deduper.copy_end())
+            report["write_seconds"] = perf_counter() - stage
+            report["total_seconds"] = perf_counter() - started
+            conn.execute(
+                "UPDATE processing_run SET config = %s, finished_at = now() WHERE run_id = %s",
+                (Jsonb(report), run_id),
+            )
+        conn.commit()
+        return {"run_id": run_id, **report}
+    finally:
+        shutil.rmtree(directory)

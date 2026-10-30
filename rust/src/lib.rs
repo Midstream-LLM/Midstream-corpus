@@ -4,6 +4,8 @@ use pyo3::{prelude::*, types::PyBytes};
 use rayon::prelude::*;
 use xxhash_rust::xxh3::{xxh3_128, xxh3_64};
 
+mod spans;
+
 const TABLE: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/compare.bin"));
 const WIDTH: usize = 128 * 4;
 const BASE: u64 = 0x100000001b3;
@@ -13,6 +15,7 @@ struct Text {
     raw: Vec<u8>,
     utf8: Vec<u8>,
     chars: Vec<u32>,
+    positions: Vec<u32>,
 }
 
 impl Text {
@@ -22,10 +25,19 @@ impl Text {
             raw: Vec::new(),
             utf8: Vec::new(),
             chars: Vec::new(),
+            positions: Vec::new(),
         }
     }
 
     fn normalize(&mut self, blob: &[u8]) {
+        self.decode(blob, false, true);
+    }
+
+    fn normalize_span(&mut self, blob: &[u8], positions: bool) {
+        self.decode(blob, positions, false);
+    }
+
+    fn decode(&mut self, blob: &[u8], positions: bool, utf8: bool) {
         let size = zstd::zstd_safe::get_frame_content_size(blob)
             .unwrap()
             .unwrap() as usize;
@@ -35,19 +47,25 @@ impl Text {
             .unwrap();
         self.utf8.clear();
         self.chars.clear();
-        for c in std::str::from_utf8(&self.raw).unwrap().chars() {
+        self.positions.clear();
+        for (position, c) in std::str::from_utf8(&self.raw).unwrap().chars().enumerate() {
             let offset = c as usize * 4;
             if offset < TABLE.len() {
                 let mapped = u32::from_le_bytes(TABLE[offset..offset + 4].try_into().unwrap());
                 if mapped != 0 {
                     self.chars.push(mapped);
-                    let mut buf = [0; 4];
-                    self.utf8.extend_from_slice(
-                        char::from_u32(mapped)
-                            .unwrap()
-                            .encode_utf8(&mut buf)
-                            .as_bytes(),
-                    );
+                    if positions {
+                        self.positions.push(position as u32);
+                    }
+                    if utf8 {
+                        let mut buf = [0; 4];
+                        self.utf8.extend_from_slice(
+                            char::from_u32(mapped)
+                                .unwrap()
+                                .encode_utf8(&mut buf)
+                                .as_bytes(),
+                        );
+                    }
                 }
             }
         }
@@ -547,6 +565,7 @@ fn jaccard(a: &[u64], b: &[u64]) -> f64 {
 #[pymodule]
 fn midstream_dedup(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<Deduper>()?;
+    m.add_class::<spans::SpanDeduper>()?;
     Ok(())
 }
 
