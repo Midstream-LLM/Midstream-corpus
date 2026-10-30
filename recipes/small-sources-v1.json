@@ -1,0 +1,9 @@
+{
+  "name": "small-sources-v1",
+  "filters": {
+    "sources": ["ccc_corpus", "wanli"],
+    "quality": ["ok"]
+  },
+  "splits": {"train": 0.9, "val": 0.05, "test": 0.05},
+  "seed": "small-sources-v1"
+}
