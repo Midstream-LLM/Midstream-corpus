@@ -3,12 +3,13 @@
 import argparse
 import dataclasses
 import json
+import os
 import sys
 from pathlib import Path
 
 import psycopg
 
-from . import config, dedup, export, ingest, query, reprocess
+from . import config, dedup, export, ingest, query, reprocess, server
 from .adapters import ADAPTERS
 from .rules import RULES
 
@@ -49,8 +50,8 @@ def _reprocess(conn, args) -> int:
     return 0
 
 
-def _dedup(conn, _args) -> int:
-    _print(dedup.dedup(conn))
+def _dedup(conn, args) -> int:
+    _print(dedup.dedup_spans(conn) if args.spans else dedup.dedup(conn))
     return 0
 
 
@@ -92,6 +93,10 @@ def main() -> int:
     parser = argparse.ArgumentParser(prog="midstream")
     commands = parser.add_subparsers(dest="command", required=True)
 
+    commands.add_parser("init", help="构建、初始化私有 PostgreSQL 并迁移到最新版")
+    p = commands.add_parser("server", help="管理私有 PostgreSQL 实例")
+    p.add_argument("action", choices=("start", "stop", "status"))
+
     p = commands.add_parser("ingest", help="入库一个来源")
     p.add_argument("source", choices=sorted(ADAPTERS))
     p.add_argument("--path", action="append", default=[])
@@ -102,7 +107,8 @@ def main() -> int:
     p.add_argument("--apply", action="store_true")
     p.set_defaults(handler=_reprocess)
 
-    p = commands.add_parser("dedup", help="当前版本的文档级精确和近重复查重")
+    p = commands.add_parser("dedup", help="当前版本的文档级或段落级查重")
+    p.add_argument("--spans", action="store_true", help="只运行段落级查重")
     p.set_defaults(handler=_dedup)
 
     p = commands.add_parser("search", help="按元数据查询当前版本")
@@ -140,6 +146,23 @@ def main() -> int:
     p.set_defaults(handler=_stats)
 
     args = parser.parse_args()
+    if args.command == "init":
+        server.init()
+        return 0
+    if args.command == "server":
+        if args.action == "status":
+            running = server.status()
+            print("running" if running else "stopped")
+            return 0 if running else 1
+        if args.action == "start":
+            server.ensure_running()
+        else:
+            server.stop()
+        return 0
+    if args.command == "ingest" and not args.path and config.JISHUI_RAW is None:
+        parser.error("ingest 需要 --path 或 MIDSTREAM_JISHUI_RAW")
+    if "MIDSTREAM_DSN" not in os.environ:
+        server.ensure_running()
     with psycopg.connect(config.dsn()) as conn:
         return args.handler(conn, args)
 

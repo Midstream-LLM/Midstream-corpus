@@ -14,6 +14,7 @@
 | 批次 | 一次来源入库，记录解析器版本、输入文件路径与 SHA-256、记录状态和处理运行。 |
 | 作品 | 文献身份。一部作品可以关联多篇文档；当前入库流程按适配器给出的 `work_title` 建立作品及关联。 |
 | 重复簇 | 一次查重产生的一组具体版本。目前只有文档级重复簇；仅保存最新快照。 |
+| 重复片段 | 段落级查重记录的原文字符区间及出处，保存在 `dup_span`，仅保存最新快照。 |
 | 数据集 | 一次命名的发布，固定到具体 `version_id`，保存成员、顺序、train/val/test 划分、配方和内容摘要。 |
 
 首次发布一篇文档时生成版本 1（原始版）和版本 2（清洗版），清洗版成为当前版本。即使两版正文相同，也会保留两个版本。已发布版本除 `is_current` 外只增不改；正文或元数据的修订通过新版本表达。正文按 UTF-8 SHA-256 存储并使用 zstd 压缩，相同正文共用存储。
@@ -26,11 +27,11 @@
 
 需要：
 
-- PostgreSQL 17，支持 LZ4 压缩；迁移会创建使用 LZ4 的暂存表。
 - Python 3.12。主包允许 `>=3.12`，当前 Rust 扩展只允许 `>=3.12,<3.13`。
 - Rust 工具链，含 Cargo；`pip install ./rust` 通过 maturin 构建扩展。
+- Linux 构建环境：gcc、GNU make、curl、tar/gzip 和常用 GNU 工具（含 `sha256sum`、`nproc`）。[PostgreSQL 18 官方要求](https://www.postgresql.org/docs/18/install-requirements.html)还包括 Flex、Bison 和 Perl。
 
-先启动 PostgreSQL，准备能建库的数据库角色。以下建库命令使用 PostgreSQL 客户端默认连接；若另设连接参数，需确保建库、迁移与 CLI 指向同一数据库。
+无需配置系统 PostgreSQL。首次 `midstream init` 会从官网下载并编译 PostgreSQL 18.6，从 GitHub 下载并构建静态 LZ4 1.10.0 和 pg_bigm `v1.2-20250903`，约需几分钟。PostgreSQL 使用同目录官方 `.sha256` 文件校验；LZ4 和 pg_bigm 使用脚本内固定的 SHA256，当前占位值需由维护者在发布前填写。脚本是 [scripts/build-postgres.sh](../scripts/build-postgres.sh)，也可用 `bash scripts/build-postgres.sh /path/to/install` 单独构建。
 
 ```bash
 python3.12 -m venv .venv
@@ -38,16 +39,55 @@ source .venv/bin/activate
 pip install -r requirements.txt -e .
 pip install ./rust
 
+midstream init
+midstream stats
+```
+
+`init` 构建二进制、以 builtin `C.UTF-8` 和 UTF-8 初始化实例，创建 `midstream` 库并通过 Alembic 升级到 head。已初始化时只启动实例并运行迁移；不导入语料。后续可在任意工作目录使用 `midstream init`。输入语料需自行准备，通过 `--path` 或 `MIDSTREAM_JISHUI_RAW` 指定；入库流程读取输入文件，不改写它们。
+
+### 实例管理与备份
+
+所有持久数据默认位于 `MIDSTREAM_HOME`（`~/.local/share/midstream`）。可在首次初始化前设置该变量，例如 `export MIDSTREAM_HOME=/path/to/midstream`。
+
+| 子目录 | 内容 |
+|---|---|
+| `pg/` | 私有 PostgreSQL 安装，含 `bin/pg_ctl`、`bin/pg_dump` 等工具和 pg_bigm 扩展文件 |
+| `pgdata/` | 数据库文件；调优参数写到 `conf.d/midstream.conf`，由 `postgresql.conf` 的 `include_dir` 加载 |
+| `run/` | Unix socket，目录权限 `0700` |
+| `log/` | 服务日志 `postgresql.log` |
+| `exports/` | 默认数据集导出目录，可用 `MIDSTREAM_EXPORT_ROOT` 覆盖 |
+
+实例不监听 TCP，通过私有 socket 使用 trust 认证。普通数据库命令会自动启动已初始化的实例；显式管理命令为：
+
+```bash
+midstream server start
+midstream server status  # running 返回 0，stopped 返回 1
+midstream server stop
+```
+
+首次初始化按物理内存设置 `shared_buffers` 为 20%（上限 8 GiB）、`effective_cache_size` 为 50%、`maintenance_work_mem` 为 10%（上限 2 GiB），向下取整到 MiB。`work_mem=64MB`、`max_wal_size=16GB`、`checkpoint_completion_target=0.9`；WAL 和 TOAST 用 LZ4，`io_method=worker`，单次查询和维护最多使用 4 个并行 worker，全局并行 worker 数和进程池按 CPU 数设置。重跑 `init` 保留现有配置。
+
+备份使用私有安装的 `pg/bin/pg_dump`。当前 CLI 没有内置备份和恢复命令：
+
+```bash
+midstream server start
+midstream_home="${MIDSTREAM_HOME:-$HOME/.local/share/midstream}"
+"$midstream_home/pg/bin/pg_dump" -h "$midstream_home/run" -d midstream > midstream.sql
+```
+
+### 使用外部 PostgreSQL
+
+外部实例需支持 LZ4，并自行准备同样使用 builtin `C.UTF-8` 的 UTF-8 数据库。已有 PostgreSQL 17 部署可继续使用。设置 `MIDSTREAM_DSN` 后，普通 CLI 命令直接连接外部库，不自动启动私有实例。迁移 URL 单独设置，须指向同一数据库：
+
+```bash
 createdb -T template0 -E UTF8 --locale-provider=builtin --builtin-locale=C.UTF-8 --locale=C.UTF-8 midstream
 export MIDSTREAM_DSN="dbname=midstream"
 export MIDSTREAM_ALEMBIC_URL="postgresql+psycopg:///midstream"
-export MIDSTREAM_JISHUI_RAW="/path/to/Jishui/dataset/raw"
-export MIDSTREAM_EXPORT_ROOT="/path/to/exports"
 alembic upgrade head
 midstream stats
 ```
 
-迁移命令需在仓库根目录执行。迁移创建表和索引，不导入语料。输入语料需自行准备；入库流程读取输入文件，不改写它们。
+外部实例迁移在仓库根目录执行；`midstream init` 和 `midstream server` 专用于私有实例。已有外部库的数据不会自动迁入私有实例。
 
 ## 3. 配置部署环境
 
@@ -55,16 +95,17 @@ midstream stats
 
 | 环境变量 | 默认值或行为 | 用途与部署设置 |
 |---|---|---|
-| `MIDSTREAM_DSN` | `dbname=midstream` | CLI 的 psycopg 连接串，默认走本机连接。设为部署数据库。 |
-| `MIDSTREAM_ALEMBIC_URL` | `postgresql+psycopg:///midstream` | Alembic 的 SQLAlchemy URL。与 DSN 分开配置，须指向同一库。 |
-| `MIDSTREAM_JISHUI_RAW` | 代码内置的开发环境原始数据目录 | 使用适配器默认路径时的根目录。部署时设置自己的路径；显式 `ingest --path` 可绕过默认输入路径。 |
-| `MIDSTREAM_EXPORT_ROOT` | 代码内置的开发环境导出目录 | CLI 导出根目录。部署时设置为可写路径，数据集写到其下的配方名称目录。 |
+| `MIDSTREAM_HOME` | `~/.local/share/midstream` | 私有 PostgreSQL、数据库、socket、日志及默认导出目录的根目录。 |
+| `MIDSTREAM_DSN` | `midstream` 库，host 为 `MIDSTREAM_HOME/run` | CLI 的 psycopg 连接串。显式设置后跳过私有实例自动启动，用于外部实例或测试。 |
+| `MIDSTREAM_ALEMBIC_URL` | `midstream` 库，host 为 `MIDSTREAM_HOME/run` | Alembic 的 SQLAlchemy URL。与 DSN 分开配置；使用外部库时两者须指向同一库。 |
+| `MIDSTREAM_JISHUI_RAW` | 无默认值 | 默认输入的根目录。未设置时必须显式传入 `ingest --path`。 |
+| `MIDSTREAM_EXPORT_ROOT` | `MIDSTREAM_HOME/exports` | CLI 导出根目录，数据集写到其下的配方名称目录。 |
 | `MIDSTREAM_WORKERS` | `8` | 入库和重新处理时压缩正文的 Python 工作进程数，使用正整数。 |
 | `MIDSTREAM_CHUNK_DOCS` | `2000` | Python 流程的分块记录数，也用于查重验证批量大小，使用正整数。 |
 | `RAYON_NUM_THREADS` | Rayon 默认线程数 | Rust 查重扩展的线程数；与 `MIDSTREAM_WORKERS` 分开控制。 |
 | `MIDSTREAM_TEST_DSN` | 未设置时跳过端到端测试 | 只用于测试。必须指向专用测试库，测试会清空其 `public` schema。 |
 
-默认输入路径为：
+设置 `MIDSTREAM_JISHUI_RAW` 后，默认输入路径为：
 
 | 来源 | 相对于 `MIDSTREAM_JISHUI_RAW` 的文件 |
 |---|---|
@@ -75,10 +116,10 @@ midstream stats
 
 ## 4. 入库新来源
 
-当前已注册 `ccc_corpus` 和 `wanli`。省略 `--path` 使用上表中的默认文件；`--path` 可重复，用于一次导入同一来源的多个文件。
+当前已注册 `ccc_corpus` 和 `wanli`。只有设置 `MIDSTREAM_JISHUI_RAW` 后才能省略 `--path`，使用上表中的默认文件；`--path` 可重复，用于一次导入同一来源的多个文件。
 
 ```bash
-midstream ingest wanli
+midstream ingest wanli --path /path/to/wanli_shilu_corpus.jsonl
 midstream ingest ccc_corpus --path /path/to/corpus.jsonl
 midstream ingest wanli --path /path/to/part-1.jsonl --path /path/to/part-2.jsonl
 ```
@@ -87,7 +128,7 @@ midstream ingest wanli --path /path/to/part-1.jsonl --path /path/to/part-2.jsonl
 
 ### 查看入库结果和批次状态
 
-成功时命令打印 JSON 报告，包括 `batch_id`、`status`、`records_ok`、`records_failed`、`new_documents`、`new_versions`、`unchanged`、新增正文的 `plain_bytes` / `stored_bytes` 和 `dedup` 查重结果。字节统计只计算本批次新增到正文存储的内容，不是所有记录的正文总量。
+成功时命令打印 JSON 报告，包括 `batch_id`、`status`、`records_ok`、`records_failed`、`new_documents`、`new_versions`、`unchanged`、新增正文的 `plain_bytes` / `stored_bytes` 和 `dedup`（文档级）、`dedup_spans`（段落级）查重结果。字节统计只计算本批次新增到正文存储的内容，不是所有记录的正文总量。
 
 | 状态 | 含义 |
 |---|---|
@@ -120,10 +161,11 @@ ORDER BY record_id;
 
 ### 发布后自动查重
 
-版本发布先提交，再用独立事务查重。即使本批次没有产生新版本，成功发布后也会运行查重。若查重失败，命令抛出异常，但已发布数据保留。修复原因后执行：
+版本发布先提交，再依次用两个独立事务运行文档级和段落级查重。即使本批次没有产生新版本，成功发布后也会运行查重。若查重失败，命令抛出异常，但已发布数据保留。修复原因后执行：
 
 ```bash
 midstream dedup
+midstream dedup --spans
 ```
 
 ## 5. 查询和读取正文
@@ -176,6 +218,7 @@ midstream reprocess quality-v2 --apply
 midstream reprocess wanli-collation-v1
 midstream reprocess wanli-collation-v1 --apply
 midstream dedup
+midstream dedup --spans
 ```
 
 `--apply` 按规则处理当前版本。正文或元数据确有变化时，追加版本并将其设为当前版本，旧版本保留。只有元数据变化时复用原正文；正文变化时重新判定质量。没有变化的文档不新增版本。重新处理不会自动查重，应在导出前手动更新查重快照。
@@ -200,13 +243,13 @@ midstream dedup
 
 给新逻辑使用新的规则版本名，先运行 `midstream reprocess 新规则版本` 检查，再加 `--apply`。未知元数据继续留空；规则推导值应同时记录字段依据。
 
-## 7. 文档级查重
+## 7. 查重
 
 ```bash
 midstream dedup
 ```
 
-查重覆盖所有当前版本，不按质量状态筛选，也不删除正文或文档。返回 JSON 报告，含指纹新增数、文档数、代表数、精确组数、重复簇数、成员数、候选对数、通过验证的对数和耗时。
+`midstream dedup` 只运行文档级查重；`midstream dedup --spans` 只运行段落级查重。两者覆盖所有当前版本，不按质量状态筛选，也不删除正文或文档。文档级返回 JSON 报告，含指纹新增数、文档数、代表数、精确组数、重复簇数、成员数、候选对数、通过验证的对数和耗时。
 
 ### compare-v1 归一化
 
@@ -225,6 +268,26 @@ midstream dedup
 每次成功查重在事务中替换全部重复簇及成员，只保留最新快照；运行信息保存在 `processing_run`。旧数据集已固定到版本，不依赖旧簇。入库后自动更新快照，重新处理后需手动更新；导出不会自行刷新快照。
 
 指纹按 `(text_hash, rule_version)` 缓存，重复运行只计算当前正文中缺失的指纹。`text_fingerprint` 是 UNLOGGED 表，数据库崩溃恢复后可能被清空；再次执行 `midstream dedup` 会自动从已存正文重算缺失项，不需要重新入库。
+
+### 段落级：span-v1
+
+```bash
+midstream dedup --spans
+```
+
+段落级用于书与章节等粒度不同、文档 Jaccard 难以匹配的情况。每个 `compare_hash` 仅处理最小 `version_id` 的代表版本，归一化后不足 64 字符的跳过；精确重复的其他版本仍由文档级簇表达。
+
+复用 compare-v1 归一化，以字符 32-gram 滚动哈希和宽 32 的单调队列窗口选择最右最小值。Winnowing 保证共同片段达到 `k+w-1=63` 字符时有共同指纹；实际只保留至少 64 字符的片段。同一哈希的指纹记录超过 1,000 条时当作模板跳过，因此只含这类指纹的片段可能漏检。其余按文档对、对角线合并种子，逐字验证并向两侧扩展，哈希碰撞不会造成误报。
+
+`version_id` 较小者作为出处，较大者的片段标记为重复；这只是固定方向，不表示历史上的真实原始出处。存储在 `dup_span`，字段为 `run_id`、`version_id`、`start_char`、`end_char`、`source_version_id`、`source_start_char`。位置均为清洗后正文的 Unicode 字符偏移（Python 字符串索引），从 0 开始，区间左闭右开；边界取首末归一化字符在原文中的位置，不包含边界外的标点。片段长度阈值按归一化字符计。
+
+匹配保证归一化字符逐字相同；原文切片仍可能有繁简、标点差异。目标片段为 `text[start_char:end_char]`，出处从 `source_start_char` 开始，取相同数量的归一化字符。删除被完全覆盖的重复区间；不同出处的部分重叠区间保留，确保每条记录的整段出处都能核验，不能将它们的原文长度直接相加作为重复字符总数。
+
+指纹、种子分 256 区写到 `tempfile.mkdtemp` 创建的目录，结束或异常时删除。通常分区直接读入排序；超过 64 MiB 时按固定块排序、64 路归并，避免模板集中造成内存膨胀。正文先以压缩形式暂存，确认阶段按需解压，同一批复用；文本批次预算 256 MiB，单篇超大正文仍需容纳至少一对文档。Rust 线程由 `RAYON_NUM_THREADS` 控制，例如服务器设为 `20`。临时磁盘可用 `TMPDIR` 选择；种子数量随重复分布增长，可能远大于指纹数量。
+
+报告包括 compare-v1 新缓存数、代表数、足够长的文档数、指纹数、种子数、模板哈希数、确认匹配数、最终区间数，以及缓存、指纹、种子、确认、写入和总耗时。当前 `representatives` 只统计原文至少 64 字符的代表。每次成功运行在独立事务内 `TRUNCATE dup_span` 并通过二进制 COPY 写入最新快照，运行信息保存为 `processing_run.rule_version='span-v1'`。正文和结果行均由 Rust 解析或生成，Python 只传递 COPY 字节。
+
+段落快照与文档簇相互独立。入库自动刷新两者；重新处理后需分别手动运行两个命令。目前导出仍只使用文档级簇，不按 `dup_span` 删减正文或约束划分。
 
 ## 8. 配方导出、校验与训练登记
 
@@ -357,7 +420,7 @@ class ExampleAdapter:
     license_note = "未知"
 
     def default_paths(self) -> list[Path]:
-        return [JISHUI_RAW / "example.jsonl"]
+        return [JISHUI_RAW / "example.jsonl"] if JISHUI_RAW else []
 
     def parse(self, path: Path) -> Iterator[ParsedRecord]:
         for line_no, offset, record, error in iter_jsonl(path):
@@ -409,7 +472,7 @@ CLI 会导入 Rust 查重扩展。安装主包之外，还需在同一 Python 3.
 
 ### 查重后，为什么导出的重复文档还在？
 
-查重只写重复簇，不删除文档。导出利用簇和作品关联约束划分，不自动从簇内选代表。
+查重只写重复簇或重复片段快照，不删除文档。导出利用簇和作品关联约束划分，不自动从簇内选代表。
 
 ### 为什么原文件未变，更新解析器后仍然跳过？
 
@@ -417,7 +480,7 @@ CLI 会导入 Rust 查重扩展。安装主包之外，还需在同一 Python 3.
 
 ### 入库命令报查重失败，是否要重新入库？
 
-若已进入发布后的查重阶段，发布已提交。修复查重原因后运行 `midstream dedup` 即可；重新导入同内容文件会被跳过。其他阶段的异常需按批次状态判断，当前没有自动恢复命令。
+若已进入发布后的查重阶段，发布已提交。修复查重原因后依次运行 `midstream dedup` 和 `midstream dedup --spans` 即可；重新导入同内容文件会被跳过。其他阶段的异常需按批次状态判断，当前没有自动恢复命令。
 
 ### verify 通过，是否说明导出的文件也没问题？
 

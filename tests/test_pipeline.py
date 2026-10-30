@@ -37,6 +37,9 @@ def conn():
         for statement in SCHEMA.with_name("0002_fingerprint.sql").read_text(encoding="utf-8").split(";\n"):
             if statement.strip():
                 connection.execute(statement)
+        for statement in SCHEMA.with_name("0003_dup_span.sql").read_text(encoding="utf-8").split(";\n"):
+            if statement.strip():
+                connection.execute(statement)
         connection.commit()
         yield connection
 
@@ -232,3 +235,48 @@ def test_document_dedup(conn, tmp_path):
     assert conn.execute(
         "SELECT count(*) FROM dup_cluster WHERE run_id = %s", (first["run_id"],)
     ).fetchone()[0] == 0
+
+
+def test_span_dedup_pipeline(conn, tmp_path):
+    rng = random.Random(762)
+    shared = "，".join("".join(rng.choices("abcdefghijklmnopqrstuvwxyz", k=16)) for _ in range(8))
+    texts = ["甲" * 91 + shared + "甲" * 79,
+             "乙" * 37 + shared + "乙" * 43,
+             "乙" * 37 + shared + "乙" * 43,
+             "丙" * 150]
+    path = write(tmp_path / "spans.jsonl", [row(f"s#{i}", text) for i, text in enumerate(texts)])
+    report = ingest.ingest(conn, ADAPTERS["ccc_corpus"], [path])
+    assert report.dedup_spans["rule_version"] == "span-v1"
+    assert report.dedup_spans["representatives"] == 3
+    assert report.dedup_spans["spans"] == 1
+    versions = dict(conn.execute(
+        "SELECT d.source_key, v.version_id FROM document d"
+        " JOIN document_version v USING (doc_id) WHERE v.is_current"
+    ))
+    source, target = sorted((versions["s#0"], min(versions["s#1"], versions["s#2"])))
+    starts = {versions["s#0"]: 91, versions["s#1"]: 37, versions["s#2"]: 37}
+
+    def snapshot():
+        return conn.execute(
+            "SELECT run_id, version_id, start_char, end_char, source_version_id, source_start_char"
+            " FROM dup_span ORDER BY version_id, start_char"
+        ).fetchall()
+
+    assert snapshot() == [(report.dedup_spans["run_id"], target, starts[target],
+                           starts[target] + len(shared), source, starts[source])]
+    first_run = report.dedup_spans["run_id"]
+    second = dedup.dedup_spans(conn)
+    assert second["compare_fingerprinted"] == 0 and second["spans"] == 1
+    assert snapshot()[0][0] == second["run_id"] != first_run
+    assert conn.execute(
+        "SELECT finished_at IS NOT NULL, config->>'spans' FROM processing_run WHERE run_id = %s",
+        (second["run_id"],),
+    ).fetchone() == (True, "1")
+    # 文档查重独立运行，不覆盖段落快照。
+    dedup.dedup(conn)
+    assert snapshot()[0][0] == second["run_id"]
+    reprocess.reprocess(conn, reprocess.Rule(
+        "span-test-v1", None, lambda doc: reprocess.Change(text=str(doc["doc_id"]) * 40)
+    ))
+    assert dedup.dedup_spans(conn)["spans"] == 0
+    assert snapshot() == []

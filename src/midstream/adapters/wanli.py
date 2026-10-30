@@ -20,7 +20,7 @@ class WanliAdapter:
     license_note = "cc-by-4.0（击水清单标注，原始目录无许可证文件，待核实）"
 
     def default_paths(self) -> list[Path]:
-        return [JISHUI_RAW / "wanli-dibao-corpus/wanli_shilu_corpus.jsonl"]
+        return [JISHUI_RAW / "wanli-dibao-corpus/wanli_shilu_corpus.jsonl"] if JISHUI_RAW else []
 
     def parse(self, path: Path) -> Iterator[ParsedRecord]:
         for line_no, offset, record, error in iter_jsonl(path):

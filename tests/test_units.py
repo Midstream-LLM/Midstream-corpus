@@ -13,6 +13,20 @@ from midstream.ingest import _cleaned_metadata, _prepare
 from midstream.adapters.base import ParsedRecord
 from midstream.query import Filters, where_clause
 from midstream.rules import RULES
+from midstream.server import tuned_settings
+
+
+def test_tuned_settings():
+    settings = tuned_settings(16 * 1024 ** 3, 8)
+    assert settings["shared_buffers"] == "3276MB"
+    assert settings["effective_cache_size"] == "8192MB"
+    assert settings["maintenance_work_mem"] == "1638MB"
+    assert settings["work_mem"] == "64MB"
+    assert settings["max_parallel_workers"] == 8
+    assert settings["max_parallel_workers_per_gather"] == 4
+    assert settings["wal_compression"] == "lz4"
+    assert settings["io_method"] == "worker"
+    assert settings["listen_addresses"] == ""
 
 
 def test_codec_round_trip():
@@ -199,3 +213,105 @@ def test_dedup_recall():
         for i in range(3)
     ))
     assert run(state, blocked) == ({(1, 2)}, 3)
+
+
+def test_dedup_spans_exact_offsets(tmp_path):
+    rng = random.Random(762)
+
+    def fragment(n):
+        value = "".join(rng.choices("abcdefghijklmnopqrstuvwxyz", k=n))
+        return "，。\n".join(value[i:i + 11] for i in range(0, n, 11))
+
+    chunks = [fragment(n) for n in (64, 65, 127, 256, 63)]
+    texts = [
+        "😀！" + "A" * 91 + chunks[0] + "A" * 89 + chunks[2] + "A" * 79,
+        "B" * 33 + chunks[1] + "B" * 19 + chunks[3] + "B" * 41,
+        "C" * 37 + chunks[0] + "C" * 49 + chunks[1] + "C" * 21 + chunks[3] + "C" * 43,
+        "D" * 71 + chunks[2] + "D" * 83 + chunks[3] + "D" * 12 + chunks[0] + "D" * 71,
+        "E" * 27 + chunks[4] + "E" * 31,
+        "F" * 53 + chunks[4] + "F" * 17,
+        "G" * 63,
+        # 标点不同，仍按 compare-v1 匹配，偏移必须指向各自原文。
+        "😀H！" + chunks[0].replace("，。\n", "；") + "H",
+    ]
+    overlap = fragment(180)
+    offsets = [i for i, c in enumerate(overlap) if c.isascii() and c.isalnum()]
+    texts.extend(("I" * 30 + overlap[:offsets[99] + 1] + "I" * 11,
+                  "J" * 50 + overlap[offsets[80]:] + "J" * 27,
+                  "K" * 15 + overlap + "K" * 11))
+    header = midstream_dedup.Deduper.copy_header()
+
+    def encode(rows):
+        return header + b"".join(
+            struct.pack("!h", len(row)) + b"".join(struct.pack("!i", len(f)) + f for f in row)
+            for row in rows
+        ) + b"\xff\xff"
+
+    def decode(data):
+        pos = 19
+        while struct.unpack_from("!h", data, pos)[0] != -1:
+            fields = []
+            pos += 2
+            for _ in range(6):
+                size = struct.unpack_from("!i", data, pos)[0]
+                pos += 4
+                fields.append(int.from_bytes(data[pos:pos + size], "big"))
+                pos += size
+            yield fields
+
+    def normalized(text):
+        return "".join(c for c in text if c.isascii() and c.isalnum())
+
+    # 独立逐条对角线扫描原文字符，建立所有 >=64 字匹配的覆盖真值。
+    positions = [[i for i, c in enumerate(t) if c.isascii() and c.isalnum()] for t in texts]
+    normalized_texts = [normalized(t) for t in texts]
+    expected = [set() for _ in texts]
+    for a, b in combinations(range(len(texts)), 2):
+        left, right = normalized_texts[a], normalized_texts[b]
+        for diagonal in range(1 - len(right), len(left)):
+            i, j = max(diagonal, 0), max(-diagonal, 0)
+            start = j
+            while i < len(left) and j < len(right):
+                if left[i] != right[j]:
+                    if j - start >= 64:
+                        expected[b].update(range(positions[b][start], positions[b][j - 1] + 1))
+                    start = j + 1
+                i += 1
+                j += 1
+            if j - start >= 64:
+                expected[b].update(range(positions[b][start], positions[b][j - 1] + 1))
+
+    state = midstream_dedup.SpanDeduper(str(tmp_path))
+    data = encode((struct.pack("!q", i + 100), textcodec.compress(t)) for i, t in enumerate(texts))
+    for i in range(0, len(data), 137):
+        state.fingerprints(data[i:i + 137])
+    assert state.counts()[:2] == (len(texts), len(texts) - 1)
+    assert state.seeds()[0] > 0
+    matches, spans = state.verify()
+    output = bytearray(header)
+    while block := state.next_output(42):
+        output.extend(block)
+    output.extend(b"\xff\xff")
+    found = [set() for _ in texts]
+    rows = list(decode(output))
+    assert matches >= spans == len(rows) > 0
+    assert len({(v, start) for _, v, start, _, _, _ in rows}) == len(rows)
+    for run, version, start, end, source, source_start in rows:
+        a, b = source - 100, version - 100
+        assert run == 42 and a < b
+        raw = texts[b][start:end]
+        value = normalized(raw)
+        assert len(value) >= 64
+        source_positions = [p for p in positions[a] if p >= source_start]
+        source_end = source_positions[len(value) - 1] + 1
+        original = texts[a][source_start:source_end]
+        assert value == normalized(original)  # 每一条均逐字核验，无哈希误报。
+        if b != 7:
+            assert raw == original  # 含标点的原文切片和偏移也完全一致。
+        found[b].update(range(start, end))
+    assert found == expected
+    for b, indices in ((2, (0, 1, 3)), (3, (0, 2, 3))):
+        for i in indices:
+            start = texts[b].index(chunks[i])
+            assert set(range(start, start + len(chunks[i]))) <= found[b]
+    assert not found[4] and not found[5] and not found[6]

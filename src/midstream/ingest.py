@@ -39,6 +39,7 @@ class IngestReport:
     plain_bytes: int
     stored_bytes: int
     dedup: dict | None = None
+    dedup_spans: dict | None = None
 
 
 def _sha256_file(path: Path) -> bytes:
@@ -326,6 +327,8 @@ def publish(conn: psycopg.Connection, batch_id: int, pool: ProcessPoolExecutor) 
         raise IngestError(f"批次 {batch_id} 状态为 {status}，不能发布")
 
     plain_bytes, stored_bytes = _write_blobs(conn, batch_id, pool)
+    # 大批量写入后统计信息过期，规划器会选出近似平方复杂度的计划
+    conn.execute(f"ANALYZE source_record, document, staging_text_b{int(batch_id)}")
     parse_run = _run_id(conn, batch_id, "parse")
     clean_run = _run_id(conn, batch_id, "clean")
 
@@ -353,6 +356,7 @@ def publish(conn: psycopg.Connection, batch_id: int, pool: ProcessPoolExecutor) 
            ON CONFLICT (source_id, source_key) DO NOTHING""",
         (source_id, batch_id),
     ).rowcount
+    conn.execute("ANALYZE document, changed")
     conn.execute(
         """UPDATE source_record r SET doc_id = d.doc_id
            FROM document d
@@ -378,6 +382,7 @@ def publish(conn: psycopg.Connection, batch_id: int, pool: ProcessPoolExecutor) 
                 FROM document_version v WHERE v.doc_id = d.doc_id
             ) h ON true"""
     )
+    conn.execute("ANALYZE publishing")
     conn.execute("UPDATE document_version v SET is_current = false FROM publishing p"
                  " WHERE v.version_id = p.current_id")
     decoded = conn.execute(
@@ -455,4 +460,6 @@ def ingest(conn: psycopg.Connection, adapter: Adapter, paths: list[Path]) -> Ing
     context = multiprocessing.get_context("spawn")
     with ProcessPoolExecutor(max_workers=WORKERS, mp_context=context) as pool:
         report = publish(conn, batch_id, pool)
-    return replace(report, dedup=dedup.dedup(conn))
+    document_report = dedup.dedup(conn)
+    span_report = dedup.dedup_spans(conn)
+    return replace(report, dedup=document_report, dedup_spans=span_report)

@@ -32,7 +32,7 @@ class CccCorpusAdapter:
     license_note = "cc0-1.0（数据集 README 声明）"
 
     def default_paths(self) -> list[Path]:
-        return [JISHUI_RAW / "chinese-classical-corpus/corpus.jsonl"]
+        return [JISHUI_RAW / "chinese-classical-corpus/corpus.jsonl"] if JISHUI_RAW else []
 
     def parse(self, path: Path) -> Iterator[ParsedRecord]:
         for line_no, offset, record, error in iter_jsonl(path):
