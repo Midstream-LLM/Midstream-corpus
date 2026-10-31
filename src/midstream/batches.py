@@ -74,7 +74,7 @@ def inspect(conn: psycopg.Connection, batch_id: int) -> dict:
 
 
 def list_batches(conn: psycopg.Connection, *, limit: int = 50,
-                 include_published: bool = False) -> list[dict]:
+                 include_published: bool = False, before: int | None = None) -> list[dict]:
     if not 1 <= limit <= 1000:
         raise ManagementError("invalid_input", "limit 必须在 1 到 1000 之间")
     rows = conn.execute(
@@ -82,7 +82,8 @@ def list_batches(conn: psycopg.Connection, *, limit: int = 50,
         " (SELECT count(*) FROM raw_object o WHERE o.batch_id = b.batch_id)"
         " FROM source_batch b JOIN source s USING (source_id)"
         " WHERE (%s OR b.status <> 'published')"
-        " ORDER BY b.batch_id DESC LIMIT %s", (include_published, limit),
+        " AND (%s::bigint IS NULL OR b.batch_id < %s)"
+        " ORDER BY b.batch_id DESC LIMIT %s", (include_published, before, before, limit),
     ).fetchall()
     keys = ("batch_id", "source", "status", "received_at", "published_at", "raw_objects")
     return [dict(zip(keys, row)) for row in rows]
@@ -90,7 +91,12 @@ def list_batches(conn: psycopg.Connection, *, limit: int = 50,
 
 def _verify_inputs(conn: psycopg.Connection, batch_id: int, source: str,
                    parser_version: str) -> tuple:
-    adapter = ADAPTERS.get(source)
+    plan = conn.execute("SELECT import_plan FROM source_batch WHERE batch_id = %s", (batch_id,)).fetchone()[0]
+    if plan is not None:
+        from .adapters.mapped import MappedAdapter
+        adapter = MappedAdapter(source, plan)
+    else:
+        adapter = ADAPTERS.get(source)
     if adapter is None or adapter.parser_version != parser_version:
         raise ManagementError("not_recoverable", "来源适配器缺失或解析器版本与登记时不同")
     rows = conn.execute(

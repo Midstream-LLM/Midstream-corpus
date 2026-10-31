@@ -19,6 +19,8 @@ class Filters:
     include_unknown_years: bool = False
     quality: list[str] = field(default_factory=lambda: ["ok", "flagged"])
     min_chars: int | None = None
+    composed_label: str | None = None
+    only_unknown_years: bool = False
 
     @classmethod
     def from_dict(cls, data: dict) -> "Filters":
@@ -48,6 +50,11 @@ def where_clause(filters: Filters) -> tuple[str, dict]:
     if filters.category:
         clauses.append("v.category = %(category)s")
         params["category"] = filters.category
+    if filters.composed_label:
+        clauses.append("v.composed_label = %(composed_label)s")
+        params["composed_label"] = filters.composed_label
+    if filters.only_unknown_years:
+        clauses.append("v.composed_years IS NULL")
     if filters.min_chars is not None:
         clauses.append("v.char_count >= %(min_chars)s")
         params["min_chars"] = filters.min_chars
@@ -104,7 +111,7 @@ def stats(conn: psycopg.Connection) -> dict:
                   count(*) FILTER (WHERE v.is_current AND v.quality_status = 'ok'),
                   count(*) FILTER (WHERE v.is_current AND v.quality_status = 'flagged'),
                   count(*) FILTER (WHERE v.is_current AND v.composed_years IS NOT NULL),
-                  count(*)
+                  count(v.version_id)
            FROM source s
            LEFT JOIN document d USING (source_id)
            LEFT JOIN document_version v USING (doc_id)
@@ -126,3 +133,109 @@ def stats(conn: psycopg.Connection) -> dict:
         "blob_table_bytes": blob[3],
         "database_bytes": blob[4],
     }
+
+
+def metadata(conn: psycopg.Connection, doc_id: int, version_no: int | None = None) -> dict | None:
+    """完整元数据与出处，不读取或解压正文。来源记录标明各自批次。"""
+    condition = "v.version_no = %(version)s" if version_no is not None else "v.is_current"
+    row = conn.execute(
+        "SELECT to_jsonb(v), to_jsonb(d), s.name, r.kind, r.rule_version, r.batch_id"
+        " FROM document_version v JOIN document d USING (doc_id)"
+        " JOIN source s USING (source_id) JOIN processing_run r USING (run_id)"
+        f" WHERE v.doc_id = %(doc)s AND {condition}",
+        {"doc": doc_id, "version": version_no},
+    ).fetchone()
+    if row is None:
+        return None
+    records = conn.execute(
+        "SELECT sr.record_id, sr.batch_id, sr.locator, sr.raw_fields, ro.path,"
+        " encode(ro.sha256, 'hex'), ro.size_bytes FROM source_record sr"
+        " LEFT JOIN raw_object ro USING (raw_id) WHERE sr.doc_id = %s"
+        " ORDER BY sr.record_id DESC LIMIT 20", (doc_id,),
+    ).fetchall()
+    keys = ('record_id', 'batch_id', 'locator', 'raw_fields', 'path', 'sha256', 'size_bytes')
+    return {**row[0], "document": row[1], "source": row[2],
+            "processing": {"kind": row[3], "rule_version": row[4], "batch_id": row[5]},
+            "source_records": [dict(zip(keys, record)) for record in records]}
+
+
+def overview(conn: psycopg.Connection) -> dict:
+    result = stats(conn)
+    row = conn.execute("SELECT count(*), coalesce(sum(char_count),0),"
+                       " count(*) FILTER (WHERE quality_status='quarantined')"
+                       " FROM document_version WHERE is_current").fetchone()
+    result['current'] = {"documents": row[0], "characters": int(row[1]), "quarantined": row[2]}
+    result['categories'] = [{"name": name, "documents": n, "characters": int(chars)}
+        for name, n, chars in conn.execute(
+            "SELECT category, count(*), sum(char_count) FROM document_version WHERE is_current"
+            " GROUP BY category ORDER BY count(*) DESC, category NULLS LAST")]
+    result['batch_statuses'] = dict(conn.execute("SELECT status,count(*) FROM source_batch GROUP BY status"))
+    result['releases'] = [{"release_id": rid, "name": name, "char_count": total,
+                           "train": train, "val": val, "test": test, "created_at": created}
+        for rid, name, total, train, val, test, created in conn.execute(
+            "SELECT release_id,name,char_count,train_char_count,val_char_count,test_char_count,created_at"
+            " FROM dataset_release ORDER BY release_id DESC LIMIT 50")]
+    return result
+
+
+def year_options(conn: psycopg.Connection) -> dict:
+    labels = [row[0] for row in conn.execute(
+        "SELECT DISTINCT composed_label FROM document_version WHERE is_current"
+        " AND composed_label IS NOT NULL ORDER BY composed_label")]
+    return {'labels': labels}
+
+
+def year_distribution(conn: psycopg.Connection, granularity: str = 'century',
+                      year_from: int | None = None, year_to: int | None = None) -> dict:
+    """时代标签按原记录分组；年份分桶按区间相交计数，跨桶文档可能多次出现。"""
+    total, unknown, open_ranges, low, high = conn.execute(
+        "SELECT count(*), count(*) FILTER (WHERE composed_years IS NULL),"
+        " count(*) FILTER (WHERE composed_years IS NOT NULL AND"
+        " (lower_inf(composed_years) OR upper_inf(composed_years))),"
+        " min(coalesce(lower(composed_years),upper(composed_years)-1)),"
+        " max(coalesce(upper(composed_years)-1,lower(composed_years)))"
+        " FROM document_version WHERE is_current").fetchone()
+    result = {'granularity': granularity, 'total': total, 'unknown_years': unknown,
+              'open_ranges': open_ranges, 'known_years': total-unknown}
+    if granularity == 'dynasty':
+        result['items'] = [{'label': label or '时代标签未记录', 'documents': n, 'characters': int(chars)}
+            for label, n, chars in conn.execute(
+                "SELECT composed_label,count(*),coalesce(sum(char_count),0) FROM document_version"
+                " WHERE is_current GROUP BY composed_label"
+                " ORDER BY min(lower(composed_years)) NULLS LAST, composed_label NULLS LAST")]
+        result['overlapping'] = False
+        return result
+    width = {'century': 100, 'year': 1}[granularity]
+    if low is None or high is None:
+        result.update(items=[], overlapping=True, year_from=None, year_to=None, windowed=False)
+        return result
+    end = high if year_to is None else year_to
+    start = low if year_from is None else year_from
+    index = lambda y: (y-1)//width if y > 0 else y//width
+    # 默认最多展示最近 100 桶；手动指定宽区间则要求用户调整粒度。
+    windowed = False
+    if year_from is None and year_to is None and index(end)-index(start) >= 100:
+        first = index(end)-99
+        start = first*width+(1 if first >= 0 else 0)
+        windowed = True
+    if start > end or index(end)-index(start) >= 500:
+        raise ValueError('年份区间无效或超过500栏，请缩小区间或选择世纪粒度')
+    starts, ends, labels = [], [], []
+    for bucket in range(index(start), index(end)+1):
+        left = bucket*width+(1 if bucket >= 0 else 0)
+        right = (bucket+1)*width-(1 if bucket < 0 else 0)
+        left, right = max(start,left), min(end,right)
+        starts.append(left)
+        ends.append(right)
+        labels.append((f'公元前{-bucket}世纪' if bucket < 0 else f'{bucket+1}世纪') if width==100
+                      else (f'公元前{-left}年' if left<0 else f'{left}年'))
+    rows = conn.execute(
+        "SELECT b.lo,b.hi,count(v.version_id),coalesce(sum(v.char_count),0)"
+        " FROM unnest(%s::int[],%s::int[]) AS b(lo,hi) LEFT JOIN document_version v"
+        " ON v.is_current AND v.composed_years && int4range(b.lo,b.hi,'[]')"
+        " GROUP BY b.lo,b.hi ORDER BY b.lo", (starts, ends)).fetchall()
+    result.update(items=[{'label': label, 'year_from': lo, 'year_to': hi,
+                          'documents': n, 'characters': int(chars)}
+                         for label,(lo,hi,n,chars) in zip(labels,rows)],
+                  overlapping=True, year_from=start, year_to=end, windowed=windowed)
+    return result

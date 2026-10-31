@@ -1,28 +1,86 @@
-import React, {useEffect, useState} from 'react';
-import {createRoot} from 'react-dom/client';
-import './style.css';
-
-type Row = {doc_id:number;title:string|null;authors:string[]|null;source:string;composed_label:string|null;category:string|null;genre:string|null;char_count:number;quality_status:string;version_no:number};
-type Version = {version_id:number;version_no:number;is_current:boolean;created_at:string};
-type Document = {doc_id:number;title:string|null;authors:string[]|null;composed_label:string|null;category:string|null;quality_status:string;quality_flags:string[];version_no:number;text:string;char_count:number;next_offset:number|null;offset:number};
-async function api<T>(path:string, signal?:AbortSignal):Promise<T> {const r=await fetch('/api/v1/'+path,{signal}); if(!r.ok){const e=await r.json().catch(()=>({}));throw new Error(typeof e.detail==='string'?e.detail:`请求失败 (${r.status})`)} return r.json()}
-const quality:Record<string,string>={ok:'正常',flagged:'待复核',quarantined:'已隔离'};
-const count=(n:number)=>n.toLocaleString('zh-CN');
-function App(){
- const [sources,setSources]=useState<{name:string}[]>([]),[filters,setFilters]=useState<Record<string,string>>({}),[applied,setApplied]=useState<Record<string,string>>({});
- const [rows,setRows]=useState<Row[]>([]),[cursor,setCursor]=useState(0),[history,setHistory]=useState<number[]>([]),[next,setNext]=useState<number|null>(null);
- const [selected,setSelected]=useState<number|null>(null),[versions,setVersions]=useState<Version[]>([]),[version,setVersion]=useState<number|null>(null),[offset,setOffset]=useState(0),[doc,setDoc]=useState<Document|null>(null);
- const [loading,setLoading]=useState(false),[reading,setReading]=useState(false),[error,setError]=useState(''),[detailError,setDetailError]=useState(''),[reload,setReload]=useState(0);
- useEffect(()=>{const c=new AbortController();api<{name:string}[]>('sources',c.signal).then(setSources).catch(()=>{});return()=>c.abort()},[reload]);
- useEffect(()=>{const c=new AbortController();setLoading(true);setError('');const p=new URLSearchParams({...applied,after:String(cursor)});api<{items:Row[];next_cursor:number|null}>('documents?'+p,c.signal).then(r=>{setRows(r.items);setNext(r.next_cursor)}).catch(e=>{if(!c.signal.aborted)setError(e.message)}).finally(()=>{if(!c.signal.aborted)setLoading(false)});return()=>c.abort()},[applied,cursor,reload]);
- useEffect(()=>{if(selected===null)return;const c=new AbortController();setVersions([]);api<Version[]>(`documents/${selected}/versions`,c.signal).then(setVersions).catch(e=>{if(!c.signal.aborted)setDetailError(e.message)});return()=>c.abort()},[selected]);
- useEffect(()=>{if(selected===null)return;const c=new AbortController();setReading(true);setDetailError('');setDoc(null);const p=new URLSearchParams({offset:String(offset)});if(version)p.set('version',String(version));api<Document>(`documents/${selected}?${p}`,c.signal).then(setDoc).catch(e=>{if(!c.signal.aborted)setDetailError(e.message)}).finally(()=>{if(!c.signal.aborted)setReading(false)});return()=>c.abort()},[selected,version,offset,reload]);
- function open(id:number){setSelected(id);setVersion(null);setOffset(0)}
- function filter(name:string,value:string){setFilters(f=>({...f,[name]:value}))}
- return <div className="app"><aside className="sidebar"><div className="brand"><span className="seal">中</span><div>中流语料库<small>MIDSTREAM CORPUS</small></div></div><div className="nav-title">工作空间</div><div className="nav active">▤ <span>语料浏览</span><span className="dot"/></div><div className="side-note">文本有出处<br/>版本可追溯</div><footer>中流 · 击水<br/><span>语料管理与存储</span></footer></aside>
- <main><header><div className="breadcrumb">工作空间 <span>/</span> 语料浏览</div><span className="label">CORPUS EXPLORER</span></header><section className="heading"><div><div className="eyebrow">文献 · 版本 · 来源</div><h1>浏览语料</h1><p>从来源与元数据出发，阅读每一份文本的历史。</p></div><button className="subtle" onClick={()=>setReload(x=>x+1)}>↻ 刷新</button></section>
- <form className="filters" onSubmit={e=>{e.preventDefault();setCursor(0);setHistory([]);setApplied(Object.fromEntries(Object.entries(filters).filter(([,v])=>v!=='')))}}><div className="filter-top"><label className="search"><span>⌕</span><input aria-label="标题前缀" placeholder="按标题前缀查找文献…" value={filters.title||''} onChange={e=>filter('title',e.target.value)}/></label><button className="primary">查询语料</button></div><div className="filter-grid"><label>来源<select value={filters.source||''} onChange={e=>filter('source',e.target.value)}><option value="">全部来源</option>{sources.map(s=><option key={s.name}>{s.name}</option>)}</select></label><label>作者<input placeholder="完整作者名" value={filters.author||''} onChange={e=>filter('author',e.target.value)}/></label><label>部类<input placeholder="如：史" value={filters.category||''} onChange={e=>filter('category',e.target.value)}/></label><label>质量<select value={filters.quality||''} onChange={e=>filter('quality',e.target.value)}><option value="">全部状态</option>{Object.entries(quality).map(([k,v])=><option key={k} value={k}>{v}</option>)}</select></label><label>成书年份起<input type="number" placeholder="不限" value={filters.year_from||''} onChange={e=>filter('year_from',e.target.value)}/></label><label>至<input type="number" placeholder="不限" value={filters.year_to||''} onChange={e=>filter('year_to',e.target.value)}/></label></div></form>
- <div className="workspace"><section className="catalog"><div className="panel-heading"><h2>文献目录</h2><span>{loading?'正在查询…':`本页 ${rows.length} 篇`}</span></div>{error?<div role="alert" className="empty error">{error}<button onClick={()=>setReload(x=>x+1)}>重试</button></div>:loading?<div className="empty" role="status">正在读取目录…</div>:rows.length===0?<div className="empty">暂无符合条件的语料<p>试试调整筛选条件，或先通过 CLI 导入来源。</p></div>:<div className="table-scroll"><table><thead><tr><th>篇名 / 作者</th><th>来源 / 部类</th><th>字符数</th><th>状态</th></tr></thead><tbody>{rows.map(r=><tr key={r.doc_id} className={selected===r.doc_id?'selected':''}><td><button className="title" onClick={()=>open(r.doc_id)}>{r.title||'未题名'}</button><small>{r.authors?.join('、')||'作者未知'} <span>·</span> {r.composed_label||'年代未知'}</small></td><td>{r.source}<small>{r.category||'未分类'} · v{r.version_no}</small></td><td className="numeric">{count(r.char_count)}</td><td><span className={'badge '+r.quality_status}>{quality[r.quality_status]||r.quality_status}</span></td></tr>)}</tbody></table></div>}<div className="pagination"><span>按文档编号排序</span><div><button disabled={!history.length||loading} onClick={()=>{setCursor(history[history.length-1]);setHistory(history.slice(0,-1))}}>上一页</button><button disabled={next===null||loading||!!error} onClick={()=>{setHistory([...history,cursor]);setCursor(next!)}}>下一页 →</button></div></div></section>
- <section className="reader" aria-label="文档详情"><div className="panel-heading"><h2>文档详情</h2>{selected!==null&&<button className="subtle" onClick={()=>setSelected(null)}>关闭</button>}</div>{selected===null?<div className="reader-empty"><div className="book">冊</div><h3>选择一篇文献</h3><p>阅读正文、查看元数据<br/>与不同处理阶段的版本。</p></div>:<><div className="version-bar"><label>版本 <select value={version||''} onChange={e=>{setVersion(e.target.value?Number(e.target.value):null);setOffset(0)}}><option value="">当前版本</option>{versions.map(v=><option key={v.version_id} value={v.version_no}>v{v.version_no}{v.is_current?' · 当前':''}</option>)}</select></label><span>文档 #{selected}</span></div>{reading?<div className="empty" role="status">正在读取正文…</div>:detailError?<div className="empty error" role="alert">{detailError}</div>:doc&&<><div className="doc-heading"><span className={'badge '+doc.quality_status}>{quality[doc.quality_status]}</span><h2>{doc.title||'未题名'}</h2><p>{doc.authors?.join('、')||'作者未知'} · {doc.composed_label||'年代未知'}</p><div className="doc-meta"><span>{count(doc.char_count)} 字符</span><span>版本 v{doc.version_no}</span><span>{doc.category||'部类未知'}</span></div>{doc.quality_flags.length>0&&<div className="flags">{doc.quality_flags.join(' · ')}</div>}</div><pre className="text">{doc.text}</pre><div className="pagination"><span>字符 {count(offset)} 起</span><div><button disabled={offset===0} onClick={()=>setOffset(Math.max(0,offset-10000))}>前段</button><button disabled={doc.next_offset===null} onClick={()=>setOffset(doc.next_offset!)}>后段</button></div></div></>}</>}</section></div><div className="bottom-note">保留原文形态 · 空白、标点与异体字均按版本呈现</div></main></div>
+import React, { useState } from "react";
+import { createRoot } from "react-dom/client";
+import Corpus from "./Corpus";
+import Stats from "./Stats";
+import Batches from "./Batches";
+import "./style.css";
+function App() {
+  const [page, setPage] = useState("corpus");
+  const names: Record<string, string> = {
+    stats: "统计概览",
+    corpus: "语料浏览",
+    review: "人工审核",
+    batches: "批次管理",
+  };
+  return (
+    <div className="app">
+      <aside className="sidebar">
+        <div className="brand">
+          <span className="seal">中</span>
+          <div>
+            中流语料库<small>MIDSTREAM CORPUS</small>
+          </div>
+        </div>
+        <div className="nav-title">工作空间</div>
+        <nav aria-label="主要导航">
+          {Object.entries(names).map(([k, v]) => (
+            <button
+              className={"nav " + (page === k ? "active" : "")}
+              key={k}
+              onClick={() => setPage(k)}
+              aria-current={page === k ? "page" : undefined}
+            >
+              <span>{k === "stats" ? "◫" : k === "batches" ? "▦" : "▤"}</span>
+              <span>{v}</span>
+              {page === k && <span className="dot" />}
+            </button>
+          ))}
+        </nav>
+        <div className="side-note">
+          文本有出处
+          <br />
+          版本可追溯
+        </div>
+        <footer>
+          中流 · 击水
+          <br />
+          <span>语料管理与存储</span>
+        </footer>
+      </aside>
+      <main>
+        <header>
+          <div className="breadcrumb">
+            工作空间 <span>/</span> {names[page]}
+          </div>
+          <span className="label">MIDSTREAM CORPUS</span>
+        </header>
+        <div className="mobile-nav">
+          {Object.entries(names).map(([k, v]) => (
+            <button
+              key={k}
+              onClick={() => setPage(k)}
+              className={page === k ? "chosen" : ""}
+            >
+              {v}
+            </button>
+          ))}
+        </div>
+        {page === "stats" ? (
+          <Stats />
+        ) : page === "batches" ? (
+          <Batches />
+        ) : (
+          <Corpus key={page} review={page === "review"} />
+        )}
+        <div className="bottom-note">
+          保留原文形态 · 元数据修改生成新版本并留下依据
+        </div>
+      </main>
+    </div>
+  );
 }
-createRoot(document.getElementById('root')!).render(<React.StrictMode><App/></React.StrictMode>);
+createRoot(document.getElementById("root")!).render(
+  <React.StrictMode>
+    <App />
+  </React.StrictMode>,
+);

@@ -18,7 +18,7 @@
 
 ## Web app
 
-第一版支持语料筛选、分页、正文阅读和历史版本切换。React 客户端与 FastAPI 后端分离，未来 SwiftUI 可复用 HTTP API。运行方式见 [Web app 说明](docs/webapp.md)。
+Web app 支持元数据优先的文档查看、年代筛选与统计、人工审核、批次管理、正文阅读和历史版本切换。React 客户端与 FastAPI 后端分离，未来 SwiftUI 可复用 HTTP API。运行方式见 [Web app 说明](docs/webapp.md)。
 
 ## 快速开始
 
@@ -102,3 +102,7 @@ midstream dedup --full   # 忽略缓存，强制完整重算文档级查重
 项目代码采用 [GPL-3.0](LICENSE)。`rust/data/` 下的 OpenCC 数据采用 Apache-2.0，见 [rust/data/LICENSE-OpenCC](rust/data/LICENSE-OpenCC)。
 
 构建脚本使用的 [PostgreSQL](https://www.postgresql.org/about/licence/) 和 [pg_bigm](https://github.com/pgbigm/pg_bigm/tree/v1.2-20250903) 采用 PostgreSQL License，[LZ4 库](https://github.com/lz4/lz4/blob/v1.10.0/lib/LICENSE)采用 BSD-2-Clause，均与 GPL-3.0 兼容。
+
+Web 批次管理支持新建入库：选择来源适配器、预览后端本地文件、确认登记，再继续处理与发布。使用范围与路径要求见 [Web 说明](docs/webapp.md)。
+
+入库支持已有来源规则识别，以及复用 LLM 服务分析未知格式的字段映射建议；确认后的 TXT、JSON/JSONL、Parquet 和行文本映射随批次保存。需升级迁移 `0008`，覆盖范围和限制见 [Web 说明](docs/webapp.md#格式识别与智能映射)。

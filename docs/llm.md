@@ -146,3 +146,5 @@ midstream llm stream --profile default --input request.json
 测试使用 HTTPX MockTransport 和合成响应，验证四种协议的请求、认证、结果解析、原生字段、SSE、错误与重试、受限并发、逐条失败以及 CLI。尚未使用真实 key 调用 DeepSeek，真实接入的兼容性需另外联调。
 
 HTTPX 是共用 HTTP 客户端，采用 [BSD-3-Clause](https://github.com/encode/httpx/blob/0.28.1/LICENSE.md)，与本项目 GPL-3.0 兼容。模块不引入独立数据库任务系统。
+
+格式识别用途服务 `LLMServices.identify_import(sample, profile=...)` 复用共用接入配置；可设置 `[services] import_detection = "default"`。它返回声明式字段映射建议或无法识别，不执行代码、不猜测书目常量。Web 仅在用户选择 LLM 识别时发送未知文件的有限样本，规则识别不调用模型。模拟 API 已覆盖合法建议和物理格式篡改拒绝，未使用真实 key 联调。

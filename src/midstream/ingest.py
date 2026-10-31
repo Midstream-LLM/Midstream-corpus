@@ -83,7 +83,7 @@ def _ensure_source(conn: psycopg.Connection, adapter: Adapter) -> int:
     ).fetchone()[0]
 
 
-def register_batch(conn: psycopg.Connection, adapter: Adapter, paths: list[Path]) -> int:
+def register_batch(conn: psycopg.Connection, adapter: Adapter, paths: list[Path], *, commit: bool = True) -> int:
     source_id = _ensure_source(conn, adapter)
     hashes = [(path, _sha256_file(path), path.stat().st_size) for path in paths]
     duplicate = conn.execute(
@@ -104,7 +104,8 @@ def register_batch(conn: psycopg.Connection, adapter: Adapter, paths: list[Path]
             "INSERT INTO raw_object (batch_id, path, sha256, size_bytes) VALUES (%s, %s, %s, %s)",
             (batch_id, str(path), digest, size),
         )
-    conn.commit()
+    if commit:
+        conn.commit()
     return batch_id
 
 

@@ -50,6 +50,7 @@ def conn():
         connection.execute(SCHEMA.with_name("0005_release_char_count.sql").read_text(encoding="utf-8"))
         connection.execute(SCHEMA.with_name("0006_incremental_dedup.sql").read_text(encoding="utf-8"))
         connection.execute(SCHEMA.with_name("0007_manual_batch.sql").read_text(encoding="utf-8"))
+        connection.execute(SCHEMA.with_name("0008_import_plan.sql").read_text(encoding="utf-8"))
         connection.commit()
         yield connection
 
@@ -742,3 +743,123 @@ def test_web_api_real_versions(conn, tmp_path):
         assert versions[0]['is_current']
         assert '\r\n' in client.get(f'/api/v1/documents/{doc}?version=1').json()['text']
         assert '\r' not in client.get(f'/api/v1/documents/{doc}?version=2').json()['text']
+
+
+def test_web_metadata_stats_review_and_batches(conn, tmp_path, monkeypatch):
+    from fastapi.testclient import TestClient
+    from midstream.api import create_app, connection, write_connection
+    from midstream import textcodec
+    path = write(tmp_path / 'meta-web.jsonl', [row('web-review', '甲篇正文。')])
+    ingest.ingest(conn, ADAPTERS['ccc_corpus'], [path])
+    conn.execute("INSERT INTO source (name) VALUES ('empty_fixture')")
+    conn.commit()
+    release = export.create_release(conn, export.Recipe.load({
+        'name':'web-stats-fixture','seed':'s','splits':{'train':1.0}}))
+    app = create_app()
+    app.dependency_overrides[connection] = lambda: conn
+    app.dependency_overrides[write_connection] = lambda: conn
+    client = TestClient(app)
+    headers = {'X-Midstream-Action':'1','Origin':'http://testserver'}
+    doc = client.get('/api/v1/documents').json()['items'][0]['doc_id']
+    def no_text(*args):
+        raise AssertionError('Metadata requests must not decompress text')
+    with monkeypatch.context() as patch:
+        patch.setattr(textcodec, 'decompress', no_text)
+        metadata = client.get(f'/api/v1/documents/{doc}/metadata').json()
+    assert 'text' not in metadata and metadata['source'] == 'ccc_corpus'
+    assert metadata['document']['source_key'] == 'web-review'
+    assert metadata['source_records'][0]['path'] == str(path)
+    assert metadata['processing']['batch_id'] is not None
+    stats = client.get('/api/v1/stats').json()
+    assert stats['current'] == {'documents':1,'characters':len('甲篇正文。'),'quarantined':0}
+    assert next(s for s in stats['sources'] if s['source']=='empty_fixture')['versions'] == 0
+    assert stats['releases'][0]['release_id'] == release
+    payload = {'actor':'fixture reviewer','reason':'correct title','expected_version_id':metadata['version_id'],
+               'metadata':{'title':'已核对标题','quality_status':'flagged','quality_flags':['manual_check']}}
+    saved = client.post(f'/api/v1/documents/{doc}/review',json=payload,headers=headers)
+    assert saved.status_code == 200 and saved.json()['version_no'] == 3
+    assert client.post(f'/api/v1/documents/{doc}/review',json=payload,headers=headers).status_code == 409
+    old = client.get(f'/api/v1/documents/{doc}/metadata?version=2').json()
+    current = client.get(f'/api/v1/documents/{doc}/metadata').json()
+    assert old['title'] == metadata['title'] and current['title'] == '已核对标题'
+    assert current['field_basis']['title'] == 'human'
+    assert export.release_stats(conn,release)['char_count'] == stats['releases'][0]['char_count']
+    invalid = {**payload,'expected_version_id':current['version_id'],'metadata':{'composed_years':'bad range'}}
+    assert client.post(f'/api/v1/documents/{doc}/review',json=invalid,headers=headers).status_code == 422
+    assert client.get(f'/api/v1/documents/{doc}/metadata').json()['version_id'] == current['version_id']
+    work = client.get(f'/api/v1/documents/{doc}/works').json()[0]
+    decision = {k:work[k] for k in ('work_id','relation')}
+    decision.update(decision='rejected',expected_status=work['status'],actor='fixture reviewer',reason='wrong work')
+    assert client.post(f'/api/v1/documents/{doc}/works/review',json=decision,headers=headers).status_code == 200
+    events = client.get(f'/api/v1/events?doc_id={doc}').json()
+    assert len(events) == 2 and events[0]['action']=='work_review'
+    new = write(tmp_path / 'resume-web.jsonl',[row('new-web','乙篇正文。')])
+    batch = ingest.register_batch(conn,ADAPTERS['ccc_corpus'],[new])
+    assert client.get(f'/api/v1/batches/{batch}').json()['status']=='received'
+    operation={'actor':'fixture reviewer','reason':'continue checked source'}
+    resumed=client.post(f'/api/v1/batches/{batch}/resume',json=operation,headers=headers)
+    assert resumed.status_code==200 and resumed.json()['status']=='published'
+    assert client.post(f'/api/v1/batches/{batch}/resume',json=operation,headers=headers).json()['status']=='already_published'
+    assert client.post(f'/api/v1/batches/{batch}/abandon',json=operation,headers=headers).status_code==409
+    unused=write(tmp_path/'abandon-web.jsonl',[row('abandon-web','丙篇正文。')])
+    abandoned=ingest.register_batch(conn,ADAPTERS['ccc_corpus'],[unused])
+    assert client.post(f'/api/v1/batches/{abandoned}/abandon',json=operation,headers=headers).json()['status']=='abandoned'
+    assert unused.exists()
+    listing=client.get('/api/v1/batches?include_published=true&limit=1').json()
+    assert listing['items'][0]['batch_id']==abandoned and listing['next_cursor']==abandoned
+    older=client.get(f'/api/v1/batches?include_published=true&before={abandoned}&limit=1').json()
+    assert older['items'][0]['batch_id']==batch
+
+
+def test_web_year_granularities_and_unknowns(conn, tmp_path):
+    from fastapi.testclient import TestClient
+    from midstream.api import create_app, connection
+    from midstream import management
+    path=write(tmp_path/'year-web.jsonl',[row(f'year-{i}', f'合成文献第{i}篇。') for i in range(5)])
+    ingest.ingest(conn, ADAPTERS['ccc_corpus'], [path])
+    current=conn.execute('SELECT doc_id,version_id FROM document_version WHERE is_current ORDER BY doc_id').fetchall()
+    ranges=['[-50,51)','[601,701)',None,'[-100,-99)','[-101,-100)']
+    for i,((doc,version),years) in enumerate(zip(current,ranges)):
+        management.review_document(conn,doc,version,{'composed_years':years,'composed_label':f'合成时代{i}'},actor='fixture',reason='year fixture')
+    app=create_app()
+    app.dependency_overrides[connection]=lambda:conn
+    c=TestClient(app)
+    stats=c.get('/api/v1/stats/years?granularity=century').json()
+    assert stats['unknown_years']==1 and stats['known_years']==4
+    counts={v['label']:v['documents'] for v in stats['items']}
+    assert counts['公元前2世纪']==1 and counts['公元前1世纪']==2
+    assert counts['1世纪']==1 and counts['7世纪']==1
+    assert sum(counts.values())==5
+    selected=c.get('/api/v1/documents?year_from=601&year_to=700').json()['items']
+    assert [v['doc_id'] for v in selected]==[current[1][0]]
+    assert len(c.get('/api/v1/documents?year_from=601&year_to=700&include_unknown_years=true').json()['items'])==2
+    unknown=c.get('/api/v1/documents?only_unknown_years=true').json()['items']
+    assert [v['doc_id'] for v in unknown]==[current[2][0]]
+    assert len(c.get('/api/v1/documents?era=合成时代0').json()['items'])==1
+    labels=c.get('/api/v1/stats/years?granularity=dynasty').json()
+    assert sum(v['documents'] for v in labels['items'])==5 and not labels['overlapping']
+    assert len(c.get('/api/v1/years/options').json()['labels'])==5
+    years=c.get('/api/v1/stats/years?granularity=year').json()
+    assert years['windowed'] and years['year_from']==601 and years['year_to']==700
+    exact=c.get('/api/v1/stats/years?granularity=year&year_from=-101&year_to=-100').json()
+    assert [v['documents'] for v in exact['items']]==[1,1]
+    for url in ('documents?year_from=0','documents?year_from=1&only_unknown_years=true',
+                'stats/years?granularity=year&year_from=-1000&year_to=1000',
+                'stats/years?granularity=dynasty&year_from=1'):
+        assert c.get('/api/v1/'+url).status_code==422
+
+
+def test_mapped_import_plan_resume(conn, tmp_path):
+    from midstream import importing
+    path = write(tmp_path / 'mapped.jsonl', [json.dumps({'id': '1', 'body': '天地玄黄', 'name': '测试'})])
+    plan = {'format': 'jsonl', 'text_field': 'body', 'id_field': 'id', 'fields': {'title': 'name'}}
+    preview = importing.preview('mapped_fixture', [str(path)], plan)
+    registered = importing.register(conn, 'mapped_fixture', [str(path)], preview['objects'],
+        preview['parser_version'], 'tester', 'fixture import', plan)
+    batch_id = registered['batch_id']
+    assert conn.execute('SELECT import_plan FROM source_batch WHERE batch_id=%s', (batch_id,)).fetchone()[0]['text_field'] == 'body'
+    result = batches.resume(conn, batch_id, actor='tester', reason='fixture publish')
+    assert result['status'] == 'published'
+    hits = query.search(conn, query.Filters(sources=['mapped_fixture']))
+    assert hits[0]['title'] == '测试'
+    assert query.get_text(conn, hits[0]['doc_id'])['text'] == '天地玄黄'

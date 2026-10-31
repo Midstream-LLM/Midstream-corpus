@@ -88,7 +88,7 @@ class LLMConfig:
         for name, profile in self.profiles.items():
             if profile.endpoint not in self.endpoints:
                 raise LLMError("invalid_config", f"profile {name} 引用了不存在的接入点")
-        if set(self.services) - {"generation", "quality_check"}:
+        if set(self.services) - {"generation", "quality_check", "import_detection"}:
             raise LLMError("invalid_config", "未知服务名称")
         if any(profile not in self.profiles for profile in self.services.values()):
             raise LLMError("invalid_config", "服务引用了不存在的 profile")

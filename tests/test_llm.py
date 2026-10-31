@@ -330,3 +330,18 @@ def test_quality_rejects_truncated_output_even_if_json_is_valid():
             LLMServices(client).quality_check("正文")
         assert error.value.code == "invalid_quality_result"
         assert error.value.response["finish_reason"] == "length"
+
+
+def test_import_identification_service():
+    payload = {'plan': {'format': 'jsonl', 'encoding': 'utf-8-sig', 'text_field': 'body', 'fields': {}}, 'note': 'body contains text'}
+    def handler(request):
+        body = json.loads(request.content)
+        assert '正文' in body['messages'][0]['content']
+        return httpx.Response(200, json=response_data('chat_completions', json.dumps(payload)))
+    with LLMServices(LLMClient(configuration(), transport=httpx.MockTransport(handler))) as service:
+        result = service.identify_import({'format':'jsonl', 'encoding':'utf-8-sig', 'sample':'{"body":"甲"}'})
+        assert result['plan']['text_field'] == 'body'
+        assert result['model'] == 'actual-model'
+        payload['plan']['format'] = 'txt'
+        with pytest.raises(LLMError, match='物理格式'):
+            service.identify_import({'format':'jsonl', 'encoding':'utf-8-sig', 'sample':'{}'})
