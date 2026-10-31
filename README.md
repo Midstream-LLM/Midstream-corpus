@@ -16,6 +16,10 @@
 
 实现中的功能包括全文检索、API 和前端界面等。
 
+## Web app
+
+第一版支持语料筛选、分页、正文阅读和历史版本切换。React 客户端与 FastAPI 后端分离，未来 SwiftUI 可复用 HTTP API。运行方式见 [Web app 说明](docs/webapp.md)。
+
 ## 快速开始
 
 需要 Python 3.12 和 Rust 工具链（含 Cargo）。Python 主包要求 `>=3.12`，当前 Rust 扩展要求 `>=3.12,<3.13`，因此完整安装使用 Python 3.12。以下命令在 Linux 上、仓库根目录执行，无需配置系统 PostgreSQL。

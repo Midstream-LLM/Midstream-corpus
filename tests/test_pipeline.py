@@ -722,3 +722,23 @@ def test_dedup_migration_and_parameter_changes(conn, tmp_path, monkeypatch):
         changed_rule = dedup.dedup(conn)
         assert changed_rule["fingerprinted"] == 2 and changed_rule["computed_pairs"] == 1
         assert changed_rule["cached_pairs"] == 0
+
+
+def test_web_api_real_versions(conn, tmp_path):
+    from fastapi.testclient import TestClient
+    from midstream.api import create_app, connection
+    path = write(tmp_path / 'web.jsonl', [row('web#1', '甲篇正文\r\n　第二段，保留标点。', chapter='测试文献·甲篇'), row('web#2', '乙篇正文。', chapter='测试文献·乙篇')])
+    ingest.ingest(conn, ADAPTERS['ccc_corpus'], [path])
+    app = create_app()
+    app.dependency_overrides[connection] = lambda: conn
+    with TestClient(app) as client:
+        assert client.get('/api/v1/sources').json() == [{'name':'ccc_corpus'}]
+        first = client.get('/api/v1/documents?limit=1').json()
+        doc = first['items'][0]['doc_id']
+        assert first['next_cursor'] == doc
+        assert client.get(f'/api/v1/documents?after={doc}&limit=1').json()['next_cursor'] is None
+        versions = client.get(f'/api/v1/documents/{doc}/versions').json()
+        assert [v['version_no'] for v in versions] == [2,1]
+        assert versions[0]['is_current']
+        assert '\r\n' in client.get(f'/api/v1/documents/{doc}?version=1').json()['text']
+        assert '\r' not in client.get(f'/api/v1/documents/{doc}?version=2').json()['text']

@@ -7,3 +7,5 @@ build/
 rust/target/
 AGENTS.md
 CLAUDE.md
+web/node_modules/
+web/dist/
