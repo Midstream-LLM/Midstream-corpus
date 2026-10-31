@@ -5,3 +5,4 @@ alembic>=1.13,<2          # schema 迁移
 SQLAlchemy>=2.0,<3        # Alembic 依赖
 pytest>=8.0,<10           # 测试
 maturin>=1.8,<2           # 构建 Rust 查重扩展
+httpx>=0.28,<1           # LLM 共用 HTTP 连接、超时和测试传输；BSD-3-Clause

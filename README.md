@@ -12,6 +12,7 @@
 - 数据集：按配方确定采用的语料、顺序和划分，保存总字符数及训练集、验证集与测试集字符数，并可按作品和重复簇分组导出 Parquet。
 - 人工管理：对当前版本 ID 审核质量、修正元数据、追加版本，并且可通过人工确认作品间是否存在关联。
 - 批次管理：每次入库登记为一批，可查看每次入库的进度与失败记录；中途失败的批次支持断点续跑，不需要的批次可以放弃并回收空间。
+- LLM 服务：独立提供质检、自定义 prompt 生成及批量调用，统一管理接入点、凭据引用和模型配置；支持 DeepSeek 的 Chat Completions、Responses、Anthropic Messages 和 Beta FIM 生成接口。见 [LLM 使用说明](docs/llm.md)。
 
 实现中的功能包括全文检索、API 和前端界面等。
 
@@ -79,6 +80,7 @@ midstream dedup --full   # 忽略缓存，强制完整重算文档级查重
 | `src/midstream/adapters/` | 来源适配器和解析记录接口 |
 | `src/midstream/ingest.py` | 批次登记、暂存、验证和发布 |
 | `src/midstream/batches.py`、`management.py` | 批次恢复、放弃与人工审核审计 |
+| `src/midstream/llm/` | LLM 用途服务、统一接入配置和协议请求执行 |
 | `src/midstream/clean.py`、`eras.py` | 技术清洗、质量判定和朝代年份映射 |
 | `src/midstream/textcodec.py` | 正文哈希与 zstd 压缩 |
 | `src/midstream/query.py` | 元数据查询、正文读取和统计 |

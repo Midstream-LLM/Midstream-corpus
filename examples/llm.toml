@@ -1,0 +1,55 @@
+# 复制到 MIDSTREAM_HOME/llm.toml，或用 MIDSTREAM_LLM_CONFIG 指定路径。
+# 文件只引用环境变量，不保存实际 API key。
+[credentials]
+deepseek = "DEEPSEEK_API_KEY"
+
+[endpoints.chat]
+protocol = "chat_completions"
+base_url = "https://api.deepseek.com"
+credential = "deepseek"
+concurrency = 4
+max_retries = 2
+timeout = 120
+# requests_per_second = 2
+
+[endpoints.responses]
+protocol = "responses"
+base_url = "https://api.deepseek.com"
+credential = "deepseek"
+
+[endpoints.messages]
+protocol = "anthropic_messages"
+base_url = "https://api.deepseek.com/anthropic"
+credential = "deepseek"
+
+[endpoints.fim]
+protocol = "fim_completions"
+base_url = "https://api.deepseek.com/beta"
+credential = "deepseek"
+
+[profiles.default]
+endpoint = "chat"
+model = "deepseek-flash"
+max_tokens = 4096
+[profiles.default.parameters]
+thinking = { type = "disabled" }
+
+[profiles.responses]
+endpoint = "responses"
+model = "deepseek-flash"
+[profiles.responses.parameters]
+reasoning = { effort = "none" }
+
+[profiles.messages]
+endpoint = "messages"
+model = "deepseek-flash"
+[profiles.messages.parameters]
+thinking = { type = "disabled" }
+
+[profiles.fim]
+endpoint = "fim"
+model = "deepseek-flash"
+
+[services]
+generation = "default"
+quality_check = "default"

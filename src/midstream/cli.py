@@ -260,7 +260,11 @@ def main() -> int:
     p.add_argument("--limit", type=int, default=50)
     p.set_defaults(handler=_events)
 
+    from .llm.cli import add_commands, run as run_llm
+    add_commands(commands)
     args = parser.parse_args()
+    if args.command == "llm":
+        return run_llm(args)
     if args.command == "init":
         server.init()
         return 0
