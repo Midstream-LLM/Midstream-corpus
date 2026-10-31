@@ -68,9 +68,9 @@ def search(
     where, params = where_clause(filters)
     params.update(limit=limit, after=after_doc)
     rows = conn.execute(
-        f"""SELECT d.doc_id, s.name, v.version_no, v.title, v.authors, v.composed_label,
+        f"""SELECT d.doc_id, v.version_id, s.name, v.version_no, v.title, v.authors, v.composed_label,
                    lower(v.composed_years), upper(v.composed_years) - 1,
-                   v.category, v.genre, v.quality_status, v.char_count
+                   v.category, v.genre, v.quality_status, v.quality_flags, v.char_count
             FROM document_version v
             JOIN document d USING (doc_id)
             JOIN source s USING (source_id)
@@ -78,8 +78,9 @@ def search(
             ORDER BY d.doc_id LIMIT %(limit)s""",
         params,
     ).fetchall()
-    keys = ("doc_id", "source", "version_no", "title", "authors", "composed_label",
-            "year_from", "year_to", "category", "genre", "quality_status", "char_count")
+    keys = ("doc_id", "version_id", "source", "version_no", "title", "authors",
+            "composed_label", "year_from", "year_to", "category", "genre",
+            "quality_status", "quality_flags", "char_count")
     return [dict(zip(keys, row)) for row in rows]
 
 
@@ -87,20 +88,14 @@ def get_text(conn: psycopg.Connection, doc_id: int, version_no: int | None = Non
     """读取某篇文档的一个版本，默认当前版本。"""
     condition = "v.version_no = %(no)s" if version_no else "v.is_current"
     row = conn.execute(
-        f"""SELECT v.version_no, v.title, v.quality_status, v.quality_flags, b.content
+        f"""SELECT to_jsonb(v), b.content
             FROM document_version v JOIN text_blob b USING (text_hash)
             WHERE v.doc_id = %(doc)s AND {condition}""",
         {"doc": doc_id, "no": version_no},
     ).fetchone()
     if row is None:
         return None
-    return {
-        "version_no": row[0],
-        "title": row[1],
-        "quality_status": row[2],
-        "quality_flags": row[3],
-        "text": textcodec.decompress(bytes(row[4])),
-    }
+    return {**row[0], "text": textcodec.decompress(bytes(row[1]))}
 
 
 def stats(conn: psycopg.Connection) -> dict:

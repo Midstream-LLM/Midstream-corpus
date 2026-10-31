@@ -206,6 +206,7 @@ impl Groups {
 
 struct Representative {
     version: i64,
+    hash: [u8; 16],
     signature: [u8; WIDTH],
     versions: Vec<i64>,
 }
@@ -232,6 +233,9 @@ struct Deduper {
     nodes: Vec<u32>,
     blob_slots: HashMap<i64, usize>,
     blobs: Vec<Vec<u8>>,
+    cached: HashMap<([u8; 16], [u8; 16]), f64>,
+    cache_hits: usize,
+    computed_pairs: usize,
     clusters: Vec<Vec<(i64, bool)>>,
     cluster_position: usize,
 }
@@ -261,6 +265,9 @@ impl Deduper {
             nodes: Vec::new(),
             blob_slots: HashMap::new(),
             blobs: Vec::new(),
+            cached: HashMap::new(),
+            cache_hits: 0,
+            computed_pairs: 0,
             clusters: Vec::new(),
             cluster_position: 0,
         }
@@ -332,6 +339,7 @@ impl Deduper {
                     self.exact.insert(hash, self.representatives.len());
                     self.representatives.push(Representative {
                         version,
+                        hash,
                         signature: sig.try_into().unwrap(),
                         versions: vec![version],
                     });
@@ -451,6 +459,7 @@ impl Deduper {
         self.nodes.clear();
         self.blob_slots.clear();
         self.batch.clear();
+        self.cached.clear();
         let mut local = HashMap::new();
         while let Some(&(a, b)) = self.pending.front() {
             let extra = usize::from(!local.contains_key(&a)) + usize::from(!local.contains_key(&b));
@@ -478,6 +487,64 @@ impl Deduper {
         Some(PyBytes::new(py, &output))
     }
 
+    fn candidate_pairs<'py>(&self, py: Python<'py>) -> Bound<'py, PyBytes> {
+        let mut output = COPY_HEADER.to_vec();
+        for &(a, b) in &self.batch {
+            let (a, b) = self.pair_hashes(a, b);
+            copy_row(&mut output, &[&a, &b]);
+        }
+        output.extend_from_slice(&[255, 255]);
+        PyBytes::new(py, &output)
+    }
+
+    fn cached_pairs(&mut self, data: &[u8]) {
+        for [a, b, score] in self.input.read::<3>(data) {
+            self.cached.insert(
+                (a.try_into().unwrap(), b.try_into().unwrap()),
+                f64::from_be_bytes(score.try_into().unwrap()),
+            );
+        }
+    }
+
+    fn uncached_batch<'py>(&mut self, py: Python<'py>) -> Option<Bound<'py, PyBytes>> {
+        let mut needed = vec![false; self.nodes.len()];
+        let pairs = std::mem::take(&mut self.batch);
+        for (a, b) in pairs {
+            if let Some(&score) = self.cached.get(&self.pair_hashes(a, b)) {
+                self.cache_hits += 1;
+                if score >= self.threshold {
+                    self.verified += 1;
+                    self.groups.union(self.nodes[a], self.nodes[b]);
+                }
+            } else {
+                self.batch.push((a, b));
+                needed[a] = true;
+                needed[b] = true;
+            }
+        }
+        if self.batch.is_empty() {
+            return None;
+        }
+        let mut output = COPY_HEADER.to_vec();
+        for (&node, needed) in self.nodes.iter().zip(needed) {
+            if needed {
+                copy_row(&mut output, &[&self.representatives[node as usize].version.to_be_bytes()]);
+            }
+        }
+        output.extend_from_slice(&[255, 255]);
+        Some(PyBytes::new(py, &output))
+    }
+
+    #[getter]
+    fn cache_hits(&self) -> usize {
+        self.cache_hits
+    }
+
+    #[getter]
+    fn computed_pairs(&self) -> usize {
+        self.computed_pairs
+    }
+
     fn blobs(&mut self, data: &[u8]) {
         for [version, content] in self.input.read::<2>(data) {
             let version = i64::from_be_bytes(version.try_into().unwrap());
@@ -485,12 +552,16 @@ impl Deduper {
         }
     }
 
-    fn verify_batch(&mut self, py: Python<'_>) {
-        py.allow_threads(|| {
+    fn verify_batch<'py>(&mut self, py: Python<'py>) -> Bound<'py, PyBytes> {
+        let output = py.allow_threads(|| {
             let sets: Vec<Vec<u64>> = self
                 .blobs
                 .par_iter()
                 .map_init(Text::new, |text, blob| {
+                    // 已缓存的候选无需加载正文，保留空槽位以复用本批节点编号。
+                    if blob.is_empty() {
+                        return Vec::new();
+                    }
                     text.normalize(blob);
                     let mut values = Vec::new();
                     grams(&text.chars, |h| values.push(h));
@@ -499,18 +570,26 @@ impl Deduper {
                     values
                 })
                 .collect();
-            let passed: Vec<(usize, usize)> = self
+            let scores: Vec<f64> = self
                 .batch
                 .par_iter()
-                .copied()
-                .filter(|&(a, b)| jaccard(&sets[a], &sets[b]) >= self.threshold)
+                .map(|&(a, b)| jaccard(&sets[a], &sets[b]))
                 .collect();
-            self.verified += passed.len();
-            for (a, b) in passed {
-                self.groups.union(self.nodes[a], self.nodes[b]);
+            self.computed_pairs += scores.len();
+            let mut output = COPY_HEADER.to_vec();
+            for (&(a, b), score) in self.batch.iter().zip(scores) {
+                let (left, right) = self.pair_hashes(a, b);
+                copy_row(&mut output, &[&left, &right, &score.to_be_bytes()]);
+                if score >= self.threshold {
+                    self.verified += 1;
+                    self.groups.union(self.nodes[a], self.nodes[b]);
+                }
             }
             self.blobs.clear();
+            output.extend_from_slice(&[255, 255]);
+            output
         });
+        PyBytes::new(py, &output)
     }
 
     fn clusters(&mut self, py: Python<'_>) -> (usize, usize, usize, usize) {
@@ -543,6 +622,14 @@ impl Deduper {
             self.cluster_position += 1;
         }
         PyBytes::new(py, &output)
+    }
+}
+
+impl Deduper {
+    fn pair_hashes(&self, a: usize, b: usize) -> ([u8; 16], [u8; 16]) {
+        let a = self.representatives[self.nodes[a] as usize].hash;
+        let b = self.representatives[self.nodes[b] as usize].hash;
+        (a.min(b), a.max(b))
     }
 }
 

@@ -140,8 +140,26 @@ JSONL 按约 8 MiB、完整行边界分块；同一个 spawn 进程池并行解�
 | `published` | 已发布版本、切换当前版本并删除该批次暂存分区。 |
 | `failed` | 解析或暂存过程抛出异常；该阶段事务回滚，并登记失败状态。 |
 | `needs_review` | 暂存验证未通过，不能发布；例如没有成功记录。 |
+| `abandoned` | 人工放弃未发布批次，暂存分区已删除；登记和解析记录保留。 |
 
-状态由入库流程自动推进，当前没有批次列表、审核、恢复或重试管理命令。发布阶段发生异常不等于自动标记 `failed`；该标记只在解析、暂存异常处理分支中写入。
+发布阶段发生异常不等于自动标记 `failed`；该标记只在解析、暂存异常处理分支中写入。
+
+### 批次管理
+
+```bash
+midstream batch-list
+midstream batch-list --include-published --limit 100
+midstream batch-show 123
+midstream batch-resume 123 --actor operator --reason '核对原文件后恢复'
+midstream batch-abandon 123 --actor operator --reason '源文件不合格'
+midstream events --batch-id 123
+```
+
+`batch-show` 返回状态、来源、解析器版本、登记文件路径/大小/SHA-256、成功和失败记录数、两步暂存数、是否满足基本验证条件、前 20 条失败记录及分区是否存在。它只检查数据库；恢复时才逐文件核对原路径、大小和哈希，并要求当前适配器的解析器版本与登记值一致。文件丢失或变化时需以新文件登记新批次，不能用旧批次身份继续。调用方可直接使用 `midstream.batches` 中的结构化函数。
+
+`batch-resume` 按现有状态推进：`received`/`failed` 清理该批次残留记录后重新暂存，`staged`/`needs_review` 重新验证，`validated` 发布；验证仍不通过时返回 `needs_review`，不强行发布。发布事务会原子写版本并删除暂存分区，之后再运行两类查重。若发布后查重失败，批次已是 `published`；再次恢复返回 `already_published` 和 `next_action=dedup`，应单独运行 `midstream dedup` 与 `midstream dedup --spans`。不会再次发布同一批次。
+
+`batch-abandon` 只接受未发布批次，删除其暂存分区并设为 `abandoned`；登记文件信息、解析记录和人工操作记录保留。重复放弃返回 `already_abandoned`。对已发布或已放弃批次恢复、对已发布批次放弃均返回可识别的错误。两类写操作都要求 `--actor` 与 `--reason`，并在 `management_event` 留痕；不要把未知来源信息猜作处理依据。
 
 ### 失败记录与重复入库
 
@@ -184,6 +202,7 @@ midstream dedup --spans
 | `--year-from YEAR` | 成书年份查询区间的下界，含端点。 |
 | `--year-to YEAR` | 成书年份查询区间的上界，含端点。只提供一端时另一端不限。 |
 | `--include-unknown-years` | 有年份筛选时，同时纳入成书年份未知的文档。 |
+| `--quality STATUS` | 可重复指定 `ok`、`flagged`、`quarantined`；默认含前两类。 |
 | `--limit N` | 最多返回条数，默认 `50`。 |
 | `--after DOC_ID` | 只返回 `doc_id` 大于该值的文档，默认 `0`，按 `doc_id` 升序分页。 |
 
@@ -200,7 +219,7 @@ midstream search --year-from 800 --year-to 850 --include-unknown-years
 midstream search --limit 20 --after 123
 ```
 
-结果包括 `doc_id`、来源、文档内版本号、标题、作者、成书标签及年份、分类、体裁、质量状态和字符数。读取正文时使用结果里的文档 ID：
+结果包括 `doc_id`、当前 `version_id`、来源、文档内版本号、标题、作者、成书标签及年份、分类、体裁、质量状态、标记和字符数。可用 `--quality flagged` 查找待核文档。读取正文时使用结果里的文档 ID：
 
 ```bash
 midstream show 123
@@ -208,7 +227,7 @@ midstream show 123 --version 1
 midstream stats
 ```
 
-`show` 省略 `--version` 时读取当前版本；指定正整数时读取该文档内的 `version_no`，不是全库的 `version_id`。输出含正文、版本号、标题、质量状态和标记；文档或指定版本不存在时退出码为 1。`stats` 返回各来源当前文档数、质量与年份统计、版本数以及正文和数据库存储统计。
+`show` 省略 `--version` 时读取当前版本；指定正整数时读取该文档内的 `version_no`，不是全库的 `version_id`。输出含正文及该版本的完整字段快照；文档或指定版本不存在时退出码为 1。`stats` 返回各来源当前文档数、质量与年份统计、版本数以及正文和数据库存储统计。
 
 ## 6. 重新处理已有文档
 
@@ -245,6 +264,26 @@ midstream dedup --spans
 
 给新逻辑使用新的规则版本名，先运行 `midstream reprocess 新规则版本` 检查，再加 `--apply`。未知元数据继续留空；规则推导值应同时记录字段依据。
 
+## 6A. 人工审核
+
+```bash
+midstream search --quality flagged
+midstream show 123
+midstream review-document 123 456 --metadata '{"quality_status":"ok","quality_flags":[]}' --actor operator --reason '核对原扫描件'
+midstream review-document 123 457 --metadata '{"title":"核定标题","authors":null}' --actor operator --reason '核对目录'
+midstream work-links 123 --status candidate
+midstream review-work 123 42 whole confirmed --actor operator --reason '核对书目'
+midstream events --doc-id 123
+```
+
+`review-document` 的第二个位置参数是查看时取得的当前 `version_id`，用于乐观校验；不是 `version_no`。质量状态和元数据改动会生成新的完整版本快照，正文哈希不变，旧版本除 `is_current` 外不改。新版本号取该文档所有版本的最大值加一，父版本指向审核时的当前版本。改动字段的 `field_basis` 标为 `human`；操作人、依据及前后值保存在 `management_event`。改动后应在需要查重准确性的导出前重跑两类查重。
+
+元数据 JSON 支持 `quality_status`、`quality_flags`、`license`、`title`、`authors`、`composed_years`、`composed_label`、`edition_years`、`genre`、`category`、`topics`、`legacy_category`、`extra`。年份区间使用 PostgreSQL `int4range` 字符串，如 `"[618,908)"`，未知值传 `null`；数组字段传字符串数组，`extra` 传完整对象，覆盖时不会自动深层合并。未知事实保持 `null`，不凭猜测填写。无变化返回 `no_change`，当前版本不匹配返回 `conflict`。
+
+`work-links` 列出文档已有的作品关联，可按状态过滤并取得 `work_id`、关系及依据。`review-work` 只审核这些已有的 `document_work` 关联，决定为 `confirmed` 或 `rejected`；默认要求先前状态是 `candidate`，可用 `--expected-status confirmed` 等显式覆盖。关联原 `basis` 保留，人工决议另记事件。作品和关系不存在返回 `not_found`；状态不同返回 `conflict`。
+
+CLI 成功时输出 JSON；业务错误时输出 `{"status":"error","code":"...","message":"..."}` 并以状态码 2 结束。库函数抛出带 `code` 的 `ManagementError`，适合未来 API 复用。审计事件可用 `events --doc-id` 或 `events --batch-id` 查询。
+
 ## 7. 查重
 
 ```bash
@@ -267,9 +306,22 @@ midstream dedup
 
 ### 快照和指纹恢复
 
-每次成功查重在事务中替换全部重复簇及成员，只保留最新快照；运行信息保存在 `processing_run`。旧数据集已固定到版本，不依赖旧簇。入库后自动更新快照，重新处理后需手动更新；导出不会自行刷新快照。
+文档级查重在同一事务内更新当前结果，只有新增、删除或类型变化的成员才写入持久表。未变簇保留 `cluster_id` 和 `run_id`；`dup_cluster.run_id` 表示该簇最后变化的运行，当前结果可能来自多个运行。运行信息保存在 `processing_run`，`dedup_snapshot` 分别指向文档和段落当前结果对应的完整运行。导出读取全部当前文档簇，不按最大 `run_id` 筛选。旧数据集已固定到版本，不依赖旧簇。入库后自动更新快照，重新处理后需手动更新；导出不会自行刷新快照。
 
-指纹按 `(text_hash, rule_version)` 缓存，重复运行只计算当前正文中缺失的指纹。`text_fingerprint` 是 UNLOGGED 表，数据库崩溃恢复后可能被清空；再次执行 `midstream dedup` 会自动从已存正文重算缺失项，不需要重新入库。
+每次先计算完整当前版本集合的摘要，并核对算法参数。输入及参数相同则直接返回 `reused_snapshot=true` 和原 `run_id`，不新建处理运行、不读取正文。结果规模字段沿用快照，本次新增计算和写入计数为 0。
+
+指纹按 `(text_hash, rule_version)` 缓存；文档候选的精确 Jaccard 分数按比较规则及一对排序后的 `compare_hash` 缓存，包括未通过阈值的候选。改元数据或换代表版本时，只要比较正文相同就能复用分数。阈值变化重新判定缓存分数，比较规则变化使用独立缓存。每次输入变化仍重建 LSH 和连通分组，避免桥接文本移除后保留失效的簇。
+
+文档报告增加 `cached_pairs`（复用分数的候选对数）、`computed_pairs`（实际重新计算的候选对数）、`clusters_changed`、`members_written`、`members_deleted`。`verified_pairs` 统计本次候选中达到阈值的对数，包含复用的分数；直接复用整份快照时为 0。
+
+`text_fingerprint` 和 `dedup_pair` 均为 UNLOGGED 缓存，崩溃恢复后可能清空。需要重算时会自动补齐；输入未变且持久结果仍有效时可以继续复用快照。也可主动完整重算：
+
+```bash
+midstream dedup --full
+midstream dedup --spans --full
+```
+
+`--full` 忽略输入快照及候选分数缓存，已有正文指纹仍可复用，缺失指纹自动重建。文档级完整重算也只持久化变化的成员。升级旧部署需要迁移 `0006_incremental_dedup` 并重新安装 Rust 扩展。
 
 ### 段落级：span-v1
 
@@ -287,7 +339,7 @@ midstream dedup --spans
 
 指纹、种子分 256 区写到 `tempfile.mkdtemp` 创建的目录，结束或异常时删除。通常分区直接读入排序；超过 64 MiB 时按固定块排序、64 路归并，避免模板集中造成内存膨胀。正文先以压缩形式暂存，种子围绕每对中正文较大的文档、按其连续编号聚集，同一文档的候选尽量在同批确认。每批涉及的文档各解压归一化一次，以共享只读结构供 Rayon 并行扩展匹配；线程内缓冲结果后按块写出，最后按目标文档统一删除被覆盖区间。文本批次预算仍为 256 MiB，单篇超大正文仍需容纳至少一对文档，批次结束即释放归一化正文。Rust 线程由 `RAYON_NUM_THREADS` 控制，例如服务器设为 `20`。临时磁盘可用 `TMPDIR` 选择；种子数量随重复分布增长，可能远大于指纹数量。
 
-报告包括 compare-v1 新缓存数、代表数、足够长的文档数、指纹数、种子数、模板哈希数、确认匹配数、最终区间数，以及缓存、指纹、种子、确认、写入和总耗时。当前 `representatives` 只统计原文至少 64 字符的代表。每次成功运行在独立事务内 `TRUNCATE dup_span` 并通过二进制 COPY 写入最新快照，运行信息保存为 `processing_run.rule_version='span-v1'`。正文和结果行均由 Rust 解析或生成，Python 只传递 COPY 字节。
+报告包括 compare-v1 新缓存数、代表数、足够长的文档数、指纹数、种子数、模板哈希数、确认匹配数、最终区间数，以及缓存、指纹、种子、确认、写入和总耗时。当前 `representatives` 只统计原文至少 64 字符的代表。输入及参数未变时直接复用快照；输入变化或指定 `--full` 时，仍在独立事务内完整重算、`TRUNCATE dup_span` 并通过二进制 COPY 写入最新快照，运行信息保存为 `processing_run.rule_version='span-v1'`。正文和结果行均由 Rust 解析或生成，Python 只传递 COPY 字节。
 
 段落快照与文档簇相互独立。入库自动刷新两者；重新处理后需分别手动运行两个命令。目前导出仍只使用文档级簇，不按 `dup_span` 删减正文或约束划分。
 

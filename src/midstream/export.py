@@ -95,8 +95,7 @@ def _group_keys(conn: psycopg.Connection, doc_ids: list[int]) -> dict[int, int]:
            FROM dup_cluster_member m
            JOIN dup_cluster c USING (cluster_id)
            JOIN document_version v USING (version_id)
-           WHERE c.level = 'document' AND v.doc_id = ANY(%s)
-             AND c.run_id = (SELECT max(run_id) FROM processing_run WHERE kind = 'dedup')""",
+           WHERE c.level = 'document' AND v.doc_id = ANY(%s)""",
         (doc_ids,),
     ):
         groups.union(f"d:{doc_id}", f"c:{cluster_id}")

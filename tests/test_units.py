@@ -315,3 +315,62 @@ def test_dedup_spans_exact_offsets(tmp_path):
             start = texts[b].index(chunks[i])
             assert set(range(start, start + len(chunks[i]))) <= found[b]
     assert not found[4] and not found[5] and not found[6]
+
+
+def test_dedup_reuses_positive_and_negative_scores():
+    rng = random.Random(38)
+    base = "".join(rng.choices("abcdefghijklmnopqrstuvwxyz", k=1000))
+    texts = ["Z" * 1000, base, base[:-1] + "甲"]
+    header = midstream_dedup.Deduper.copy_header()
+
+    def encode(rows):
+        return header + b"".join(
+            struct.pack("!h", len(row)) + b"".join(struct.pack("!i", len(f)) + f for f in row)
+            for row in rows
+        ) + b"\xff\xff"
+
+    def decode(data):
+        offset = 19
+        while (count := struct.unpack_from("!h", data, offset)[0]) != -1:
+            offset += 2
+            fields = []
+            for _ in range(count):
+                size = struct.unpack_from("!i", data, offset)[0]
+                offset += 4
+                fields.append(data[offset:offset + size])
+                offset += size
+            yield fields
+
+    def run(threshold, cache, version_offset):
+        state = midstream_dedup.Deduper("cache-test", 32, 4, threshold)
+        # 同桶中先安排一个不相似的中心，确保未通过的候选也会被缓存。
+        state.versions(encode(
+            (struct.pack("!q", i + version_offset), i.to_bytes(16, "big"), struct.pack("<128I", *([1] * 128)))
+            for i in range(3)
+        ))
+        state.group_exact()
+        state.build_lsh()
+        scores = {}
+        while state.next_round():
+            while state.next_batch(10) is not None:
+                state.cached_pairs(encode(
+                    (a, b, struct.pack("!d", cache[a, b]))
+                    for a, b in decode(state.candidate_pairs()) if (a, b) in cache
+                ))
+                missing = state.uncached_batch()
+                if missing is not None:
+                    state.blobs(encode(
+                        (version, textcodec.compress(texts[int.from_bytes(version, "big") - version_offset]))
+                        for [version] in decode(missing)
+                    ))
+                    scores.update({(a, b): struct.unpack("!d", score)[0]
+                                   for a, b, score in decode(state.verify_batch())})
+        clusters, members, _, _ = state.clusters()
+        return clusters, members, state.cache_hits, state.computed_pairs, scores
+
+    cold = run(0.8, {}, 0)
+    assert cold[:4] == (1, 2, 0, 3)
+    assert sorted(cold[4].values())[:2] == [0.0, 0.0]
+    # 换版本 ID 后仍可按比较正文哈希复用；阈值变化重新判定，不继承旧簇。
+    assert run(0.8, cold[4], 100)[:4] == (1, 2, 3, 0)
+    assert run(1.0, cold[4], 200)[:4] == (0, 0, 3, 0)

@@ -1,9 +1,11 @@
 """端到端测试，需要 MIDSTREAM_TEST_DSN 指向一个专用空库。"""
 
 import json
+import multiprocessing
 import os
 import random
 import runpy
+from concurrent.futures import ProcessPoolExecutor
 from pathlib import Path
 
 import psycopg
@@ -13,7 +15,7 @@ from alembic.migration import MigrationContext
 from alembic.operations import Operations
 from sqlalchemy import create_engine
 
-from midstream import dedup, export, ingest, query, reprocess
+from midstream import batches, dedup, export, ingest, management, query, reprocess
 from midstream.adapters import ADAPTERS
 from midstream.rules import RULES
 
@@ -46,6 +48,8 @@ def conn():
                 connection.execute(statement)
         connection.execute(SCHEMA.with_name("0004_staging_hash.sql").read_text(encoding="utf-8"))
         connection.execute(SCHEMA.with_name("0005_release_char_count.sql").read_text(encoding="utf-8"))
+        connection.execute(SCHEMA.with_name("0006_incremental_dedup.sql").read_text(encoding="utf-8"))
+        connection.execute(SCHEMA.with_name("0007_manual_batch.sql").read_text(encoding="utf-8"))
         connection.commit()
         yield connection
 
@@ -227,6 +231,204 @@ def test_failed_stage_leaves_no_partition(conn, tmp_path):
     assert conn.execute("SELECT count(*) FROM document").fetchone()[0] == 0
 
 
+def test_manual_document_and_work_review(conn, tmp_path):
+    path = write(tmp_path / "review.jsonl", [row("review#1", "甲乙丙")])
+    ingest.ingest(conn, ADAPTERS["ccc_corpus"], [path])
+    doc_id, old_id, old_no = conn.execute(
+        "SELECT doc_id, version_id, version_no FROM document_version WHERE is_current"
+    ).fetchone()
+    old_meta = conn.execute(
+        "SELECT title, quality_status, quality_flags, field_basis, text_hash"
+        " FROM document_version WHERE version_id = %s", (old_id,),
+    ).fetchone()
+    # 保留一个非当前派生版本；后续人工修正仍应以当前版为父版、取最大版本号。
+    conn.execute(
+        "INSERT INTO document_version"
+        " (doc_id, version_no, parent_version_id, text_hash, run_id, is_current,"
+        " quality_status, quality_flags, char_count, field_basis, extra)"
+        " SELECT doc_id, version_no + 1, version_id, text_hash, run_id, false,"
+        " quality_status, quality_flags, char_count, field_basis, extra"
+        " FROM document_version WHERE version_id = %s", (old_id,),
+    )
+    conn.commit()
+    result = management.review_document(
+        conn, doc_id, old_id,
+        {"title": "人工核定标题", "quality_status": "flagged", "quality_flags": ["人工待核"],
+         "composed_years": "[618,908)"},
+        actor="test-operator", reason="合成测试人工核对",
+    )
+    assert result["status"] == "applied" and result["version_no"] == old_no + 2
+    assert result["changed_fields"] == [
+        "composed_years", "quality_flags", "quality_status", "title",
+    ]
+    assert conn.execute(
+        "SELECT title, quality_status, quality_flags, field_basis, text_hash"
+        " FROM document_version WHERE version_id = %s", (old_id,),
+    ).fetchone() == old_meta
+    current = conn.execute(
+        "SELECT parent_version_id, title, quality_status, quality_flags, field_basis, text_hash"
+        " FROM document_version WHERE version_id = %s", (result["version_id"],),
+    ).fetchone()
+    assert current[0] == old_id and current[1:4] == (
+        "人工核定标题", "flagged", ["人工待核"],
+    )
+    assert all(current[4][field] == "human" for field in result["changed_fields"])
+    assert current[5] == old_meta[4]
+    assert str(conn.execute(
+        "SELECT composed_years FROM document_version WHERE version_id = %s",
+        (result["version_id"],),
+    ).fetchone()[0]) == "[618, 908)"
+    with pytest.raises(management.ManagementError) as exc:
+        management.review_document(
+            conn, doc_id, old_id, {"title": "又改"}, actor="test", reason="冲突",
+        )
+    assert exc.value.code == "conflict"
+    with pytest.raises(management.ManagementError) as exc:
+        management.review_document(
+            conn, doc_id, result["version_id"], {"title": "人工核定标题"},
+            actor="test", reason="无变化",
+        )
+    assert exc.value.code == "no_change"
+    with pytest.raises(management.ManagementError) as exc:
+        management.review_document(
+            conn, doc_id, result["version_id"], {"foo": "x"},
+            actor="test", reason="非法字段",
+        )
+    assert exc.value.code == "invalid_input"
+    work_id = conn.execute(
+        "INSERT INTO work (canonical_title) VALUES ('待核作品') RETURNING work_id"
+    ).fetchone()[0]
+    conn.execute(
+        "INSERT INTO document_work (doc_id, work_id, relation, basis, status)"
+        " VALUES (%s, %s, 'whole', 'rule', 'candidate')", (doc_id, work_id),
+    )
+    conn.commit()
+    assert management.work_links(conn, doc_id, status="candidate") == [{
+        "work_id": work_id, "canonical_title": "待核作品", "relation": "whole",
+        "basis": "rule", "status": "candidate",
+    }]
+    decision = management.review_work(
+        conn, doc_id, work_id, "whole", "confirmed",
+        actor="test-operator", reason="依据源目录核对",
+    )
+    assert decision["decision"] == "confirmed"
+    assert conn.execute(
+        "SELECT basis, status FROM document_work WHERE doc_id = %s AND work_id = %s",
+        (doc_id, work_id),
+    ).fetchone() == ("rule", "confirmed")
+    assert management.work_links(conn, doc_id, status="candidate") == []
+    with pytest.raises(management.ManagementError) as exc:
+        management.review_work(
+            conn, doc_id, work_id, "whole", "rejected",
+            actor="test", reason="状态冲突",
+        )
+    assert exc.value.code == "conflict"
+    assert [event["action"] for event in management.events(conn, doc_id=doc_id)] == [
+        "work_review", "document_review",
+    ]
+
+
+def test_batch_resume_and_abandon(conn, tmp_path, monkeypatch):
+    adapter = ADAPTERS["ccc_corpus"]
+    path = write(tmp_path / "resume.jsonl", [row("resume#1", "甲乙丙")])
+    batch_id = ingest.register_batch(conn, adapter, [path])
+    assert batches.inspect(conn, batch_id)["status"] == "received"
+    # 原路径、大小、哈希任一变化都不能继续旧批次。
+    path.write_text(path.read_text(encoding="utf-8") + "\n", encoding="utf-8")
+    with pytest.raises(management.ManagementError) as exc:
+        batches.resume(conn, batch_id, actor="test", reason="恢复")
+    assert exc.value.code == "input_changed"
+    assert batches.inspect(conn, batch_id)["status"] == "received"
+    path.write_text(path.read_text(encoding="utf-8").rstrip("\n") + "\n", encoding="utf-8")
+    original = path.read_text(encoding="utf-8")
+    path.write_text(original.replace("甲", "乙"), encoding="utf-8")
+    assert path.stat().st_size == len(original.encode("utf-8"))
+    with pytest.raises(management.ManagementError) as exc:
+        batches.resume(conn, batch_id, actor="test", reason="恢复")
+    assert exc.value.code == "input_changed"
+    path.write_text(original, encoding="utf-8")
+    conn.execute(
+        "UPDATE source_batch SET parser_version = 'obsolete-parser' WHERE batch_id = %s",
+        (batch_id,),
+    )
+    conn.commit()
+    with pytest.raises(management.ManagementError) as exc:
+        batches.resume(conn, batch_id, actor="test", reason="恢复")
+    assert exc.value.code == "not_recoverable"
+    conn.execute(
+        "UPDATE source_batch SET parser_version = %s WHERE batch_id = %s",
+        (adapter.parser_version, batch_id),
+    )
+    conn.commit()
+    # 发布后查重失败不会让恢复操作再次发布。
+    real_dedup = batches.dedup.dedup
+    monkeypatch.setattr(batches.dedup, "dedup", lambda _conn: (_ for _ in ()).throw(RuntimeError("dedup failed")))
+    with pytest.raises(RuntimeError, match="dedup failed"):
+        batches.resume(conn, batch_id, actor="test", reason="恢复")
+    monkeypatch.setattr(batches.dedup, "dedup", real_dedup)
+    assert batches.inspect(conn, batch_id)["status"] == "published"
+    count = conn.execute("SELECT count(*) FROM document_version").fetchone()[0]
+    assert batches.resume(conn, batch_id, actor="test", reason="重试")["status"] == "already_published"
+    assert conn.execute("SELECT count(*) FROM document_version").fetchone()[0] == count
+    assert len(management.events(conn, batch_id=batch_id)) == 1
+
+    bad = write(tmp_path / "failed.jsonl", [row("bad#1", "甲"), row("bad#1", "乙")])
+    bad_id = ingest.register_batch(conn, adapter, [bad])
+    with pytest.raises(psycopg.errors.UniqueViolation):
+        batches.resume(conn, bad_id, actor="test", reason="尝试恢复")
+    assert batches.inspect(conn, bad_id)["status"] == "failed"
+    abandoned = batches.abandon(conn, bad_id, actor="test", reason="输入有重复键")
+    assert abandoned["status"] == "abandoned"
+    assert not batches.inspect(conn, bad_id)["has_partition"]
+    assert batches.abandon(conn, bad_id, actor="test", reason="重复请求")["status"] == "already_abandoned"
+    with pytest.raises(management.ManagementError) as exc:
+        batches.resume(conn, bad_id, actor="test", reason="不可恢复")
+    assert exc.value.code == "not_recoverable"
+    with pytest.raises(management.ManagementError) as exc:
+        batches.abandon(conn, batch_id, actor="test", reason="不可放弃")
+    assert exc.value.code == "not_recoverable"
+
+
+def test_batch_staged_validated_and_needs_review(conn, tmp_path):
+    adapter = ADAPTERS["ccc_corpus"]
+    good = write(tmp_path / "staged.jsonl", [row("staged#1", "甲乙丙")])
+    staged_id = ingest.register_batch(conn, adapter, [good])
+    with ProcessPoolExecutor(max_workers=1, mp_context=multiprocessing.get_context("spawn")) as pool:
+        ingest.stage(conn, staged_id, adapter, pool)
+    assert batches.inspect(conn, staged_id)["has_partition"]
+    staged_view = batches.inspect(conn, staged_id)
+    assert staged_view["staged"] == {"decoded": 1, "cleaned": 1}
+    assert staged_view["validation_ready"] and staged_view["failure_samples"] == []
+    assert batches.resume(conn, staged_id, actor="test", reason="恢复暂存批次")["status"] == "published"
+    assert not batches.inspect(conn, staged_id)["has_partition"]
+
+    validated = write(tmp_path / "validated.jsonl", [row("validated#1", "丁戊己")])
+    validated_id = ingest.register_batch(conn, adapter, [validated])
+    with ProcessPoolExecutor(max_workers=1, mp_context=multiprocessing.get_context("spawn")) as pool:
+        ingest.stage(conn, validated_id, adapter, pool)
+    assert ingest.validate(conn, validated_id) == "validated"
+    assert batches.resume(conn, validated_id, actor="test", reason="恢复已验证批次")["status"] == "published"
+
+    invalid = write(tmp_path / "review.jsonl", ["{坏行"])
+    review_id = ingest.register_batch(conn, adapter, [invalid])
+    with ProcessPoolExecutor(max_workers=1, mp_context=multiprocessing.get_context("spawn")) as pool:
+        ingest.stage(conn, review_id, adapter, pool)
+    assert ingest.validate(conn, review_id) == "needs_review"
+    review_view = batches.inspect(conn, review_id)
+    assert not review_view["validation_ready"]
+    assert len(review_view["failure_samples"]) == 1
+    assert batches.resume(conn, review_id, actor="test", reason="再次检查")["status"] == "needs_review"
+    before = conn.execute(
+        "SELECT count(*) FROM source_record WHERE batch_id = %s", (review_id,),
+    ).fetchone()[0]
+    assert before == 1
+    assert batches.abandon(conn, review_id, actor="test", reason="无有效记录")["status"] == "abandoned"
+    assert not batches.inspect(conn, review_id)["has_partition"]
+    assert conn.execute(
+        "SELECT count(*) FROM source_record WHERE batch_id = %s", (review_id,),
+    ).fetchone()[0] == before
+
+
 def test_reprocess(conn, tmp_path):
     path = write(tmp_path / "wanli.jsonl", [json.dumps({
         "id": "m1", "title": "神宗顯皇帝實錄 卷九",
@@ -306,6 +508,7 @@ def test_document_dedup(conn, tmp_path):
                        ("d#5", "exact", True)]
     second = dedup.dedup(conn)
     assert second["fingerprinted"] == 0
+    assert second["reused_snapshot"] and second["run_id"] == first["run_id"]
     assert second["clusters"] == first["clusters"]
     docs = dict(conn.execute("SELECT source_key, doc_id FROM document"))
     before = export._group_keys(conn, list(docs.values()))
@@ -357,7 +560,8 @@ def test_span_dedup_pipeline(conn, tmp_path):
     first_run = report.dedup_spans["run_id"]
     second = dedup.dedup_spans(conn)
     assert second["compare_fingerprinted"] == 0 and second["spans"] == 1
-    assert snapshot()[0][0] == second["run_id"] != first_run
+    assert snapshot()[0][0] == second["run_id"] == first_run
+    assert second["reused_snapshot"]
     assert conn.execute(
         "SELECT finished_at IS NOT NULL, config->>'spans' FROM processing_run WHERE run_id = %s",
         (second["run_id"],),
@@ -370,3 +574,151 @@ def test_span_dedup_pipeline(conn, tmp_path):
     ))
     assert dedup.dedup_spans(conn)["spans"] == 0
     assert snapshot() == []
+
+
+def test_incremental_dedup_matches_full_and_preserves_unchanged_clusters(conn, tmp_path):
+    rng = random.Random(762)
+    alphabet = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
+    a = "".join(rng.choices(alphabet, k=1200))
+    b = "".join(rng.choices(alphabet, k=100)) + a[100:]
+    c = b[:100] + "".join(rng.choices(alphabet, k=100)) + b[200:]
+    unrelated = "".join(rng.choices(alphabet, k=1200))
+    texts = [a, b, c, "甲乙", "甲乙", unrelated]
+
+    def ingest_rows(name, rows):
+        return ingest.ingest(conn, ADAPTERS["ccc_corpus"], [write(tmp_path / name, rows)])
+
+    def snapshot():
+        return conn.execute(
+            "SELECT c.cluster_id, c.run_id, m.version_id, m.kind, m.xmin::text"
+            " FROM dup_cluster_member m JOIN dup_cluster c USING (cluster_id)"
+            " ORDER BY c.cluster_id, m.version_id"
+        ).fetchall()
+
+    def membership():
+        clusters = {}
+        for cid, _, version, kind, _ in snapshot():
+            clusters.setdefault(cid, []).append((version, kind))
+        return sorted(clusters.values())
+
+    def assert_full_equivalent():
+        before = snapshot()
+        full = dedup.dedup(conn, full=True)
+        assert snapshot() == before
+        assert full["cached_pairs"] == 0
+        assert full["clusters_changed"] == full["members_written"] == full["members_deleted"] == 0
+
+    first = ingest_rows("initial.jsonl", [row(f"i#{i}", text) for i, text in enumerate(texts)])
+    assert sorted(map(len, membership())) == [2, 3]
+    docs = dict(conn.execute("SELECT source_key, doc_id FROM document"))
+    conn.execute("DELETE FROM document_work")
+    conn.commit()
+    # 最近一次运行是段落查重，导出仍须采用文档簇。
+    assert first.dedup_spans["run_id"] > first.dedup["run_id"]
+    groups = export._group_keys(conn, list(docs.values()))
+    assert groups[docs["i#0"]] == groups[docs["i#1"]] == groups[docs["i#2"]]
+    old_rows = snapshot()
+    second = ingest_rows("increment.jsonl", [row("new", unrelated)]).dedup
+    assert second["cached_pairs"] > 0 and second["computed_pairs"] == 0
+    assert second["clusters_changed"] == 1 and second["members_written"] == 2
+    assert set(old_rows).issubset(snapshot())  # 簇 ID、run_id、成员物理版本均不变。
+    assert_full_equivalent()
+
+    # 删除连接 A、C 的桥接文本 B，必须拆开旧簇。
+    replacement = "".join(rng.choices(alphabet, k=1200))
+    reprocess.reprocess(conn, reprocess.Rule(
+        "replace-bridge", None,
+        lambda doc: reprocess.Change(text=replacement) if doc["doc_id"] == docs["i#1"] else None,
+    ))
+    report = dedup.dedup(conn)
+    assert report["members_deleted"] == 3
+    assert sorted(map(len, membership())) == [2, 2]
+    assert_full_equivalent()
+    assert conn.execute(
+        "SELECT count(*) FROM dup_cluster_member m JOIN document_version v USING (version_id)"
+        " WHERE NOT v.is_current"
+    ).fetchone()[0] == 0
+
+    # 元数据改动会换 version_id，分数仍按比较正文复用。
+    reprocess.reprocess(conn, reprocess.Rule(
+        "metadata-only", None,
+        lambda doc: reprocess.Change(metadata={"title": "修订标题"})
+        if doc["doc_id"] == docs["i#0"] else None,
+    ))
+    report = dedup.dedup(conn)
+    assert not report["reused_snapshot"] and report["computed_pairs"] == 0
+    assert_full_equivalent()
+
+    # UNLOGGED 缓存可清空；强制重算无需依赖缓存，也不重写未变簇。
+    before = snapshot()
+    conn.execute("TRUNCATE dedup_pair, text_fingerprint")
+    conn.commit()
+    rebuilt = dedup.dedup(conn, full=True)
+    assert rebuilt["fingerprinted"] > 0 and rebuilt["computed_pairs"] > 0
+    assert snapshot() == before
+    # 移除全部当前版本，空集合也必须替换旧结果。
+    conn.execute("UPDATE document_version SET is_current = false WHERE is_current")
+    conn.commit()
+    assert dedup.dedup(conn)["clusters"] == 0
+    assert snapshot() == []
+    assert dedup.dedup_spans(conn)["spans"] == 0
+
+
+def test_dedup_failure_keeps_previous_snapshot(conn, tmp_path, monkeypatch):
+    path = write(tmp_path / "a.jsonl", [row("a", "甲" * 100), row("b", "甲" * 100)])
+    ingest.ingest(conn, ADAPTERS["ccc_corpus"], [path])
+    before = conn.execute("SELECT * FROM dedup_snapshot ORDER BY level").fetchall()
+    members = conn.execute("SELECT * FROM dup_cluster_member ORDER BY cluster_id, version_id").fetchall()
+    pairs = conn.execute("SELECT count(*) FROM dedup_pair").fetchone()[0]
+    reprocess.reprocess(conn, reprocess.Rule(
+        "fail-test", None,
+        lambda doc: reprocess.Change(text="天地玄黄宇宙洪荒日月盈昃辰宿列张寒来暑往秋收冬藏" * 4 + str(doc["doc_id"])),
+    ))
+    original = dedup._write_clusters
+
+    def fail(*args):
+        original(*args)
+        raise RuntimeError("simulated write failure")
+
+    with monkeypatch.context() as patch:
+        patch.setattr(dedup, "_write_clusters", fail)
+        with pytest.raises(RuntimeError, match="simulated"):
+            dedup.dedup(conn)
+    assert conn.execute("SELECT * FROM dedup_snapshot ORDER BY level").fetchall() == before
+    assert conn.execute("SELECT * FROM dup_cluster_member ORDER BY cluster_id, version_id").fetchall() == members
+    assert conn.execute("SELECT count(*) FROM dedup_pair").fetchone()[0] == pairs
+    recovered = dedup.dedup(conn)
+    assert not recovered["reused_snapshot"] and recovered["computed_pairs"] == 1
+
+
+def test_dedup_migration_and_parameter_changes(conn, tmp_path, monkeypatch):
+    rng = random.Random(762)
+    base = "".join(rng.choices("abcdefghijklmnopqrstuvwxyz", k=1000))
+    path = write(tmp_path / "versions.jsonl", [row("a", base), row("b", base[:-1] + "甲")])
+    ingest.ingest(conn, ADAPTERS["ccc_corpus"], [path])
+    before = conn.execute("SELECT cluster_id, run_id FROM dup_cluster").fetchall()
+    conn.commit()
+    revision = runpy.run_path(str(SCHEMA.with_name("0006_incremental_dedup.py")))
+    engine = create_engine("postgresql+psycopg://", creator=lambda: psycopg.connect(DSN))
+    try:
+        with engine.begin() as connection:
+            with Operations.context(MigrationContext.configure(connection)):
+                revision["downgrade"]()
+                revision["upgrade"]()
+    finally:
+        engine.dispose()
+    assert conn.execute("SELECT cluster_id, run_id FROM dup_cluster").fetchall() == before
+    restored = dedup.dedup(conn)
+    assert restored["computed_pairs"] == 1 and restored["clusters_changed"] == 0
+    assert restored["members_written"] == 0
+    with monkeypatch.context() as patch:
+        patch.setattr(dedup, "THRESHOLD", 1.0)
+        strict = dedup.dedup(conn)
+        assert not strict["reused_snapshot"] and strict["clusters"] == 0
+        assert strict["cached_pairs"] == 1 and strict["computed_pairs"] == 0
+    assert dedup.dedup(conn)["clusters"] == 1
+    with monkeypatch.context() as patch:
+        patch.setattr(dedup, "RULE_VERSION", "compare-test-v2")
+        changed_rule = dedup.dedup(conn)
+        assert changed_rule["fingerprinted"] == 2 and changed_rule["computed_pairs"] == 1
+        assert changed_rule["cached_pairs"] == 0

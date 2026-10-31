@@ -41,13 +41,17 @@ def _write_versions(conn: psycopg.Connection, run_id: int, changes: list[tuple])
         f"""INSERT INTO document_version
             (doc_id, version_no, parent_version_id, text_hash, run_id, is_current,
              char_count, {', '.join(_METADATA)})
-            SELECT c.doc_id, p.version_no + 1, p.version_id,
+            SELECT c.doc_id, latest.max_no + 1, p.version_id,
                    coalesce(c.text_hash, p.text_hash), %s, true,
                    b.char_count, {', '.join('m.' + key for key in _METADATA)}
             FROM unnest(%s::bigint[], %s::bigint[], %s::bytea[], %s::jsonb[])
                  AS c(doc_id, parent_version_id, text_hash, metadata)
             JOIN document_version p ON p.doc_id = c.doc_id
                                    AND p.version_id = c.parent_version_id
+            CROSS JOIN LATERAL (
+                SELECT max(version_no) AS max_no FROM document_version
+                WHERE doc_id = c.doc_id
+            ) latest
             CROSS JOIN LATERAL jsonb_populate_record(p, c.metadata) m
             JOIN text_blob b ON b.text_hash = coalesce(c.text_hash, p.text_hash)""",
         (run_id, list(docs), list(parents), list(hashes), [Jsonb(m) for m in metadata]),

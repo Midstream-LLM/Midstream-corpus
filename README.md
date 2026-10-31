@@ -1,16 +1,19 @@
-# midstream-core
+# 中流语料库 Midstream Corpus
 
-古汉语语料管理系统，用于大模型预训练语料的入库、版本管理、查询、查重和可复现导出。
+为击水语言模型（Jishui）预训练建立的语料管理系统。新数据经过整理和校验后入库，按标题、作者、年代、体裁和来源查询，并按需导出可复现的数据集。
 
-## 核心能力与当前状态
+**项目开发中。** 批次入库、元数据查询、重新处理、查重和数据集导出的主干已打通，API 和前端尚未完成。
 
-- 来源适配器：已支持 `ccc_corpus` 和 `wanli`；JSONL 按约 8 MiB 分块，由 spawn 进程池解析、清洗和计算哈希，按原始顺序 COPY。发布复用暂存哈希，跳过已存正文，报告 `timings` 分步耗时。
-- 版本管理：保存原始版和清洗版；重新处理生成新版本，保留历史正文和元数据。
+## 核心能力
+
+- 版本管理：对于同一部作品，保存包括原始版和清洗版的多个版本；对语料进行任何处理都生成新版本，并保留历史正文和元数据。
 - 查询：按来源、标题前缀、作者、体裁、分类和成书年份筛选，读取当前或指定版本。
-- 查重：文档级精确重复和近重复检测；段落级寻找归一化后逐字相同的长片段，记录原文字符偏移。入库发布后依次自动运行。
-- 数据集：按配方固定成员、顺序和划分，保存总字符数及 train/val/test 字符数，按作品和重复簇分组导出 Parquet，校验正文与统计并登记训练使用。`midstream release-stats <release_id>` 查看发布统计。
+- 查重：包括文档级查重与段落级查重，入库发布后依次自动运行。
+- 数据集：按配方确定采用的语料、顺序和划分，保存总字符数及训练集、验证集与测试集字符数，并可按作品和重复簇分组导出 Parquet。
+- 人工管理：对当前版本 ID 审核质量、修正元数据、追加版本，并且可通过人工确认作品间是否存在关联。
+- 批次管理：每次入库登记为一批，可查看每次入库的进度与失败记录；中途失败的批次支持断点续跑，不需要的批次可以放弃并回收空间。
 
-尚未实现人工管理、批次管理命令、全文检索、API 和前端。
+实现中的功能包括全文检索、API 和前端界面等。
 
 ## 快速开始
 
@@ -45,32 +48,26 @@ alembic upgrade head
 midstream stats
 ```
 
-查重也可单独运行，两个命令各自替换对应的最新快照：
+## 查重
+
+入库发布后自动依次运行文档级和段落级查重，也可以单独运行。两级结果各自保存、互不覆盖：
 
 ```bash
-midstream dedup          # 文档级
-midstream dedup --spans  # 段落级 span-v1，最短 64 个归一化字符
+midstream dedup          # 文档级：整篇相似度，连成重复簇
+midstream dedup --spans  # 段落级：找共同片段，最短 64 个归一化字符
+midstream dedup --full   # 忽略缓存，强制完整重算文档级查重
 ```
 
-段落级使用 k=32、w=32 的 Winnowing，候选逐字验证，忽略出现超过 1,000 次的模板指纹。指纹和种子按 256 区落盘，候选围绕正文较大的文档聚集，每批正文各解压归一化一次并由 Rayon 共享，匹配结果按块写出；临时目录使用 Python 的系统临时路径（可通过 `TMPDIR` 指向空间充足的磁盘），结束后删除。服务器 20 线程可设 `RAYON_NUM_THREADS=20`。已有部署需先执行 `midstream init`（外部实例用 `alembic upgrade head`）并重新安装 Rust 扩展。
+文档级判断整篇正文是否相近。正文归一化后取字符 8-gram 集合，用 128 桶 OPH 签名与 32×4 LSH 生成候选，签名相似度不足 0.6 的候选排除，其余计算 Jaccard 相似度，达到 0.8 即判为近重复并合并为簇。整篇内容高度相似时，这一级最有效；著作被拆分为章节后，整篇相似度往往低于阈值，需要段落级补充。
 
-迁移 `0004_staging_hash` 要求 `staging_text` 为空：清洗正文未变时暂存行以 NULL 复用原始正文，两步均保存哈希和字符数。升级前应完成已有暂存批次。
+段落级查找跨文献成段复用的正文。每篇代表版本以 k=32、w=32 的 Winnowing 滑窗提取指纹，指纹相同的候选再逐字核对，片段最短为 64 个归一化字符。目录、版权页一类内容重复出现，会形成大量相同指纹，出现超过 1,000 次的不参与匹配以控制候选规模。结果保存在 dup_span 中，区间为清洗正文的 Unicode 字符偏移，出处记为 version_id 较小的一侧。数据集导出目前只使用文档级簇。
 
-迁移 `0005_release_char_count` 从已固定的成员版本回填已有数据集的字符数，不解压正文。计数为保存正文的 Unicode 码点数，含标点、空格和换行；相同正文的不同成员分别计数。新发布同时保存统计，文档后续更新不影响旧发布。
+当前版本集合与参数都没有变化时，命令复用上次的结果，跳过计算。文档级另缓存逐对 Jaccard 分数，修改元数据或更换代表版本仍可复用；输入变化时，LSH 与连通分组需要重建。--full 忽略这些缓存，强制完整重算。
 
-安装、配置、查询、重新处理、查重、导出和添加来源，见[使用指南](docs/user-guide.md)。
+中间指纹与种子按 256 个区写入系统临时目录，计算结束后删除。解压与归一化由 Rayon 多线程完成，线程数由 RAYON_NUM_THREADS 设定。升级后须执行 midstream init（外部实例用 alembic upgrade head），并重新安装 Rust 扩展。
 
-## 测试
 
-```bash
-PYO3_PYTHON="$PWD/.venv/bin/python" \
-LD_LIBRARY_PATH="$(.venv/bin/python -c 'import sysconfig; print(sysconfig.get_config_var("LIBDIR"))')" \
-cargo test --manifest-path rust/Cargo.toml
-.venv/bin/python -m pytest -q
-MIDSTREAM_TEST_DSN="dbname=midstream_test" .venv/bin/python -m pytest
-```
-
-Rust 测试显式指定 `PYO3_PYTHON` 为 `.venv/bin/python`，避免链接到错误的系统 Python。设置 `MIDSTREAM_TEST_DSN` 后才会运行端到端测试；测试会清空该库的 `public` schema，只能指向专用测试库。
+更多安装与使用上的文档，见[使用指南](docs/user-guide.md)。
 
 ## 代码结构
 
@@ -81,6 +78,7 @@ Rust 测试显式指定 `PYO3_PYTHON` 为 `.venv/bin/python`，避免链接到�
 | `src/midstream/server.py` | 私有 PostgreSQL 初始化、调优和实例管理 |
 | `src/midstream/adapters/` | 来源适配器和解析记录接口 |
 | `src/midstream/ingest.py` | 批次登记、暂存、验证和发布 |
+| `src/midstream/batches.py`、`management.py` | 批次恢复、放弃与人工审核审计 |
 | `src/midstream/clean.py`、`eras.py` | 技术清洗、质量判定和朝代年份映射 |
 | `src/midstream/textcodec.py` | 正文哈希与 zstd 压缩 |
 | `src/midstream/query.py` | 元数据查询、正文读取和统计 |
@@ -95,6 +93,6 @@ Rust 测试显式指定 `PYO3_PYTHON` 为 `.venv/bin/python`，避免链接到�
 
 ## 许可证
 
-项目代码采用 [GPL-3.0](LICENSE)（`GPL-3.0-only`）。`rust/data/` 下的 OpenCC 数据采用 Apache-2.0，见 [rust/data/LICENSE-OpenCC](rust/data/LICENSE-OpenCC)。
+项目代码采用 [GPL-3.0](LICENSE)。`rust/data/` 下的 OpenCC 数据采用 Apache-2.0，见 [rust/data/LICENSE-OpenCC](rust/data/LICENSE-OpenCC)。
 
 构建脚本使用的 [PostgreSQL](https://www.postgresql.org/about/licence/) 和 [pg_bigm](https://github.com/pgbigm/pg_bigm/tree/v1.2-20250903) 采用 PostgreSQL License，[LZ4 库](https://github.com/lz4/lz4/blob/v1.10.0/lib/LICENSE)采用 BSD-2-Clause，均与 GPL-3.0 兼容。
