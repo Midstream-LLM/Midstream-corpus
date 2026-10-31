@@ -340,11 +340,32 @@ midstream dedup
 midstream export recipes/small-sources-v1.json
 ```
 
-命令先在数据库中固定成员，再生成 Parquet 文件，输出 `release_id` 和文件路径。文件写到 `MIDSTREAM_EXPORT_ROOT/<name>/`，每个非空划分一个文件：`train.parquet`、`val.parquet`、`test.parquet`。空划分不生成文件。
+命令先在数据库中固定成员和字符数，再生成 Parquet 文件，输出 `release_id`、名称、总字符数 `char_count`、各划分字符数 `split_char_counts` 和文件路径。文件写到 `MIDSTREAM_EXPORT_ROOT/<name>/`，每个非空划分一个文件：`train.parquet`、`val.parquet`、`test.parquet`。空划分不生成文件。
 
 每行包含 `ordinal`、`version_id`、`doc_id`、`title`、`text`，文件内按 `ordinal` 排序。`ordinal` 是整个数据集的成员序号，因此单个划分中的序号可能不连续。Parquet 使用 zstd 压缩，写临时文件后再改名；数据库记录文件 SHA-256、PyArrow 版本等导出信息。
 
 没有选中任何文档会报错。同名数据集不能再次创建；要基于当前库状态发布新数据集，应改用新名称。
+
+### 查看数据集字符数
+
+```bash
+midstream release-stats 1
+```
+
+输出发布时保存的统计，例如：
+
+```json
+{
+  "release_id": 1,
+  "name": "small-sources-v1",
+  "char_count": 10000,
+  "split_char_counts": {"train": 9000, "val": 500, "test": 500}
+}
+```
+
+以上数字仅用于说明格式。字符数按发布时所选版本正文的 Unicode 码点计算，与 Python `len(text)` 一致，包括标点、空格、换行及补充平面字符；组合字符按各码点分别计数。标题和元数据不计入，也不做繁简或其他归一化。相同正文的不同成员分别计数，空划分为 0，总数等于三个划分之和。
+
+统计与成员在同一事务内保存，后续入库或重新处理不会改变旧发布的字符数。已有部署先执行 `midstream init`，外部实例用 `alembic upgrade head`；迁移 `0005_release_char_count` 按旧发布固定的成员版本自动回填，不解压正文。
 
 ### 按作品和重复簇分组划分
 
@@ -365,7 +386,7 @@ midstream export recipes/small-sources-v1.json
 midstream verify 1
 ```
 
-`verify` 重算数据库内成员顺序、版本、划分和正文哈希组成的摘要，再解压数据集涉及的正文逐一核对 SHA-256。通过时打印“通过”并返回 0，摘要或正文哈希不符时打印“未通过”并返回 1；数据集不存在或解压错误会抛出异常。它不读取 Parquet 文件，也不核对磁盘文件是否被删除或改写。
+`verify` 重算数据库内成员顺序、版本、划分和正文哈希组成的摘要，核对总字符数及各划分字符数，再解压数据集涉及的正文逐一核对 SHA-256 和正文长度。通过时打印“通过”并返回 0，摘要、字符数或正文哈希不符时打印“未通过”并返回 1；数据集不存在或解压错误会抛出异常。它不读取 Parquet 文件，也不核对磁盘文件是否被删除或改写。
 
 复现保证的是已发布数据集的成员、顺序、划分和正文内容一致，不保证重新写出的 Parquet 文件字节一致。文件格式或工具版本变化可能影响字节。相同配方在库内容、当前版本或分组变化后再次筛选，也不保证得到同一数据集；固定下来的发布记录才是复现依据。
 

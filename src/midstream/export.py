@@ -66,17 +66,17 @@ class _Groups:
         self.parent[self.find(a)] = self.find(b)
 
 
-def _select(conn: psycopg.Connection, filters: Filters) -> list[tuple[int, int, bytes]]:
+def _select(conn: psycopg.Connection, filters: Filters) -> list[tuple[int, int, bytes, int]]:
     where, params = where_clause(filters)
     rows = conn.execute(
-        f"""SELECT v.version_id, v.doc_id, v.text_hash
+        f"""SELECT v.version_id, v.doc_id, v.text_hash, v.char_count
             FROM document_version v
             JOIN document d USING (doc_id)
             JOIN source s USING (source_id)
             WHERE {where} ORDER BY v.version_id""",
         params,
     ).fetchall()
-    return [(row[0], row[1], bytes(row[2])) for row in rows]
+    return [(row[0], row[1], bytes(row[2]), row[3]) for row in rows]
 
 
 def _group_keys(conn: psycopg.Connection, doc_ids: list[int]) -> dict[int, int]:
@@ -159,23 +159,29 @@ def create_release(conn: psycopg.Connection, recipe: Recipe) -> int:
     selected = _select(conn, recipe.filters)
     if not selected:
         raise ExportError("配方没有选中任何文档")
-    groups = _group_keys(conn, [doc_id for _, doc_id, _ in selected])
+    groups = _group_keys(conn, [doc_id for _, doc_id, _, _ in selected])
     assigned = [
-        (version_id, _assign_split(recipe, groups[doc_id]), doc_id, text_hash)
-        for version_id, doc_id, text_hash in selected
+        (version_id, _assign_split(recipe, groups[doc_id]), doc_id, text_hash, char_count)
+        for version_id, doc_id, text_hash, char_count in selected
     ]
     _check_training_history(
-        conn, [doc_id for _, split, doc_id, _ in assigned if split != "train"]
+        conn, [doc_id for _, split, doc_id, _, _ in assigned if split != "train"]
     )
     ordered = sorted(assigned, key=lambda item: _fraction(recipe.seed + ":order", item[0]))
     members = [
         (ordinal, version_id, split, text_hash)
-        for ordinal, (version_id, split, _, text_hash) in enumerate(ordered)
+        for ordinal, (version_id, split, _, text_hash, _) in enumerate(ordered)
     ]
+    char_counts = {split: 0 for split in SPLIT_NAMES}
+    for _, split, _, _, char_count in assigned:
+        char_counts[split] += char_count
     release_id = conn.execute(
-        "INSERT INTO dataset_release (name, recipe, content_digest) VALUES (%s, %s, %s)"
+        "INSERT INTO dataset_release (name, recipe, content_digest, char_count,"
+        " train_char_count, val_char_count, test_char_count)"
+        " VALUES (%s, %s, %s, %s, %s, %s, %s)"
         " RETURNING release_id",
-        (recipe.name, json.dumps(recipe.raw, ensure_ascii=False), _digest(members)),
+        (recipe.name, json.dumps(recipe.raw, ensure_ascii=False), _digest(members),
+         sum(char_counts.values()), char_counts["train"], char_counts["val"], char_counts["test"]),
     ).fetchone()[0]
     with conn.cursor() as cursor, cursor.copy(
         "COPY dataset_member (release_id, version_id, ordinal, split) FROM STDIN"
@@ -184,6 +190,22 @@ def create_release(conn: psycopg.Connection, recipe: Recipe) -> int:
             copy.write_row((release_id, version_id, ordinal, split))
     conn.commit()
     return release_id
+
+
+def release_stats(conn: psycopg.Connection, release_id: int) -> dict:
+    """读取发布时固定的字符数；空划分为 0。"""
+    row = conn.execute(
+        "SELECT name, char_count, train_char_count, val_char_count, test_char_count"
+        " FROM dataset_release WHERE release_id = %s", (release_id,),
+    ).fetchone()
+    if row is None:
+        raise ExportError(f"数据集 {release_id} 不存在")
+    return {
+        "release_id": release_id,
+        "name": row[0],
+        "char_count": row[1],
+        "split_char_counts": {"train": row[2], "val": row[3], "test": row[4]},
+    }
 
 
 def _member_rows(conn: psycopg.Connection, release_id: int, split: str):
@@ -250,26 +272,31 @@ def write_parquet(conn: psycopg.Connection, release_id: int, out_dir: Path) -> l
 
 
 def verify_release(conn: psycopg.Connection, release_id: int) -> bool:
-    """重算成员摘要，并逐篇核对解压后的正文哈希。"""
+    """重算成员摘要和字符数，并逐篇核对解压后的正文。"""
     expected = conn.execute(
-        "SELECT content_digest FROM dataset_release WHERE release_id = %s", (release_id,)
+        "SELECT content_digest, char_count, train_char_count, val_char_count, test_char_count"
+        " FROM dataset_release WHERE release_id = %s", (release_id,)
     ).fetchone()
     if expected is None:
         raise ExportError(f"数据集 {release_id} 不存在")
-    members = [
-        (row[0], row[1], row[2], bytes(row[3]))
-        for row in conn.execute(
-            """SELECT m.ordinal, m.version_id, m.split, v.text_hash
-               FROM dataset_member m JOIN document_version v USING (version_id)
-               WHERE m.release_id = %s ORDER BY m.ordinal""",
-            (release_id,),
-        )
-    ]
+    members = []
+    char_counts = {split: 0 for split in SPLIT_NAMES}
+    for ordinal, version_id, split, text_hash, char_count in conn.execute(
+        """SELECT m.ordinal, m.version_id, m.split, v.text_hash, v.char_count
+           FROM dataset_member m JOIN document_version v USING (version_id)
+           WHERE m.release_id = %s ORDER BY m.ordinal""",
+        (release_id,),
+    ):
+        members.append((ordinal, version_id, split, bytes(text_hash)))
+        char_counts[split] += char_count
     if _digest(members) != bytes(expected[0]):
+        return False
+    if (sum(char_counts.values()), char_counts["train"], char_counts["val"],
+            char_counts["test"]) != expected[1:]:
         return False
     with conn.cursor(name="verify_blobs") as cursor:
         cursor.execute(
-            """SELECT DISTINCT b.text_hash, b.content
+            """SELECT DISTINCT b.text_hash, b.content, v.char_count
                FROM dataset_member m
                JOIN document_version v USING (version_id)
                JOIN text_blob b USING (text_hash)
@@ -277,8 +304,9 @@ def verify_release(conn: psycopg.Connection, release_id: int) -> bool:
             (release_id,),
         )
         while rows := cursor.fetchmany(PARQUET_BATCH):
-            for text_hash, content in rows:
-                if textcodec.text_hash(textcodec.decompress(bytes(content))) != bytes(text_hash):
+            for text_hash, content, char_count in rows:
+                text = textcodec.decompress(bytes(content))
+                if len(text) != char_count or textcodec.text_hash(text) != bytes(text_hash):
                     return False
     return True
 

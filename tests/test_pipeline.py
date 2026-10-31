@@ -3,11 +3,15 @@
 import json
 import os
 import random
+import runpy
 from pathlib import Path
 
 import psycopg
 import pyarrow.parquet as pq
 import pytest
+from alembic.migration import MigrationContext
+from alembic.operations import Operations
+from sqlalchemy import create_engine
 
 from midstream import dedup, export, ingest, query, reprocess
 from midstream.adapters import ADAPTERS
@@ -41,6 +45,7 @@ def conn():
             if statement.strip():
                 connection.execute(statement)
         connection.execute(SCHEMA.with_name("0004_staging_hash.sql").read_text(encoding="utf-8"))
+        connection.execute(SCHEMA.with_name("0005_release_char_count.sql").read_text(encoding="utf-8"))
         connection.commit()
         yield connection
 
@@ -86,6 +91,9 @@ def test_ingest_query_update_export(conn, tmp_path):
     table = pq.read_table(files[0])
     assert table.num_rows == 3
     assert sorted(table.column("ordinal").to_pylist()) == [0, 1, 2]
+    stats = export.release_stats(conn, release)
+    assert stats["char_count"] == sum(len(text) for text in table.column("text").to_pylist())
+    assert stats["split_char_counts"] == {"train": stats["char_count"], "val": 0, "test": 0}
 
     # 同一来源的改动产生新版本，未变记录不动，已发布数据集不受影响
     second = write(tmp_path / "b.jsonl", [
@@ -100,6 +108,7 @@ def test_ingest_query_update_export(conn, tmp_path):
         "SELECT count(*) FROM document_version WHERE is_current"
     ).fetchone()[0] == 3
     assert export.verify_release(conn, release)
+    assert export.release_stats(conn, release) == stats
 
     # 同一作品的文档必须落在同一侧
     splits = conn.execute(
@@ -110,6 +119,84 @@ def test_ingest_query_update_export(conn, tmp_path):
            GROUP BY w.work_id"""
     ).fetchall()
     assert all(count == 1 for _, count in splits)
+
+
+@pytest.mark.parametrize("splits", [
+    {"train": 1.0}, {"val": 1.0}, {"test": 1.0},
+    {"train": 0.4, "val": 0.3, "test": 0.3},
+])
+def test_release_char_counts(conn, tmp_path, splits):
+    # 补充平面字、组合字符、全角空格和换行均按 Unicode 码点计数；重复成员分别计。
+    texts = ["甲　乙，\n𠀋😀e\u0301", "甲　乙，\n𠀋😀e\u0301"]
+    texts.extend(f"第{i}篇：古文。" for i in range(20))
+    path = write(tmp_path / "chars.jsonl", [
+        row(f"chars#{i}", text, book=f"书{i}") for i, text in enumerate(texts)
+    ])
+    ingest.ingest(conn, ADAPTERS["ccc_corpus"], [path])
+    release = export.create_release(conn, export.Recipe.load({
+        "name": "chars", "seed": "chars", "splits": splits,
+        "filters": {"quality": ["ok", "flagged"]},
+    }))
+    files = export.write_parquet(conn, release, tmp_path / "export")
+    exported = []
+    expected = {"train": 0, "val": 0, "test": 0}
+    for path in files:
+        values = pq.read_table(path).column("text").to_pylist()
+        exported.extend(values)
+        expected[path.stem] = sum(map(len, values))
+    assert sorted(exported) == sorted(texts)
+    assert all(expected[split] > 0 for split in splits)
+    assert export.release_stats(conn, release) == {
+        "release_id": release, "name": "chars",
+        "char_count": sum(map(len, texts)), "split_char_counts": expected,
+    }
+    assert export.verify_release(conn, release)
+    with pytest.raises(export.ExportError, match="不存在"):
+        export.release_stats(conn, release + 1)
+
+    # 总数及划分和仍一致的统计错误也必须被 verify 发现。
+    conn.execute(
+        "UPDATE dataset_release SET char_count = char_count + 1,"
+        " train_char_count = train_char_count + 1 WHERE release_id = %s", (release,),
+    )
+    assert not export.verify_release(conn, release)
+
+
+def test_release_char_count_migration(conn, tmp_path):
+    path = write(tmp_path / "old.jsonl", [row("old#1", "古文，\n𠀋"), row("old#2", "古文，\n𠀋")])
+    ingest.ingest(conn, ADAPTERS["ccc_corpus"], [path])
+    releases = [export.create_release(conn, export.Recipe.load({
+        "name": split, "seed": "old", "splits": {split: 1.0},
+    })) for split in ("train", "val", "test")]
+    before = [export.release_stats(conn, release) for release in releases]
+    conn.commit()
+    # 当前正文长度变化后，迁移仍须按旧数据集的固定版本回填。
+    reprocess.reprocess(conn, reprocess.Rule(
+        "chars-test-v1", None, lambda doc: reprocess.Change(text=doc["text"] + "新增"),
+    ), dry_run=False)
+    revision = runpy.run_path(str(SCHEMA.with_name("0005_release_char_count.py")))
+    engine = create_engine("postgresql+psycopg://", creator=lambda: psycopg.connect(DSN))
+    try:
+        with engine.begin() as connection:
+            with Operations.context(MigrationContext.configure(connection)):
+                revision["downgrade"]()
+                connection.exec_driver_sql(
+                    "INSERT INTO dataset_release (name, recipe, content_digest)"
+                    " VALUES ('empty', '{}', %s)", (export._digest([]),),
+                )
+                revision["upgrade"]()
+    finally:
+        engine.dispose()
+    assert [export.release_stats(conn, release) for release in releases] == before
+    assert all(export.verify_release(conn, release) for release in releases)
+    empty = conn.execute("SELECT release_id FROM dataset_release WHERE name = 'empty'").fetchone()[0]
+    assert export.release_stats(conn, empty)["split_char_counts"] == {"train": 0, "val": 0, "test": 0}
+    assert export.release_stats(conn, empty)["char_count"] == 0
+    assert export.verify_release(conn, empty)
+    for update in ("char_count = -1", "char_count = char_count + 1",
+                   "char_count = 0, train_char_count = -1, val_char_count = 1, test_char_count = 0"):
+        with pytest.raises(psycopg.errors.CheckViolation), conn.transaction():
+            conn.execute(f"UPDATE dataset_release SET {update} WHERE release_id = %s", (empty,))
 
 
 def test_training_history_blocks_held_out_work(conn, tmp_path):

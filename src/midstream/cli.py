@@ -69,7 +69,12 @@ def _export(conn, args) -> int:
     recipe = export.Recipe.load(data)
     release_id = export.create_release(conn, recipe)
     files = export.write_parquet(conn, release_id, config.EXPORT_ROOT / recipe.name)
-    _print({"release_id": release_id, "files": [str(f) for f in files]})
+    _print({**export.release_stats(conn, release_id), "files": [str(f) for f in files]})
+    return 0
+
+
+def _release_stats(conn, args) -> int:
+    _print(export.release_stats(conn, args.release_id))
     return 0
 
 
@@ -133,7 +138,11 @@ def main() -> int:
     p.add_argument("recipe")
     p.set_defaults(handler=_export)
 
-    p = commands.add_parser("verify", help="校验数据集成员与正文")
+    p = commands.add_parser("release-stats", help="查看数据集发布的总字符数及各划分字符数")
+    p.add_argument("release_id", type=int)
+    p.set_defaults(handler=_release_stats)
+
+    p = commands.add_parser("verify", help="校验数据集成员、字符数与正文")
     p.add_argument("release_id", type=int)
     p.set_defaults(handler=_verify)
 
