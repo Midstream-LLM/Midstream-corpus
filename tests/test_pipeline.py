@@ -65,6 +65,34 @@ def write(path, lines):
     return path
 
 
+def test_dataset_workbench_actions(conn, tmp_path, monkeypatch):
+    from fastapi.testclient import TestClient
+    from midstream import api, config, exporters
+    seed_metadata(conn, 20)
+    monkeypatch.setattr(config, 'EXPORT_ROOT', tmp_path)
+    release = export.create_release(conn, export.Recipe.load({'name': 'workbench', 'seed': 's', 'splits': {'train': 1}}))
+    result = exporters.export_release(conn, release)
+    before = export.get_release(conn, release)
+    app = api.create_app()
+    app.dependency_overrides[api.connection] = lambda: conn
+    app.dependency_overrides[api.write_connection] = lambda: conn
+    with TestClient(app) as client, psycopg.connect(DSN, autocommit=True) as control:
+        payload = {'actor': 'tester', 'reason': '工作台验收', 'hash_files': True}
+        assert client.post(f'/api/v1/datasets/{release}/verify', json=payload).status_code == 403
+        job = client.post(f'/api/v1/datasets/{release}/verify', json=payload, headers={'X-Midstream-Action': '1'}).json()
+        Path(result['files'][0]).unlink()
+        jobs._run_next(conn, control)
+        assert jobs.show(control, job['job_id'])['status'] == 'failed'
+        saved = client.post(f'/api/v1/datasets/{release}/training', json={
+            'actor': 'tester', 'reason': '训练依据', 'run_name': 'workbench-train'}, headers={'X-Midstream-Action': '1'})
+        assert saved.status_code == 200
+        registered = client.get(f'/api/v1/datasets/{release}/training').json()
+        assert json.loads(registered[0]['note']) == {'actor': 'tester', 'reason': '训练依据'}
+        with pytest.raises(export.TrainingLeak):
+            export.plan_release(conn, export.Recipe.load({'name': 'leak', 'seed': 's', 'splits': {'val': 1}}))
+        assert export.get_release(conn, release) == before
+
+
 def synthetic_tokenizer(tmp_path, *, chars=False, wide=False):
     from tokenizers import Tokenizer, models, normalizers, pre_tokenizers, processors
     vocab = {'[UNK]': 0, '[BOS]': 1, '[EOS]': 2, '甲': 3, '乙': 4, '丙': 5}

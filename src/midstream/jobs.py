@@ -56,9 +56,16 @@ def _tokenize(conn, params, actor, reason, progress):
                                   shard_tokens=params.get('shard_tokens', 200_000_000), progress=progress)
 
 
+def _dataset_verify(conn, params, actor, reason, progress):
+    progress(0, 1, '校验固定发布与导出文件')
+    if not export.verify_release(conn, params['release_id'], hash_files=params.get('hash_files', False)):
+        raise export.ExportError('校验未通过')
+    return {'release_id': params['release_id'], 'valid': True}
+
+
 HANDLERS = {'batch_resume': _batch_resume, 'dedup': _dedup, 'dedup_spans': _dedup_spans,
             'dataset_create': _dataset_create, 'dataset_export': _dataset_export,
-            'token_stats': _token_stats, 'tokenize': _tokenize}
+            'token_stats': _token_stats, 'tokenize': _tokenize, 'dataset_verify': _dataset_verify}
 
 
 def _event(conn, job_id, message, level='info'):
@@ -88,6 +95,9 @@ def submit(conn, kind, params, actor, reason):
         valid = (set(params) <= allowed and type(params.get('release_id')) is int and params['release_id'] > 0
                  and isinstance(params.get('tokenizer'), str) and bool(params['tokenizer'].strip())
                  and type(params.get('shard_tokens', 1)) is int and params.get('shard_tokens', 1) > 0)
+    elif kind == 'dataset_verify':
+        valid = (set(params) <= {'release_id', 'hash_files'} and type(params.get('release_id')) is int
+                 and params['release_id'] > 0 and type(params.get('hash_files', False)) is bool)
     else:
         valid = set(params) <= {'full'} and type(params.get('full', False)) is bool
     if not valid:

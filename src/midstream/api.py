@@ -34,7 +34,7 @@ class ImportPreview(BaseModel):
 
 
 class JobSubmit(Operation):
-    kind: Literal['batch_resume', 'dedup', 'dedup_spans', 'dataset_create', 'dataset_export', 'token_stats', 'tokenize']
+    kind: Literal['batch_resume', 'dedup', 'dedup_spans', 'dataset_create', 'dataset_export', 'token_stats', 'tokenize', 'dataset_verify']
     params: dict = Field(default_factory=dict)
 
 
@@ -54,6 +54,14 @@ class DatasetExport(Operation):
 
 class TokenStatsRequest(Operation):
     tokenizer: str = Field(min_length=1, max_length=4096)
+
+
+class DatasetVerify(Operation):
+    hash_files: bool = False
+
+
+class TrainingRegister(Operation):
+    run_name: str = Field(min_length=1, max_length=200, pattern=r'\S')
 
 
 class ImportDetect(BaseModel):
@@ -314,6 +322,27 @@ def create_app(static_dir: Path | None = None) -> FastAPI:
     @app.get('/api/v1/datasets/{release_id}/token-stats')
     def dataset_token_stats(release_id: int, conn=Depends(connection)):
         return token_stats.list_stats(conn, release_id)
+
+    @app.post('/api/v1/datasets/{release_id}/verify', dependencies=[Depends(browser_write)])
+    def dataset_verify(release_id: int, body: DatasetVerify, conn=Depends(write_connection)):
+        export.get_release(conn, release_id)
+        return jobs.submit(conn, 'dataset_verify', {'release_id': release_id, 'hash_files': body.hash_files},
+                           body.actor, body.reason)
+
+    @app.post('/api/v1/datasets/{release_id}/training', dependencies=[Depends(browser_write)])
+    def dataset_training(release_id: int, body: TrainingRegister, conn=Depends(write_connection)):
+        management._identity(body.actor, body.reason)
+        export.get_release(conn, release_id)
+        conn.execute('INSERT INTO training_use (release_id,run_name,used_at,note) VALUES (%s,%s,now(),%s)',
+                     (release_id, body.run_name, json.dumps({'actor': body.actor, 'reason': body.reason}, ensure_ascii=False)))
+        conn.commit()
+        return {'release_id': release_id, 'run_name': body.run_name}
+
+    @app.get('/api/v1/datasets/{release_id}/training')
+    def dataset_training_list(release_id: int, conn=Depends(connection)):
+        export.get_release(conn, release_id)
+        return [row[0] for row in conn.execute('SELECT to_jsonb(t) FROM training_use t WHERE release_id=%s'
+                                              ' ORDER BY use_id DESC', (release_id,))]
 
     @app.get('/api/v1/dataset-recipes')
     def recipe_list(conn=Depends(connection)):

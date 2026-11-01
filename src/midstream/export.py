@@ -469,12 +469,12 @@ def create_release(conn: psycopg.Connection, recipe: Recipe) -> int:
 
 def facets(conn, recipe):
     where, params = _selection_where(recipe)
-    result = {name: [] for name in ('sources', 'categories', 'genres', 'eras')}
+    result = {name: [] for name in ('sources', 'categories', 'genres', 'eras', 'quality')}
     for name, value, documents, chars in conn.execute(
         'SELECT f.name, f.value, count(*), sum(v.char_count) FROM document_version v'
         ' JOIN document d USING (doc_id) JOIN source s USING (source_id)'
         " CROSS JOIN LATERAL (VALUES ('sources',s.name),('categories',v.category),"
-        " ('genres',v.genre),('eras',v.composed_label)) f(name,value)"
+        " ('genres',v.genre),('eras',v.composed_label),('quality',v.quality_status)) f(name,value)"
         f' WHERE {where} GROUP BY f.name, f.value ORDER BY f.name, f.value NULLS FIRST', params,
     ):
         result[name].append({'value': value, 'documents': documents, 'chars': int(chars)})
@@ -484,7 +484,11 @@ def facets(conn, recipe):
 def list_releases(conn, *, limit=30, before=None):
     return [row[0] for row in conn.execute(
         'SELECT to_jsonb(r) - \'content_digest\' || jsonb_build_object(\'content_digest\','
-        " encode(content_digest, 'hex')) FROM dataset_release r"
+        " encode(content_digest, 'hex'), 'token_stats', coalesce((SELECT jsonb_agg("
+        " jsonb_build_object('tokenizer_name',t.tokenizer_name,'tokenizer_fingerprint',"
+        " encode(t.tokenizer_fingerprint,'hex'),'total',t.total) ORDER BY t.created_at)"
+        " FROM release_token_stats t WHERE t.release_id=r.release_id AND t.unit='document'), '[]'::jsonb))"
+        " FROM dataset_release r"
         ' WHERE (%s::bigint IS NULL OR release_id < %s) ORDER BY release_id DESC LIMIT %s',
         (before, before, limit))]
 
@@ -495,6 +499,7 @@ def get_release(conn, release_id):
         from .management import ManagementError
         raise ManagementError('not_found', f'数据集 {release_id} 不存在')
     result = rows[0]
+    result.pop('token_stats')
     result['splits'] = {split: {'documents': count, 'chars': int(chars)}
                         for split, count, chars in conn.execute(
                             'SELECT split, count(*), sum(v.char_count) FROM dataset_member m'

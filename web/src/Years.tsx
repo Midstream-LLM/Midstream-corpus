@@ -20,7 +20,8 @@ export function YearFilter({
   values: Record<string, string>;
   onChange: (v: Record<string, string>) => void;
 }) {
-  const [mode, setMode] = useState("any"),
+  const [mode, setMode] = useState(values.era ? "era" : values.only_unknown_years === "true" ? "unknown" :
+      values.year_from || values.year_to ? "range" : "any"),
     [period, setPeriod] = useState("");
   const options = useLoad<{ labels: string[] }>("years/options");
   function changeMode(next: string) {

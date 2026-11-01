@@ -28,12 +28,13 @@ export async function api<T>(
   path: string,
   signal?: AbortSignal,
   body?: unknown,
+  method = "POST",
 ): Promise<T> {
   const response = await fetch("/api/v1/" + path, {
     signal,
     ...(body !== undefined
       ? {
-          method: "POST",
+          method,
           headers: {
             "Content-Type": "application/json",
             "X-Midstream-Action": "1",
