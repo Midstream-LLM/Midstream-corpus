@@ -653,7 +653,25 @@ fn jaccard(a: &[u64], b: &[u64]) -> f64 {
 fn midstream_dedup(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<Deduper>()?;
     m.add_class::<spans::SpanDeduper>()?;
+    m.add_function(wrap_pyfunction!(span_normalize, m)?)?;
     Ok(())
+}
+
+#[pyfunction]
+fn span_normalize(text: &str) -> (String, Vec<usize>) {
+    let mut normalized = String::new();
+    let mut positions = Vec::new();
+    for (position, c) in text.chars().enumerate() {
+        let offset = c as usize * 4;
+        if offset < TABLE.len() {
+            let mapped = u32::from_le_bytes(TABLE[offset..offset + 4].try_into().unwrap());
+            if mapped != 0 {
+                normalized.push(char::from_u32(mapped).unwrap());
+                positions.push(position);
+            }
+        }
+    }
+    (normalized, positions)
 }
 
 #[cfg(test)]

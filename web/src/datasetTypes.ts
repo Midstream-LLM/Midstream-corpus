@@ -8,7 +8,7 @@ export type Reservation = { doc_ids?: number[]; releases?: { release_id: number;
 export type Recipe = {
   name: string; seed: string; filters?: Filter; include?: Filter[]; exclude?: Filter[];
   documents?: { add?: number[]; remove?: number[] };
-  selection?: { dedup?: string; source_priority?: string[] };
+  selection?: { dedup?: string; source_priority?: string[]; min_cut_chars?: number };
   splits: Record<string, number>; split_by?: string; stratify?: string[];
   limits?: Record<string, { max_chars?: number; max_documents?: number }>;
   reserved?: Record<string, Reservation>;

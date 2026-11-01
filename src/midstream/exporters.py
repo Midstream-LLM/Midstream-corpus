@@ -74,20 +74,25 @@ class _HashWriter(io.RawIOBase):
             self.handle.flush()
 
 
-def _documents(conn, release_id):
+def _documents(conn, release_id, *, only_cut=False):
     with conn.cursor(name='export_documents') as cursor:
         cursor.itersize = 16
         cursor.execute(
             'SELECT m.ordinal, m.version_id, v.doc_id, m.split, v.title, b.content,'
-            ' v.authors, v.composed_label, v.category, v.genre, s.name'
+            ' v.authors, v.composed_label, v.category, v.genre, s.name,'
+            ' (SELECT jsonb_agg(jsonb_build_array(start_char,end_char) ORDER BY start_char)'
+            ' FROM dataset_member_cut c WHERE c.release_id=m.release_id AND c.version_id=m.version_id) cuts'
             ' FROM dataset_member m JOIN document_version v USING (version_id)'
             ' JOIN text_blob b USING (text_hash) JOIN document d USING (doc_id)'
-            ' JOIN source s USING (source_id) WHERE m.release_id = %s ORDER BY m.split, m.ordinal',
+            ' JOIN source s USING (source_id) WHERE m.release_id = %s' +
+            (' AND EXISTS(SELECT 1 FROM dataset_member_cut c WHERE c.release_id=m.release_id AND c.version_id=m.version_id)' if only_cut else '') +
+            ' ORDER BY m.split, m.ordinal',
             (release_id,))
-        keys = DEFAULT_FIELDS + ['authors', 'era', 'category', 'genre', 'source']
+        keys = DEFAULT_FIELDS + ['authors', 'era', 'category', 'genre', 'source', '_cuts']
         for row in cursor:
             document = dict(zip(keys, row))
-            document['text'] = textcodec.decompress(bytes(document['text']))
+            from .span_cuts import apply
+            document['text'] = apply(textcodec.decompress(bytes(document['text'])),document.pop('_cuts') or [])
             yield document
 
 
@@ -292,7 +297,8 @@ def write_tokens(conn, release_id, tokenizer, *, shard_tokens=200_000_000, progr
                 for record in token_stats._members(conn, release_id, tokenizer.fingerprint, content=True):
                     content = record.pop('content')
                     if record['tokens']:
-                        yield record, textcodec.decompress(bytes(content))
+                        from .span_cuts import apply
+                        yield record, apply(textcodec.decompress(bytes(content)),record.pop('_cuts') or [])
 
             total_docs = sum(value['documents'] for value in release['splits'].values())
             for batch in token_stats._text_batches(items()):

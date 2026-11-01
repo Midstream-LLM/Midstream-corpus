@@ -69,14 +69,17 @@ class Selection:
 
     dedup: str = "none"
     source_priority: tuple[str, ...] = ()
+    min_cut_chars: int = 64
 
     @classmethod
     def load(cls, data: dict) -> "Selection":
         unknown = set(data) - set(cls.__dataclass_fields__)
         if unknown:
             raise ExportError(f"未知的选用字段：{sorted(unknown)}")
-        selection = cls(data.get("dedup", "none"), tuple(data.get("source_priority", ())))
-        if selection.dedup not in ("none", "document"):
+        selection = cls(data.get("dedup", "none"), tuple(data.get("source_priority", ())), data.get('min_cut_chars',64))
+        if type(selection.min_cut_chars) is not int or selection.min_cut_chars < 1:
+            raise ExportError('min_cut_chars 必须为正整数')
+        if selection.dedup not in ("none", "document", "span"):
             raise ExportError(f"未知的去重方式：{selection.dedup}")
         return selection
 
@@ -366,10 +369,12 @@ def _check_training_history(conn: psycopg.Connection, held_out: list[int]) -> No
         raise TrainingLeak(f"验证或测试集包含已训练过的文档，例如 {[row[0] for row in leaked]}")
 
 
-def _digest(members: list[tuple[int, int, str, bytes]]) -> bytes:
+def _digest(members: list[tuple[int, int, str, bytes]], cuts=None) -> bytes:
     digest = hashlib.sha256()
     for ordinal, version_id, split, text_hash in members:
         digest.update(f"{ordinal}:{version_id}:{split}:{text_hash.hex()}\n".encode())
+        for start,end in (cuts or {}).get(version_id,()):
+            digest.update(f'cut:{version_id}:{start}:{end}\n'.encode())
     return digest.digest()
 
 
@@ -378,6 +383,7 @@ class ReleasePlan:
     recipe: Recipe
     members: list[tuple[int, int, str, bytes]]
     report: dict
+    cuts: dict = field(default_factory=dict)
 
 
 def _distributions(kept, groups, assigned):
@@ -412,8 +418,14 @@ def plan_release(conn: psycopg.Connection, recipe: Recipe, *, tokenizer=None) ->
     reserved = _reserved_docs(conn, recipe)
     groups = _group_keys(conn, list({item.doc_id for item in selected} | reserved.keys()))
     kept = selected
-    if recipe.selection.dedup == "document":
+    if recipe.selection.dedup in ("document", "span"):
         kept = _drop_duplicates(conn, recipe.selection, selected)
+    cuts = {}
+    if recipe.selection.dedup == 'span':
+        from . import span_cuts
+        kept,cuts = span_cuts.plan(conn,recipe,kept)
+        if not kept:
+            raise ExportError('裁剪后没有满足 min_chars 的文档')
     assigned, totals, warnings = _assign_splits(recipe, kept, groups, reserved)
     _check_training_history(
         conn, [doc_id for doc_id, group in groups.items() if assigned.get(group, 'train') != 'train']
@@ -439,10 +451,10 @@ def plan_release(conn: psycopg.Connection, recipe: Recipe, *, tokenizer=None) ->
     plan = ReleasePlan(recipe, members, {
         **selection_report, 'documents': len(kept), 'chars': chars, 'split_by': recipe.split_by,
         'splits': splits, 'distributions': _distributions(kept, groups, assigned), 'warnings': warnings,
-    })
+    }, cuts)
     if tokenizer is not None:
         from . import token_stats
-        plan.report['token_stats'] = token_stats.estimate(conn, kept, groups, assigned, tokenizer)
+        plan.report['token_stats'] = token_stats.estimate(conn, kept, groups, assigned, tokenizer, cuts=cuts)
     return plan
 
 
@@ -474,7 +486,7 @@ def write_release(conn: psycopg.Connection, plan: ReleasePlan) -> int:
         " train_char_count, val_char_count, test_char_count, selection_report)"
         " VALUES (%s, %s, %s, %s, %s, %s, %s, %s)"
         " RETURNING release_id",
-        (recipe.name, json.dumps(recipe.raw, ensure_ascii=False), _digest(plan.members),
+        (recipe.name, json.dumps(recipe.raw, ensure_ascii=False), _digest(plan.members,plan.cuts),
          sum(char_counts.values()), char_counts["train"], char_counts["val"], char_counts["test"],
          json.dumps(selection_report)),
     ).fetchone()[0]
@@ -483,6 +495,11 @@ def write_release(conn: psycopg.Connection, plan: ReleasePlan) -> int:
     ) as copy:
         for ordinal, version_id, split, _ in plan.members:
             copy.write_row((release_id, version_id, ordinal, split))
+    with conn.cursor() as cursor, cursor.copy(
+        'COPY dataset_member_cut (release_id,version_id,start_char,end_char) FROM STDIN') as copy:
+        for version,intervals in sorted(plan.cuts.items()):
+            for start,end in intervals:
+                copy.write_row((release_id,version,start,end))
     conn.commit()
     return release_id
 
@@ -526,9 +543,11 @@ def get_release(conn, release_id):
     result.pop('token_stats')
     result['splits'] = {split: {'documents': count, 'chars': int(chars)}
                         for split, count, chars in conn.execute(
-                            'SELECT split, count(*), sum(v.char_count) FROM dataset_member m'
+                            'SELECT split, count(*), sum(v.char_count-coalesce(c.chars,0)) FROM dataset_member m'
                             ' JOIN document_version v USING (version_id)'
-                            ' WHERE release_id = %s GROUP BY split', (release_id,))}
+                            ' LEFT JOIN (SELECT version_id,sum(end_char-start_char) chars FROM dataset_member_cut'
+                            ' WHERE release_id=%s GROUP BY version_id) c USING(version_id)'
+                            ' WHERE m.release_id = %s GROUP BY split', (release_id,release_id))}
     return result
 
 
@@ -598,6 +617,8 @@ def verify_release(conn: psycopg.Connection, release_id: int, *, hash_files: boo
     ).fetchone()
     if expected is None:
         raise ExportError(f"数据集 {release_id} 不存在")
+    from . import span_cuts
+    cuts = span_cuts.load(conn,release_id)
     members = []
     char_counts = {split: 0 for split in SPLIT_NAMES}
     for ordinal, version_id, split, text_hash, char_count in conn.execute(
@@ -607,8 +628,8 @@ def verify_release(conn: psycopg.Connection, release_id: int, *, hash_files: boo
         (release_id,),
     ):
         members.append((ordinal, version_id, split, bytes(text_hash)))
-        char_counts[split] += char_count
-    if _digest(members) != bytes(expected[0]):
+        char_counts[split] += char_count-sum(end-start for start,end in cuts.get(version_id,()))
+    if _digest(members,cuts) != bytes(expected[0]):
         return False
     if (sum(char_counts.values()), char_counts["train"], char_counts["val"],
             char_counts["test"]) != expected[1:]:

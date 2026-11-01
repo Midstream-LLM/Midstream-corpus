@@ -131,8 +131,11 @@ export default function DatasetWizard({ initial, onJob, onClose }: { initial?: R
       <p>手动加入覆盖筛选和排除条件；手动移除最后生效。未记录字段保留未知。</p>
     </div>}
     {step === 1 && <>
-      <label className="check"><input type="checkbox" checked={recipe.selection?.dedup === "document"} onChange={e =>
-        setRecipe({ ...recipe, selection: { ...recipe.selection, dedup: e.target.checked ? "document" : "none" } })} />文档级去重</label>
+      <label>去重方式<select value={recipe.selection?.dedup || "none"} onChange={e =>
+        setRecipe({ ...recipe, selection: { ...recipe.selection, dedup: e.target.value } })}>
+        <option value="none">不去重</option><option value="document">文档级去重</option><option value="span">文档级去重后裁剪重复片段</option></select></label>
+      {recipe.selection?.dedup === "span" && <label>最短裁剪字符数<input type="number" min="1" value={recipe.selection.min_cut_chars || 64}
+        onChange={e => setRecipe({ ...recipe, selection: { ...recipe.selection, min_cut_chars: Number(e.target.value) } })} /></label>}
       <h3>来源优先级（拖动或用按钮排序）</h3>
       <select aria-label="添加优先来源" value="" onChange={e => setRecipe({ ...recipe, selection: { ...recipe.selection, source_priority: [...priority, e.target.value] } })}>
         <option value="">添加来源</option>{base.data?.sources.filter(x => x.value && !priority.includes(x.value)).map(x => <option key={x.value!}>{x.value}</option>)}</select>

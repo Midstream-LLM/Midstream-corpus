@@ -30,7 +30,8 @@ def _fill_cache(conn, release_id, tokenizer, progress):
             cursor.execute(
                 'SELECT b.text_hash, b.content FROM (SELECT DISTINCT v.text_hash'
                 ' FROM dataset_member m JOIN document_version v USING (version_id)'
-                ' WHERE m.release_id = %s) selected JOIN text_blob b USING (text_hash)'
+                ' WHERE m.release_id = %s AND NOT EXISTS(SELECT 1 FROM dataset_member_cut cut'
+                ' WHERE cut.release_id=m.release_id AND cut.version_id=m.version_id)) selected JOIN text_blob b USING (text_hash)'
                 ' LEFT JOIN text_token_count c ON c.text_hash = b.text_hash AND c.tokenizer_fingerprint = %s'
                 ' WHERE c.text_hash IS NULL ORDER BY b.text_hash', (release_id, fingerprint))
             items = ((digest, textcodec.decompress(bytes(content))) for digest, content in cursor)
@@ -56,9 +57,30 @@ def list_stats(conn, release_id):
         ' WHERE release_id = %s ORDER BY created_at, tokenizer_fingerprint', (release_id,))]
 
 
+def _cut_counts(conn, release_id, tokenizer, progress):
+    from . import exporters
+    conn.execute('CREATE TEMP TABLE IF NOT EXISTS cut_token_count (version_id bigint PRIMARY KEY,token_count bigint)'
+                 ' ON COMMIT PRESERVE ROWS')
+    conn.execute('TRUNCATE cut_token_count')
+    count = 0
+    with psycopg.connect(conn.info.dsn) as reader:
+        reader.execute('SET TRANSACTION READ ONLY')
+        items = ((row['version_id'],row['text']) for row in exporters._documents(reader,release_id,only_cut=True))
+        for batch in _text_batches(items):
+            if progress:
+                progress(count,0,'统计裁剪后正文的 token 数')
+            counts = tokenizer.count_batch([text for _,text in batch])
+            with conn.cursor() as writer:
+                writer.executemany('INSERT INTO cut_token_count VALUES(%s,%s)',
+                                   [(vid,n) for (vid,_),n in zip(batch,counts)])
+            count += len(batch)
+    return count
+
+
 def compute(conn, release_id, tokenizer, *, progress=None):
     get_release(conn, release_id)
     computed = _fill_cache(conn, release_id, tokenizer, progress)
+    cut_documents = _cut_counts(conn,release_id,tokenizer,progress)
     if progress:
         progress(computed, computed, '汇总固定发布的 token 统计')
     fingerprint = bytes.fromhex(tokenizer.fingerprint)
@@ -66,10 +88,11 @@ def compute(conn, release_id, tokenizer, *, progress=None):
     by_source, by_category = [], []
     total, percentiles = 0, {}
     for dimension, split, source, category, tokens, quantiles in conn.execute(
-        "WITH counts AS (SELECT m.split, s.name AS source, v.category, c.token_count"
+        "WITH counts AS (SELECT m.split, s.name AS source, v.category, coalesce(ct.token_count,c.token_count) token_count"
         ' FROM dataset_member m JOIN document_version v USING (version_id)'
         ' JOIN document d USING (doc_id) JOIN source s USING (source_id)'
-        ' JOIN text_token_count c ON c.text_hash = v.text_hash AND c.tokenizer_fingerprint = %s'
+        ' LEFT JOIN text_token_count c ON c.text_hash = v.text_hash AND c.tokenizer_fingerprint = %s'
+        ' LEFT JOIN cut_token_count ct USING(version_id)'
         ' WHERE m.release_id = %s)'
         " SELECT CASE WHEN grouping(split)=0 THEN 'split' WHEN grouping(source)=0 THEN 'source'"
         " WHEN grouping(category)=0 THEN 'category' ELSE 'total' END, split,source,category,"
@@ -96,15 +119,20 @@ def compute(conn, release_id, tokenizer, *, progress=None):
          Jsonb(by_category), Jsonb(percentiles)))
     conn.commit()
     unique = conn.execute('SELECT count(DISTINCT v.text_hash) FROM dataset_member m'
-                          ' JOIN document_version v USING (version_id) WHERE m.release_id = %s',
+                          ' JOIN document_version v USING (version_id) WHERE m.release_id = %s'
+                          ' AND NOT EXISTS(SELECT 1 FROM dataset_member_cut cut WHERE cut.release_id=m.release_id AND cut.version_id=m.version_id)',
                           (release_id,)).fetchone()[0]
     record = next(item for item in list_stats(conn, release_id)
                   if item['tokenizer_fingerprint'] == tokenizer.fingerprint and item['unit'] == 'document')
-    return {**record, 'cache': {'computed_texts': computed, 'cached_texts': unique - computed}}
+    cache = {'computed_texts': computed, 'cached_texts': unique - computed}
+    if cut_documents:
+        cache['computed_cut_documents'] = cut_documents
+    return {**record, 'cache': cache}
 
 
-def estimate(conn, kept, groups, assigned, tokenizer):
-    chars_by_text = {item.text_hash: item.char_count for item in kept}
+def estimate(conn, kept, groups, assigned, tokenizer, *, cuts=None):
+    cuts = cuts or {}
+    chars_by_text = {item.text_hash: item.char_count for item in kept if item.version_id not in cuts}
     known = dict(conn.execute(
         'SELECT text_hash, token_count FROM text_token_count WHERE tokenizer_fingerprint = %s'
         ' AND text_hash = ANY(%s)', (bytes.fromhex(tokenizer.fingerprint), list(chars_by_text))))
@@ -119,7 +147,7 @@ def estimate(conn, kept, groups, assigned, tokenizer):
             values.append(distributions[dimension].setdefault(key, [0, 0, 0, 0]))
         for value in values:
             value[3] += 1
-            if item.text_hash in known:
+            if item.version_id not in cuts and item.text_hash in known:
                 value[0] += known[item.text_hash]
                 value[1] += 1
             else:
@@ -148,10 +176,14 @@ def _members(conn, release_id, fingerprint, *, content=False):
         cursor.itersize = 16
         cursor.execute(
             'SELECT m.ordinal,m.version_id,v.doc_id,m.split,s.name AS source,v.category,'
-            ' v.composed_label AS era,c.token_count AS tokens' + (',b.content' if content else '') +
+            ' v.composed_label AS era,coalesce(ct.token_count,c.token_count) AS tokens,'
+            ' (SELECT jsonb_agg(jsonb_build_array(start_char,end_char) ORDER BY start_char)'
+            ' FROM dataset_member_cut cut WHERE cut.release_id=m.release_id AND cut.version_id=m.version_id) AS _cuts' +
+            (',b.content' if content else '') +
             ' FROM dataset_member m JOIN document_version v USING (version_id)'
             ' JOIN document d USING (doc_id) JOIN source s USING (source_id)'
-            ' JOIN text_token_count c ON c.text_hash = v.text_hash AND c.tokenizer_fingerprint = %s' +
+            ' LEFT JOIN text_token_count c ON c.text_hash = v.text_hash AND c.tokenizer_fingerprint = %s'
+            ' LEFT JOIN cut_token_count ct USING(version_id)' +
             (' JOIN text_blob b ON b.text_hash = v.text_hash' if content else '') +
             ' WHERE m.release_id = %s ORDER BY m.split,m.ordinal', (bytes.fromhex(fingerprint), release_id))
         keys = [item.name for item in cursor.description]

@@ -57,6 +57,7 @@ def conn():
         connection.execute(SCHEMA.with_name("0012_dataset_exports.sql").read_text(encoding="utf-8"))
         connection.execute(SCHEMA.with_name("0013_token_stats.sql").read_text(encoding="utf-8"))
         connection.execute(SCHEMA.with_name("0014_text_variants.sql").read_text(encoding="utf-8"))
+        connection.execute(SCHEMA.with_name("0015_member_cuts.sql").read_text(encoding="utf-8"))
         connection.commit()
         yield connection
 
@@ -64,6 +65,91 @@ def conn():
 def write(path, lines):
     path.write_text("\n".join(lines) + "\n", encoding="utf-8")
     return path
+
+
+def test_span_cut_release_exports_tokens_and_frozen_proofs(conn,tmp_path,monkeypatch):
+    import midstream_dedup
+    from midstream import config,exporters,token_stats,tokenizing,span_cuts
+    monkeypatch.setattr(config,'EXPORT_ROOT',tmp_path/'outputs')
+    rng=random.Random(809)
+    shared=''.join(rng.choices('天地玄黄宇宙洪荒日月盈昃辰宿列张寒来暑往秋收冬藏',k=120))
+    left='甲'*150+'，'.join(shared)+'丙'*150
+    right='乙'*150+shared+'丁'*150
+    path=write(tmp_path/'cuts.jsonl',[row('left',left,book='甲书'),row('right',right,book='乙书')])
+    ingest.ingest(conn,ADAPTERS['ccc_corpus'],[path])
+    preferred=conn.execute("INSERT INTO source(name) VALUES('preferred') RETURNING source_id").fetchone()[0]
+    conn.execute("UPDATE document SET source_id=%s WHERE source_key='right'",(preferred,));conn.commit()
+    raw={'name':'uncut','seed':'s','splits':{'train':1}}
+    old=export.create_release(conn,export.Recipe.load(raw))
+    tokenizer=tokenizing.load(synthetic_tokenizer(tmp_path,chars=True))
+    token_stats.compute(conn,old,tokenizer)
+    cached=conn.execute('SELECT count(*) FROM text_token_count').fetchone()[0]
+    recipe=export.Recipe.load({**raw,'name':'cut','selection':{'dedup':'span','source_priority':['preferred'],'min_cut_chars':64}})
+    plan=export.plan_release(conn,recipe)
+    assert plan.cuts and plan.report['documents']==2
+    release=export.write_release(conn,plan)
+    output=exporters.export_release(conn,release,exporters.Options(format='jsonl'))
+    rows=read_export(output)
+    normalized=[midstream_dedup.span_normalize(item['text'])[0] for item in rows]
+    assert sum(shared in text for text in normalized)==1
+    assert sum(len(item['text']) for item in rows)==plan.report['chars']<len(left)+len(right)
+    exact=token_stats.compute(conn,release,tokenizer)
+    assert exact['total']==sum(tokenizer.count_batch([item['text'] for item in rows]))
+    assert exact['cache']['computed_cut_documents']==1
+    assert conn.execute('SELECT count(*) FROM text_token_count').fetchone()[0]==cached
+    token_output=exporters.write_tokens(conn,release,tokenizer,shard_tokens=100)
+    assert token_output['total_tokens']==exact['total']
+    conn.execute('TRUNCATE dup_span');conn.commit()
+    repeated=read_export(exporters.export_release(conn,release,exporters.Options(format='pkl')))
+    assert repeated==rows
+    assert export.verify_release(conn,release,hash_files=True) and export.verify_release(conn,old)
+    assert span_cuts.load(conn,release)==plan.cuts
+
+
+def test_span_cut_transitive_witness_survives_short_document_drop():
+    from midstream import span_cuts
+    items=[export.Candidate(i,i,bytes(32),250,'s','ok',None,None,None) for i in (1,2,3)]
+    links={2:[(1,0,0,200)],3:[(2,0,0,200)]}
+    kept,cuts=span_cuts.assign(items,links,lambda vid:range(250),64,{2:100})
+    assert [item.version_id for item in kept]==[1,3]
+    assert cuts=={3:[(0,200)]}
+    assert kept[0].char_count==250 and kept[1].char_count==50
+    kept,cuts=span_cuts.assign(items,links,lambda vid:range(250),64,{})
+    assert cuts=={2:[(0,200)],3:[(0,200)]} and len(kept)==3
+
+
+def test_span_cuts_simplified_offsets_and_missing_snapshot(conn,tmp_path):
+    from midstream import span_cuts
+    rng=random.Random(810)
+    shared=''.join(rng.choices('齊歡體國學書雲風龍門馬',k=120))
+    path=write(tmp_path/'variant-cuts.jsonl',[row('a','甲'*150+'，'.join(shared)+'丙'*150,book='甲书'),
+                                          row('b','乙'*150+shared+'丁'*150,book='乙书')])
+    ingest.ingest(conn,ADAPTERS['ccc_corpus'],[path])
+    reprocess.reprocess(conn,RULES['t2s-v1'],dry_run=False)
+    recipe=export.Recipe.load({'name':'variant-cuts','seed':'s','splits':{'train':1},'variant':'simplified','selection':{'dedup':'span'}})
+    plan=export.plan_release(conn,recipe)
+    assert plan.cuts and plan.report['documents']==2
+    release=export.write_release(conn,plan)
+    assert export.verify_release(conn,release)
+    conn.execute("DELETE FROM dedup_snapshot WHERE level='paragraph'");conn.commit()
+    with pytest.raises(export.ExportError,match='段落查重'):
+        export.plan_release(conn,recipe)
+    assert span_cuts.load(conn,release)==plan.cuts
+
+
+@pytest.mark.skipif(os.environ.get('MIDSTREAM_CUT_BENCHMARK')!='1',reason='一万组裁剪性能单独测一次')
+def test_cut_ten_thousand_groups():
+    import resource,sys
+    from time import perf_counter
+    from midstream import span_cuts
+    items=[export.Candidate(i,i,bytes(32),256,'s','ok',None,None,None) for i in range(1,20001)]
+    links={i:[(i-1,0,0,128)] for i in range(2,20001,2)}
+    started=perf_counter()
+    kept,cuts=span_cuts.assign(items,links,lambda vid:range(256),64,{})
+    elapsed=perf_counter()-started
+    peak=resource.getrusage(resource.RUSAGE_SELF).ru_maxrss/(1024**2 if sys.platform=='darwin' else 1024)
+    assert len(cuts)==10000 and len(kept)==20000
+    print(f'CUT_BENCHMARK groups=10000 seconds={elapsed:.3f} peak_rss_mib={peak:.1f}')
 
 
 def test_simplified_variant_preserves_main_and_freezes_release(conn,tmp_path):
@@ -1408,7 +1494,7 @@ def test_export_selection_keeps_one_per_cluster(conn, tmp_path):
     assert members == {docs["short"], docs["solo"]}
     with pytest.raises(export.ExportError):
         export.Recipe.load({"name": "bad", "seed": "s", "splits": {"train": 1.0},
-                            "selection": {"dedup": "span"}})
+                            "selection": {"dedup": "not-a-mode"}})
     reprocess.reprocess(conn, reprocess.Rule(
         "selection-test-v1", None, lambda doc: reprocess.Change(text=text())))
     with pytest.raises(export.ExportError, match="已过期"):

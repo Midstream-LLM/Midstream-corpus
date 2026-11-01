@@ -583,8 +583,6 @@ split/split_manifest.json
 
 目录在全部文件完成后才公布并登记 completed。取消只在批次之间生效，清理本次未完成分片，精确缓存和已完成统计保留；重试使用新的 export_id。强制杀进程可能留下隐藏临时目录，不能当作完成导出。`midstream verify <release_id> --hash` 可核对 NPY 和索引文件；默认仍只查文件存在、大小、行数。
 
-## 9. 添加来源适配器
-
 ## 8B. 繁转简派生版本（M7）
 
 命令 midstream reprocess t2s-v1 默认预览；加 --apply 才追加 simplified 版本。固定使用已随项目提供的 OpenCC ver.1.1.9 TSCharacters.txt 第一候选，processing_run 保存 t2s-v1、表 SHA-256 和 length_preserving。只按字符映射，保留标点、空白、段落；当前表逐项检验均为一个 Unicode 码点映射到一个码点，所以原文字符偏移可复用，UTF-8 字节数不保证相同。
@@ -594,6 +592,22 @@ split/split_manifest.json
 配方增加 variant: "simplified" 显式选用。缺失或过期都会报错并列出前几个 doc_id，不回退主线；先运行转换再发布。去重仍按主线 doc_id 关联簇，实际成员固定派生 version_id，字符数和内容摘要使用选中的正文。文档版本列表、详情与数据集向导显示派生类别和过期提示。
 
 新增 3 项测试，隔离库全量 121 项通过、1 性能例跳过，前端构建通过。旧发布 verify 通过；未部署。
+
+## 9. 添加来源适配器
+
+## 8C. 发布时裁剪段落重复（M8）
+
+配方 selection.dedup="span" 先文档级去重，再对保留文档裁剪；selection.min_cut_chars 默认 64，按实际原文区间的字符长度过滤。需要文档、段落快照都覆盖当前主线，先运行 dedup 和 dedup --spans。最短查重有效片段仍是比较表示的 64 字，调整 min_cut_chars 不会增加更短的重复证明。
+
+沿用来源优先级、质量、字数、doc_id 排序。高优先级文档先确定，低优先级只裁已有保留出处证明的片段；重叠区间合并，传递证明保留到已保留材料，避免中间文档因太短舍弃后所有副本消失。裁后按命中的 include/filters.min_chars 最小门槛检查；手动 add 保留其覆盖筛选语义，至少保留一个字符。裁掉空文档。
+
+dup_span 的 start_char/end_char 已是原文 Unicode 字符坐标，左闭右开；source_start_char 为出处起点，出处终点需要用同一 Rust 比较表示映射恢复，不能用两侧原文字数相加猜测。当前 simplified 转换逐字等长，可以组合选用；不等长的转换会报错。span 试算需要读取少量相关正文做偏移映射，不再保证纯元数据，其他试算仍保持只读元数据。
+
+发布把区间固定到 dataset_member_cut。字数为裁后实际值；有裁剪时摘要额外包含按成员顺序排序的区间，没有裁剪时保持旧摘要口径。后续查重重算不改变旧发布；导出与 token 统计使用固定裁后文本。原文缓存只用于未裁剪成员，裁剪成员每次直接计数，任务结果提供 computed_cut_documents，不把裁剪数写回 text_token_count。
+
+一万组合成片段（两万成员）的纯区间分配阶段单次测量：0.020 秒，Python 进程峰值 RSS 119.5 MiB；不含数据库、正文解压和比较表示映射，不能当作全库裁剪性能。全量 124 项通过、2 性能例跳过；本项性能另跑通过，构建通过。
+
+## 9. 添加来源适配器
 
 适配器需实现 `src/midstream/adapters/base.py` 中的接口：
 
