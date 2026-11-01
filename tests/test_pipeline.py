@@ -55,6 +55,7 @@ def conn():
         connection.execute(SCHEMA.with_name("0010_jobs.sql").read_text(encoding="utf-8"))
         connection.execute(SCHEMA.with_name("0011_dataset_recipes.sql").read_text(encoding="utf-8"))
         connection.execute(SCHEMA.with_name("0012_dataset_exports.sql").read_text(encoding="utf-8"))
+        connection.execute(SCHEMA.with_name("0013_token_stats.sql").read_text(encoding="utf-8"))
         connection.commit()
         yield connection
 
@@ -62,6 +63,208 @@ def conn():
 def write(path, lines):
     path.write_text("\n".join(lines) + "\n", encoding="utf-8")
     return path
+
+
+def synthetic_tokenizer(tmp_path, *, chars=False, wide=False):
+    from tokenizers import Tokenizer, models, normalizers, pre_tokenizers, processors
+    vocab = {'[UNK]': 0, '[BOS]': 1, '[EOS]': 2, '甲': 3, '乙': 4, '丙': 5}
+    if wide:
+        vocab.update({f't{i}': i for i in range(6, 65537)})
+        vocab['甲'], vocab['t65536'] = 65536, 3
+    backend = Tokenizer(models.WordLevel(vocab, unk_token='[UNK]'))
+    backend.pre_tokenizer = pre_tokenizers.WhitespaceSplit()
+    if chars:
+        backend.normalizer = normalizers.BertNormalizer(clean_text=False, handle_chinese_chars=True,
+                                                        strip_accents=False, lowercase=False)
+    backend.post_processor = processors.TemplateProcessing(
+        single='[BOS] $A [EOS]', special_tokens=[('[BOS]', 1), ('[EOS]', 2)])
+    backend.enable_padding(length=12, pad_id=0, pad_token='[UNK]')
+    backend.enable_truncation(max_length=3)
+    path = tmp_path / ('wide' if wide else 'chars' if chars else 'words') / 'tokenizer.json'
+    path.parent.mkdir(parents=True)
+    backend.save(str(path))
+    return path
+
+
+def token_release(conn, tmp_path, texts):
+    records = [json.loads(row(str(i), text, book=f'合成书{i}')) for i, text in enumerate(texts)]
+    records[-1]['category'] = None
+    path = write(tmp_path / 'token-input.jsonl', [json.dumps(record, ensure_ascii=False) for record in records])
+    ingest.ingest(conn, ADAPTERS['ccc_corpus'], [path])
+    other = conn.execute("INSERT INTO source (name) VALUES ('tokens-other') RETURNING source_id").fetchone()[0]
+    conn.execute('UPDATE document SET source_id=%s WHERE source_key=%s', (other, str(len(texts)-1)))
+    conn.commit()
+    recipe = export.Recipe.load({'name': 'token-release', 'seed': 's', 'splits': {'train': .8, 'val': .1, 'test': .1}})
+    return export.create_release(conn, recipe), recipe
+
+
+def test_token_stats_job_exact_cache_and_frozen_release(conn, tmp_path, monkeypatch):
+    from fastapi.testclient import TestClient
+    from tokenizers import Tokenizer as Backend
+    from midstream import api, token_stats, tokenizing
+    texts = ['甲 乙 甲', '乙', '甲 乙 甲']
+    release, _ = token_release(conn, tmp_path, texts)
+    path = synthetic_tokenizer(tmp_path)
+    backend = Backend.from_file(str(path))
+    backend.no_padding()
+    backend.no_truncation()
+    direct = [len(backend.encode(text, add_special_tokens=False).ids) for text in texts]
+    assert direct == [3, 1, 3]
+    app = api.create_app()
+    app.dependency_overrides[api.connection] = lambda: conn
+    app.dependency_overrides[api.write_connection] = lambda: conn
+    payload = {'tokenizer': str(path), 'actor': 'tester', 'reason': '合成统计'}
+    with TestClient(app) as client, psycopg.connect(DSN, autocommit=True) as control:
+        assert client.post(f'/api/v1/datasets/{release}/token-stats', json=payload).status_code == 403
+        queued = client.post(f'/api/v1/datasets/{release}/token-stats', json=payload,
+                             headers={'X-Midstream-Action': '1'}).json()
+        jobs._run_next(conn, control)
+        result = jobs.show(control, queued['job_id'])
+        assert result['status'] == 'succeeded', result['error']
+        result = result['result']
+        assert result['total'] == sum(direct) == 7
+        assert sum(result['by_split'].values()) == 7
+        assert {item['source']: item['tokens'] for item in result['by_source']} == {'ccc_corpus': 4, 'tokens-other': 3}
+        assert {'category': None, 'tokens': 3} in result['by_category']
+        assert result['percentiles'] == {'p50': 3, 'p90': 3, 'p95': 3, 'p99': 3}
+        assert result['cache'] == {'computed_texts': 2, 'cached_texts': 0}
+        frozen = client.get(f'/api/v1/datasets/{release}/token-stats').json()
+
+        def no_body(*args):
+            raise AssertionError('重跑命中缓存，不应解压正文')
+
+        with monkeypatch.context() as patch:
+            patch.setattr(token_stats.textcodec, 'decompress', no_body)
+            repeated = token_stats.compute(conn, release, tokenizing.load(path))
+        assert repeated['cache'] == {'computed_texts': 0, 'cached_texts': 2}
+        assert repeated['created_at'] == frozen[0]['created_at']
+        reprocess.reprocess(conn, reprocess.Rule('tokens-update', None,
+                             lambda doc: reprocess.Change(text='丙 甲 乙 甲')))
+        assert client.get(f'/api/v1/datasets/{release}/token-stats').json() == frozen
+
+
+def test_token_estimates_and_independent_tokenizer_records(conn, tmp_path, monkeypatch):
+    from fastapi.testclient import TestClient
+    from midstream import api, token_stats, tokenizing
+    release, recipe = token_release(conn, tmp_path, ['甲乙', '甲乙丙', '甲乙'])
+    path = synthetic_tokenizer(tmp_path)
+    tokenizer = tokenizing.load(path)
+    conn.commit()
+    app = api.create_app()
+    app.dependency_overrides[api.connection] = lambda: conn
+
+    def preview():
+        with monkeypatch.context() as patch:
+            patch.setattr(token_stats.textcodec, 'decompress', lambda *args: pytest.fail('试算不应解压正文'))
+            with TestClient(app) as client:
+                response = client.post('/api/v1/datasets/preview', json={'recipe': recipe.raw, 'tokenizer': str(path)})
+                assert response.status_code == 200
+                return response.json()['token_stats']
+
+    unknown = preview()
+    assert unknown['status'] == 'unknown' and unknown['coverage'] == 0
+    assert unknown['exact'] is None and unknown['estimated'] is None and unknown['total'] is None
+    partial = export.create_release(conn, export.Recipe.load({
+        **recipe.raw, 'name': 'partial-tokens', 'include': [], 'documents': {'add': [1]}}))
+    token_stats.compute(conn, partial, tokenizer)
+    estimated = preview()
+    assert estimated['status'] == 'estimated' and estimated['coverage'] == pytest.approx(2 / 3)
+    assert estimated['exact'] == 2 and estimated['estimated'] == 1.5 and estimated['total'] == 3.5
+    full = token_stats.compute(conn, release, tokenizer)
+    exact = preview()
+    assert exact['status'] == 'exact' and exact['estimated'] == 0 and exact['exact'] == full['total'] == 3
+    second = tokenizing.load(synthetic_tokenizer(tmp_path, chars=True))
+    other = token_stats.compute(conn, release, second)
+    assert other['total'] == 7 and second.fingerprint != tokenizer.fingerprint
+    assert len(token_stats.list_stats(conn, release)) == 2
+    assert conn.execute('SELECT count(*) FROM text_token_count').fetchone()[0] == 4
+
+
+def test_token_shards_match_statistics_and_dtype(conn, tmp_path, monkeypatch):
+    import numpy as np
+    from midstream import config, token_stats, tokenizing
+    monkeypatch.setattr(config, 'EXPORT_ROOT', tmp_path / 'outputs')
+    texts = ['甲 乙 甲', '乙', '甲 乙 甲']
+    release, _ = token_release(conn, tmp_path, texts)
+    before = export.get_release(conn, release)
+    with psycopg.connect(DSN, autocommit=True) as control:
+        for wide in (False, True):
+            path = synthetic_tokenizer(tmp_path, wide=wide)
+            job = jobs.submit(conn, 'tokenize', {'release_id': release, 'tokenizer': str(path), 'shard_tokens': 4},
+                              'tester', '分片一致性')
+            jobs._run_next(conn, control)
+            completed = jobs.show(control, job['job_id'])
+            assert completed['status'] == 'succeeded', completed['error']
+            result = completed['result']
+            manifest = json.loads(Path(result['manifest']).read_text())
+            root = Path(result['manifest']).parent
+            shard_info = [json.loads(line) for line in (root / 'tokens/shard_info.jsonl').read_text().splitlines()]
+            arrays = {item['shard']: np.load(item['path'], mmap_mode='r', allow_pickle=False) for item in shard_info}
+            assert all(array.dtype == np.dtype('<u4' if wide else '<u2') for array in arrays.values())
+            tokenizer = tokenizing.load(path)
+            direct = tokenizer.encode_batch(texts)
+            records = [json.loads(line) for line in (root / 'manifest/docs_tokens.jsonl').read_text().splitlines()]
+            docs = dict(conn.execute('SELECT doc_id,source_key FROM document'))
+            for record in records:
+                actual = arrays[record['shard']][record['offset']:record['offset'] + record['tokens']].tolist()
+                assert actual == direct[int(docs[record['doc_id']])]
+            if wide:
+                assert any(65536 in array for array in arrays.values())
+            stats = next(item for item in token_stats.list_stats(conn, release)
+                         if item['tokenizer_fingerprint'] == tokenizer.fingerprint)
+            assert sum(map(len, arrays.values())) == sum(item['tokens'] for item in records) == stats['total'] == manifest['total_tokens'] == 7
+            assert manifest['add_special_tokens'] is False and manifest['truncation'] is False
+            assert manifest['content_digest'] == before['content_digest']
+            assert export.verify_release(conn, release, hash_files=True)
+    assert export.get_release(conn, release) == before
+
+
+def test_token_cancel_keeps_cache_and_no_completed_shards(conn, tmp_path, monkeypatch):
+    from midstream import config, token_stats
+    monkeypatch.setattr(config, 'EXPORT_ROOT', tmp_path / 'outputs')
+    release, _ = token_release(conn, tmp_path, [f'甲 {i}' for i in range(100)])
+    path = synthetic_tokenizer(tmp_path)
+    with psycopg.connect(DSN, autocommit=True) as control:
+        job = jobs.submit(conn, 'token_stats', {'release_id': release, 'tokenizer': str(path)}, 'test', '分批取消')
+        original = jobs.HANDLERS['token_stats']
+
+        def cancelled(conn, params, actor, reason, progress):
+            def boundary(current, total, message):
+                if current and '统计缺失' in message:
+                    jobs.cancel(control, job['job_id'], 'test', '保留首批缓存')
+                progress(current, total, message)
+            return original(conn, params, actor, reason, boundary)
+
+        monkeypatch.setitem(jobs.HANDLERS, 'token_stats', cancelled)
+        jobs._run_next(conn, control)
+        assert jobs.show(control, job['job_id'])['status'] == 'cancelled'
+        assert conn.execute('SELECT count(*) FROM text_token_count').fetchone()[0] == 64
+        assert token_stats.list_stats(conn, release) == []
+        monkeypatch.setitem(jobs.HANDLERS, 'token_stats', original)
+        retried = jobs.retry(conn, job['job_id'], 'test', '补齐计数')
+        jobs._run_next(conn, control)
+        assert jobs.show(control, retried['job_id'])['result']['cache'] == {'computed_texts': 36, 'cached_texts': 64}
+        token_job = jobs.submit(conn, 'tokenize', {'release_id': release, 'tokenizer': str(path), 'shard_tokens': 20},
+                                'test', '分片取消')
+        encoder = jobs.HANDLERS['tokenize']
+
+        def cancelled_export(conn, params, actor, reason, progress):
+            def boundary(current, total, message):
+                if current and '编码并写出' in message:
+                    jobs.cancel(control, token_job['job_id'], 'test', '清理未完成分片')
+                progress(current, total, message)
+            return encoder(conn, params, actor, reason, boundary)
+
+        monkeypatch.setitem(jobs.HANDLERS, 'tokenize', cancelled_export)
+        jobs._run_next(conn, control)
+        assert jobs.show(control, token_job['job_id'])['status'] == 'cancelled'
+        assert conn.execute('SELECT count(*) FROM export_artifact').fetchone()[0] == 0
+        assert not list((config.EXPORT_ROOT / 'token-release').iterdir())
+        assert token_stats.list_stats(conn, release)[0]['total'] == 200
+        monkeypatch.setitem(jobs.HANDLERS, 'tokenize', encoder)
+        retried = jobs.retry(conn, token_job['job_id'], 'test', '重新写分片')
+        jobs._run_next(conn, control)
+        assert jobs.show(control, retried['job_id'])['result']['total_tokens'] == 200
 
 
 def seed_metadata(conn, count, group_size=1):

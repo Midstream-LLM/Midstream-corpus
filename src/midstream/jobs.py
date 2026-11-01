@@ -43,8 +43,22 @@ def _dataset_export(conn, params, actor, reason, progress):
                                     exporters.Options.model_validate(params.get('options', {})), progress=progress)
 
 
+def _token_stats(conn, params, actor, reason, progress):
+    from . import token_stats, tokenizing
+    return token_stats.compute(conn, params['release_id'], tokenizing.load(params['tokenizer']), progress=progress)
+
+
+def _tokenize(conn, params, actor, reason, progress):
+    from . import exporters, token_stats, tokenizing
+    tokenizer = tokenizing.load(params['tokenizer'])
+    token_stats.compute(conn, params['release_id'], tokenizer, progress=progress)
+    return exporters.write_tokens(conn, params['release_id'], tokenizer,
+                                  shard_tokens=params.get('shard_tokens', 200_000_000), progress=progress)
+
+
 HANDLERS = {'batch_resume': _batch_resume, 'dedup': _dedup, 'dedup_spans': _dedup_spans,
-            'dataset_create': _dataset_create, 'dataset_export': _dataset_export}
+            'dataset_create': _dataset_create, 'dataset_export': _dataset_export,
+            'token_stats': _token_stats, 'tokenize': _tokenize}
 
 
 def _event(conn, job_id, message, level='info'):
@@ -69,6 +83,11 @@ def submit(conn, kind, params, actor, reason):
                  and params['release_id'] > 0)
         if valid:
             exporters.Options.model_validate(params.get('options', {}))
+    elif kind in ('token_stats', 'tokenize'):
+        allowed = {'release_id', 'tokenizer'} | ({'shard_tokens'} if kind == 'tokenize' else set())
+        valid = (set(params) <= allowed and type(params.get('release_id')) is int and params['release_id'] > 0
+                 and isinstance(params.get('tokenizer'), str) and bool(params['tokenizer'].strip())
+                 and type(params.get('shard_tokens', 1)) is int and params.get('shard_tokens', 1) > 0)
     else:
         valid = set(params) <= {'full'} and type(params.get('full', False)) is bool
     if not valid:

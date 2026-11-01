@@ -24,6 +24,7 @@ const labels: Record<string, string> = {
 const kinds: Record<string, string> = {
   batch_resume: "批次处理 / 发布", dedup: "文档查重", dedup_spans: "段落查重",
   dataset_create: "数据集发布", dataset_export: "数据集导出",
+  token_stats: "Token 统计", tokenize: "Token 分片",
 };
 const active = (job: Job) => ["queued", "running"].includes(job.status);
 

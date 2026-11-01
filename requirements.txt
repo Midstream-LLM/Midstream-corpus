@@ -8,3 +8,5 @@ maturin>=1.8,<2           # 构建 Rust 查重扩展
 httpx>=0.28,<1           # LLM 共用 HTTP 连接、超时和测试传输；BSD-3-Clause
 fastapi>=0.115,<1         # HTTP API，MIT
 uvicorn>=0.30,<1          # ASGI 服务，BSD-3-Clause
+tokenizers>=0.22,<0.23    # Hugging Face 并行分词，仅加载本地 JSON；Apache-2.0，兼容 GPL-3.0
+numpy>=2.0,<3            # 与击水一致的 NPY token 分片；BSD-3-Clause，兼容 GPL-3.0

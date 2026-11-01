@@ -2,6 +2,7 @@
 
 import argparse
 import dataclasses
+import getpass
 import json
 import os
 import sys
@@ -75,9 +76,11 @@ def _export(conn, args) -> int:
 
 
 def _export_preview(conn, args) -> int:
+    from . import tokenizing
     recipe = export.Recipe.load(json.loads(Path(args.recipe).read_text(encoding='utf-8')))
+    tokenizer = tokenizing.load(args.tokenizer) if args.tokenizer else None
     conn.execute('SET TRANSACTION READ ONLY')
-    _print(export.plan_release(conn, recipe).report)
+    _print(export.plan_release(conn, recipe, tokenizer=tokenizer).report)
     return 0
 
 
@@ -86,6 +89,14 @@ def _export_release(conn, args) -> int:
                                 shard_mb=args.shard_mb, max_chars=args.max_chars,
                                 overlap_chars=args.overlap_chars, compression=args.compression)
     _print(exporters.export_release(conn, args.release_id, options))
+    return 0
+
+
+def _token_job(conn, args) -> int:
+    params = {'release_id': args.release_id, 'tokenizer': str(Path(args.tokenizer).expanduser().resolve())}
+    if args.command == 'tokenize':
+        params['shard_tokens'] = args.shard_tokens
+    _print(jobs.submit(conn, args.command.replace('-', '_'), params, args.actor, args.reason or args.command))
     return 0
 
 
@@ -232,7 +243,18 @@ def main() -> int:
 
     p = commands.add_parser('export-preview', help='只读试算选用、划分和分布')
     p.add_argument('recipe')
+    p.add_argument('--tokenizer', help='本地 tokenizer.json 或所在目录；仅估算缓存之外的 token 数')
     p.set_defaults(handler=_export_preview)
+
+    for name in ('token-stats', 'tokenize'):
+        p = commands.add_parser(name, help='提交 token 统计任务' if name == 'token-stats' else '提交 token 分片任务')
+        p.add_argument('release_id', type=int)
+        p.add_argument('--tokenizer', required=True)
+        p.add_argument('--actor', default=getpass.getuser())
+        p.add_argument('--reason')
+        if name == 'tokenize':
+            p.add_argument('--shard-tokens', type=int, default=200_000_000)
+        p.set_defaults(handler=_token_job)
 
     p = commands.add_parser('export-release', help='按固定发布导出 Parquet、JSONL 或 PKL')
     p.add_argument('release_id', type=int)

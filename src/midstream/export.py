@@ -398,7 +398,7 @@ def _distributions(kept, groups, assigned):
             for dimension, items in totals.items()}
 
 
-def plan_release(conn: psycopg.Connection, recipe: Recipe) -> ReleasePlan:
+def plan_release(conn: psycopg.Connection, recipe: Recipe, *, tokenizer=None) -> ReleasePlan:
     """仅用元数据试算；不生成发布、文件或正文解压。"""
     selected = _select(conn, recipe)
     if not selected:
@@ -431,10 +431,14 @@ def plan_release(conn: psycopg.Connection, recipe: Recipe) -> ReleasePlan:
                          'document_ratio': ndocs / len(kept), 'char_ratio': nchars / chars}
         if abs(ratio - recipe.splits.get(split, 0)) > .01:
             warnings.append(f'{split} 实际比例 {ratio:.2%}，与目标偏差超过 1 个百分点')
-    return ReleasePlan(recipe, members, {
+    plan = ReleasePlan(recipe, members, {
         **selection_report, 'documents': len(kept), 'chars': chars, 'split_by': recipe.split_by,
         'splits': splits, 'distributions': _distributions(kept, groups, assigned), 'warnings': warnings,
     })
+    if tokenizer is not None:
+        from . import token_stats
+        plan.report['token_stats'] = token_stats.estimate(conn, kept, groups, assigned, tokenizer)
+    return plan
 
 
 def write_release(conn: psycopg.Connection, plan: ReleasePlan) -> int:

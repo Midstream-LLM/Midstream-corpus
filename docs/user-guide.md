@@ -518,6 +518,71 @@ midstream record-training small-sources-v1 run-name
 
 第一个参数是数据集名称，不是 `release_id`；第二个参数是训练运行名称。命令登记当前时间，不启动训练。相同数据集与运行名称的组合只能登记一次，重复执行会因唯一约束报错。登记后，后续创建数据集的训练历史检查会使用该记录。
 
+## 8A. Token 统计与分片
+
+先升级迁移 `0013` 并安装 requirements.txt。分词使用本地 Hugging Face tokenizers（[Apache-2.0](https://github.com/huggingface/tokenizers/blob/main/LICENSE)，[兼容 GPL-3.0](https://apache.org/licenses/GPL-compatibility.html)），NPY 写出使用 NumPy（[BSD-3-Clause](https://numpy.org/doc/stable/license.html)）。不会下载分词器或调用模型 API。
+
+### 精确统计
+
+```bash
+# 另一个终端手动启动，和 API/CLI 使用同一数据库配置
+midstream worker
+midstream token-stats 1 --tokenizer /path/to/tokenizer.json
+midstream jobs show 123
+```
+
+token-stats 只提交任务，输出 job_id；worker 完成后可通过 jobs show 或 HTTP 读取结果。tokenizer 可为 JSON 文件或包含 tokenizer.json 的目录，必须是运行 worker 的机器可读的路径。CLI 默认 actor 为当前系统用户名、reason 为命令名，可用 `--actor`、`--reason` 指定。
+
+统计单位本轮固定为 `document`，按发布中固定的 version_id 读取正文；同一正文的计数由 `(text_hash, tokenizer_fingerprint)` 缓存，全库复用。不同成员即使正文相同，汇总时也各计一次。流式读取，每批最多 64 篇且约 1 Mi 字符，单篇超过预算时单独处理；调用 tokenizers.encode_batch 使用库内并行能力。计数每批提交；取消/中断保留已完成缓存，未完成时不保存半份发布统计，重试只补缺失正文。
+
+结果包括总数 total、by_split（train/val/test）、by_source、by_category 和文档长度的 p50/p90/p95/p99（离散分位数）。来源和类别为带 tokens 的对象数组，未知类别保留 null。精确记录绑定 release_id、unit、分词器指纹，后续版本切换不会改变它；重跑保留同一记录及 created_at。任务结果另带 cache.computed_texts/cached_texts；分词器显示名称来自文件名或目录名，身份以指纹为准。
+
+### 试算 token 数
+
+```bash
+midstream export-preview recipes/small-sources-v1.json --tokenizer /path/to/tokenizer.json
+```
+
+只加载分词器指纹、读取元数据和已有缓存，不解压正文、不分词、不写缓存。返回 token_stats 以及各划分、来源、类别的估算：
+
+- status 为 exact / estimated / unknown。
+- exact 为已命中缓存的 token 小计；estimated 仅为未覆盖部分的估计；total 为两者之和。全部覆盖时 estimated=0、status=exact。
+- coverage 为命中缓存的**候选成员篇数比例**（选用去重后）；cached_documents/documents 给出分子、分母。
+- 估算比例取本次选中且已有缓存的不同正文的 `sum(tokens)/sum(chars)`，每种正文只参与一次；再乘未命中文本的元数据字符数。它不是精确 token 数，可以是小数。
+- 没有命中缓存时，status=unknown，exact/estimated/total 都为 null，不以 0 或全库其他来源的比例填补。估算仅随试算返回，不写入精确统计表。
+
+### 特殊 token 口径
+
+计数和编码都固定 `add_special_tokens=False`，关闭 tokenizer.json 中的 padding、truncation；保留文件内的分词模型、归一化和预切分设置。不自动添加 BOS/EOS、不在文档之间插入分隔 token；原文里已有的特殊 token 字面量按分词器正常编码计入。这与已只读核对的击水 tokenize 脚本一致。为保持缓存可复现，加载时拒绝随机 BPE dropout 和超出 vocab_size 的 token ID。
+
+fingerprint 是**原始 tokenizer.json 字节**的一次 SHA-256；文件内容变化即使用独立缓存及统计记录。两种路径指向相同 JSON 时共用身份。模块 `midstream.tokenizing.load(path)` 返回 name、fingerprint、vocab_size、count_batch(texts)、encode_batch(texts)，不依赖数据库。
+
+### Token 分片
+
+```bash
+midstream tokenize 1 --tokenizer /path/to/tokenizer.json
+midstream tokenize 1 --tokenizer /path/to/tokenizer.json --shard-tokens 200000000
+```
+
+也是持久任务：先补齐计数并保存精确统计，再编码写出。在 `MIDSTREAM_EXPORT_ROOT/<发布名>/<export_id>/` 下生成：
+
+```text
+manifest.json
+tokens/shard_00000.npy ...
+tokens/shard_info.jsonl
+manifest/docs_tokens.jsonl
+split/train.jsonl
+split/val.jsonl
+split/test.jsonl
+split/split_manifest.json
+```
+
+已只读核对击水的 NPY 及 shard/offset 文档索引布局。每片目标 200M tokens，文档不跨片；超大文档单独成片。vocab_size 含 added tokens，≤65536 用小端 u16，否则用小端 u32。通过 NPY 标准头声明长度，按批写出，不分配整个 200M token 缓冲区。文档索引带 doc_id、version_id、ordinal、source/category/era、tokens、shard、offset、split；offset 为 token 数，不是字节偏移。0-token 文档不进入 token 文件和索引，在根 manifest 记录数量。
+
+根 manifest 固定发布、配方、内容摘要、分词器指纹、口径、dtype、总 token 数及各文件行数/字节数/SHA-256；文件哈希边写边算一次。发布划分直接进入 split 索引，采样权重由训练侧提供。本轮只支持完整文档的 token 统计/分片，sample 单位尚未实现；u32 是宽词表扩展，尚未在击水训练端联调。
+
+目录在全部文件完成后才公布并登记 completed。取消只在批次之间生效，清理本次未完成分片，精确缓存和已完成统计保留；重试使用新的 export_id。强制杀进程可能留下隐藏临时目录，不能当作完成导出。`midstream verify <release_id> --hash` 可核对 NPY 和索引文件；默认仍只查文件存在、大小、行数。
+
 ## 9. 添加来源适配器
 
 适配器需实现 `src/midstream/adapters/base.py` 中的接口：

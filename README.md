@@ -10,6 +10,7 @@
 - 查询：按来源、标题前缀、作者、体裁、分类和成书年份筛选，读取当前或指定版本。
 - 查重：包括文档级查重与段落级查重，入库发布后依次自动运行。
 - 数据集：多条件选材、只读试算、按字符数/篇数整组划分和保留验证集；固定发布后可多次导出 Parquet、JSONL、PKL 或切分样本，附 manifest。见 [使用指南](docs/user-guide.md#8-配方导出校验与训练登记)。
+- Token：本地 JSON 分词器、正文计数缓存、固定发布的精确统计与试算估算，以及 NPY 分片任务。统计/编码不进入入库和查重流程，见 [使用指南](docs/user-guide.md#8a-token-统计与分片)。
 - 人工管理：对当前版本 ID 审核质量、修正元数据、追加版本，并且可通过人工确认作品间是否存在关联。
 - 批次管理：每次入库登记为一批，可查看每次入库的进度与失败记录；中途失败的批次支持断点续跑，不需要的批次可以放弃并回收空间。
 - LLM 服务：独立提供质检、自定义 prompt 生成及批量调用，统一管理接入点、凭据引用和模型配置；支持 DeepSeek 的 Chat Completions、Responses、Anthropic Messages 和 Beta FIM 生成接口。见 [LLM 使用说明](docs/llm.md)。
@@ -92,6 +93,7 @@ midstream dedup --full   # 忽略缓存，强制完整重算文档级查重
 | `src/midstream/dedup.py` | 指纹缓存和查重快照 |
 | `rust/` | PyO3 查重扩展：归一化、OPH、LSH、Jaccard 验证和 Winnowing 片段匹配 |
 | `src/midstream/export.py`、`exporters.py` | 选用试算、固定成员、划分、多格式分片与产物校验 |
+| `src/midstream/tokenizing.py`、`token_stats.py` | 独立分词器接口、正文计数缓存、发布统计与试算估计 |
 | `recipes/` | 导出配方 |
 | `migrations/` | Alembic 迁移，DDL 在 `versions/*.sql` |
 | `tests/` | 单元测试和数据库端到端测试 |

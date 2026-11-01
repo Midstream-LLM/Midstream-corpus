@@ -12,7 +12,7 @@ from starlette.middleware.trustedhost import TrustedHostMiddleware
 from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
 
-from . import batches, config, export, exporters, management, query, importing, import_detection, jobs
+from . import batches, config, export, exporters, management, query, importing, import_detection, jobs, token_stats, tokenizing
 
 
 def write_connection():
@@ -34,13 +34,14 @@ class ImportPreview(BaseModel):
 
 
 class JobSubmit(Operation):
-    kind: Literal['batch_resume', 'dedup', 'dedup_spans', 'dataset_create', 'dataset_export']
+    kind: Literal['batch_resume', 'dedup', 'dedup_spans', 'dataset_create', 'dataset_export', 'token_stats', 'tokenize']
     params: dict = Field(default_factory=dict)
 
 
 class DatasetPreview(BaseModel):
     model_config = ConfigDict(extra='forbid')
     recipe: dict
+    tokenizer: str | None = None
 
 
 class DatasetCreate(Operation):
@@ -49,6 +50,10 @@ class DatasetCreate(Operation):
 
 class DatasetExport(Operation):
     options: exporters.Options = Field(default_factory=exporters.Options)
+
+
+class TokenStatsRequest(Operation):
+    tokenizer: str = Field(min_length=1, max_length=4096)
 
 
 class ImportDetect(BaseModel):
@@ -272,7 +277,8 @@ def create_app(static_dir: Path | None = None) -> FastAPI:
 
     @app.post('/api/v1/datasets/preview')
     def dataset_preview(body: DatasetPreview, conn=Depends(connection)):
-        return export.plan_release(conn, export.Recipe.load(body.recipe)).report
+        tokenizer = tokenizing.load(body.tokenizer) if body.tokenizer is not None else None
+        return export.plan_release(conn, export.Recipe.load(body.recipe), tokenizer=tokenizer).report
 
     @app.post('/api/v1/datasets', dependencies=[Depends(browser_write)])
     def dataset_create(body: DatasetCreate, conn=Depends(write_connection)):
@@ -298,6 +304,16 @@ def create_app(static_dir: Path | None = None) -> FastAPI:
     def dataset_exports(release_id: int, conn=Depends(connection)):
         export.get_release(conn, release_id)
         return exporters.list_exports(conn, release_id)
+
+    @app.post('/api/v1/datasets/{release_id}/token-stats', dependencies=[Depends(browser_write)])
+    def dataset_token_stats_create(release_id: int, body: TokenStatsRequest, conn=Depends(write_connection)):
+        export.get_release(conn, release_id)
+        return jobs.submit(conn, 'token_stats', {'release_id': release_id, 'tokenizer': body.tokenizer},
+                           body.actor, body.reason)
+
+    @app.get('/api/v1/datasets/{release_id}/token-stats')
+    def dataset_token_stats(release_id: int, conn=Depends(connection)):
+        return token_stats.list_stats(conn, release_id)
 
     @app.get('/api/v1/dataset-recipes')
     def recipe_list(conn=Depends(connection)):
