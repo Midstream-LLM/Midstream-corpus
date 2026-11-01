@@ -41,28 +41,42 @@ def path():
 
 
 def revision():
-    if not path().exists():
+    try:
+        stat=path().stat()
+    except FileNotFoundError:
         return 'missing'
-    stat=path().stat()
+    return _stamp(stat)
+
+
+def _stamp(stat):
     return f'{stat.st_dev}:{stat.st_ino}:{stat.st_mtime_ns}:{stat.st_size}'
 
 
-def read():
-    if not path().exists():
-        return BackupConfig(),{}
-    if path().stat().st_mode & 0o077:
-        raise SettingsError('backup.toml 权限须为 0600')
+def _snapshot():
     try:
-        raw=tomllib.loads(path().read_text(encoding='utf-8'))
-        if set(raw)-{'backup','credentials'}:
-            raise ValueError()
-        cfg=BackupConfig.model_validate(raw.get('backup',{}))
-        keys=raw.get('credentials',{})
-        if set(keys)-ENV.keys() or any(not isinstance(v,str) for v in keys.values()):
-            raise ValueError()
-        return cfg,keys
-    except (ValueError,TypeError):
-        raise SettingsError('备份配置文件格式无效') from None
+        handle=path().open('rb')
+    except FileNotFoundError:
+        return BackupConfig(),{},'missing'
+    with handle:
+        stat=os.fstat(handle.fileno())
+        if stat.st_mode & 0o077:
+            raise SettingsError('backup.toml 权限须为 0600')
+        try:
+            raw=tomllib.loads(handle.read().decode('utf-8'))
+            if set(raw)-{'backup','credentials'}:
+                raise ValueError()
+            cfg=BackupConfig.model_validate(raw.get('backup',{}))
+            keys=raw.get('credentials',{})
+            if set(keys)-ENV.keys() or any(not isinstance(v,str) for v in keys.values()):
+                raise ValueError()
+            return cfg,keys,_stamp(stat)
+        except (ValueError,TypeError):
+            raise SettingsError('备份配置文件格式无效') from None
+
+
+def read():
+    cfg,keys,_=_snapshot()
+    return cfg,keys
 
 
 def credentials(local):
@@ -70,8 +84,8 @@ def credentials(local):
 
 
 def get():
-    cfg,local=read()
-    return {'config':cfg.model_dump(),'revision':revision(),'credentials_status':{
+    cfg,local,stamp=_snapshot()
+    return {'config':cfg.model_dump(),'revision':stamp,'credentials_status':{
         key:{'configured':bool(os.environ.get(env) or local.get(key)),
              'source':'environment' if os.environ.get(env) else 'local' if local.get(key) else 'missing',
              'local_saved':bool(local.get(key))} for key,env in ENV.items()}}

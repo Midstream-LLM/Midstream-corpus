@@ -6,7 +6,7 @@
 
 GET/POST /api/v1/backup/settings 共用 backup.toml，POST 为 config、keys、clear_keys、revision；POST /backup/test 测试已保存连接。GET/POST /backups 查看历史/提交 backup 任务；POST /backups/{id}/verify 提交 backup_verify。写操作都要求 browser_write，任务写操作使用 actor/reason。恢复仅提供 CLI，且只允许全新库。详见 [使用指南](user-guide.md#8d-oss-备份m10)。
 
-最终全量 130 项通过、2 个已另验收性能例跳过，构建通过；之后备份键唯一性/调度连接小修，策略测试通过，返回值解包修复后主流程定向通过。OSS 全是假传输，真实 PostgreSQL 工具在指定隔离容器运行；无真实 OSS、正式库或部署，本轮未新增备份浏览器验收。
+最终全量 130 项通过、2 个已另验收性能例跳过，构建通过；之后备份键唯一性/调度连接小修，策略测试通过，返回值解包修复后主流程定向通过。OSS 全是假传输，真实 PostgreSQL 工具在指定隔离容器运行；无真实 OSS、正式库或部署，本轮未新增备份浏览器验收。另新增配置并发替换防覆盖用例，单独通过，未重复全量。
 
 ## 重复浏览（M9）
 

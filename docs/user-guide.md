@@ -621,7 +621,7 @@ dup_span 的 start_char/end_char 已是原文 Unicode 字符坐标，左闭右�
 
     [credentials]
 
-凭据依次取 OSS_ACCESS_KEY_ID、OSS_ACCESS_KEY_SECRET、可选 OSS_SECURITY_TOKEN 环境变量；不存在时取 credentials.access_key_id/access_key_secret/security_token 本地值。界面可保存或清除本地值，API 只返回是否配置及来源，不回显。写入采用独占锁、0600 临时文件、原子替换；修订检测用文件身份/mtime_ns/长度，不新增内容哈希。保存冲突时先重新加载。
+凭据依次取 OSS_ACCESS_KEY_ID、OSS_ACCESS_KEY_SECRET、可选 OSS_SECURITY_TOKEN 环境变量；不存在时取 credentials.access_key_id/access_key_secret/security_token 本地值。界面可保存或清除本地值，API 只返回是否配置及来源，不回显。写入采用独占锁、0600 临时文件、原子替换；修订检测将内容和文件身份/mtime_ns/长度绑定到同一已打开快照，不新增内容哈希。保存冲突时先重新加载。
 
 默认 schedule=none，worker 不提交任何自动备份。用户手动启用 daily/weekly 后，worker 按最近一次备份任务时间（含失败/取消）间隔 24/168 小时检查；没有近期任务时首次检查立即提交一次。执行仍串行，不自动快速重试失败任务。
 

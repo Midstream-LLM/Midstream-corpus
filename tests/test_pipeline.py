@@ -69,6 +69,34 @@ def write(path, lines):
     return path
 
 
+def test_backup_config_snapshot_revision_prevents_lost_update(tmp_path,monkeypatch):
+    from midstream import backup_settings,config
+    from midstream.llm.settings import SettingsError
+    monkeypatch.setattr(config,'HOME',tmp_path/'snapshot-home')
+    for env in backup_settings.ENV.values():
+        monkeypatch.delenv(env,raising=False)
+    before=backup_settings.save(backup_settings.BackupConfig().model_dump(),{},[],'missing')
+    parse=backup_settings.tomllib.loads
+    changed=False
+    def concurrent_replace(raw):
+        nonlocal changed
+        if not changed:
+            changed=True
+            replacement=tmp_path/'replacement.toml'
+            replacement.write_text(raw.replace('keep = 3','keep = 4'))
+            replacement.chmod(0o600)
+            os.replace(replacement,backup_settings.path())
+        return parse(raw)
+    with monkeypatch.context() as patch:
+        patch.setattr(backup_settings.tomllib,'loads',concurrent_replace)
+        snapshot=backup_settings.get()
+    assert snapshot['config']['keep']==3 and snapshot['revision']==before['revision']
+    assert backup_settings.get()['config']['keep']==4
+    with pytest.raises(SettingsError) as error:
+        backup_settings.save(snapshot['config'],{},[],snapshot['revision'])
+    assert error.value.status==409 and backup_settings.get()['config']['keep']==4
+
+
 class MemoryOss:
     def __init__(self):
         self.objects={};self.uploads={};self.fail=False;self.serial=0
