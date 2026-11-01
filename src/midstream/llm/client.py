@@ -51,7 +51,7 @@ class LLMClient:
 
     def _headers(self, endpoint: Endpoint) -> dict:
         env = self.config.credentials[endpoint.credential]
-        key = os.environ.get(env)
+        key = self.config.key(endpoint.credential)
         if not key:
             raise LLMError("missing_credential", f"请设置凭据环境变量 {env}")
         if endpoint.protocol == "anthropic_messages":

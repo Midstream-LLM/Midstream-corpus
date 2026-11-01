@@ -44,6 +44,25 @@ class ImportRegister(ImportPreview, Operation):
     parser_version: str
 
 
+class ProviderModels(BaseModel):
+    model_config = ConfigDict(extra='forbid')
+    credential: str
+    api_key: str | None = None
+
+
+class QwenModels(ProviderModels):
+    region: str
+    workspace: str
+
+
+class LLMSettingsSave(BaseModel):
+    model_config = ConfigDict(extra='forbid')
+    config: dict
+    keys: dict[str, str] = Field(default_factory=dict)
+    clear_keys: list[str] = Field(default_factory=list)
+    revision: str
+
+
 class DocumentReview(Operation):
     expected_version_id: int = Field(gt=0)
     metadata: dict
@@ -92,6 +111,48 @@ def create_app(static_dir: Path | None = None) -> FastAPI:
     @app.exception_handler(LLMError)
     async def llm_error(request, exc):
         return JSONResponse(status_code=502, content={'detail': str(exc), 'code': exc.code})
+
+    from .llm import settings as llm_settings
+    from fastapi.exceptions import RequestValidationError
+    from fastapi.exception_handlers import request_validation_exception_handler
+
+    @app.exception_handler(RequestValidationError)
+    async def validation_error(request, exc):
+        if request.url.path.startswith('/api/v1/llm/'):
+            return JSONResponse(status_code=422, content={'detail': 'LLM 配置请求格式无效'})
+        return await request_validation_exception_handler(request, exc)
+
+    @app.exception_handler(llm_settings.SettingsError)
+    async def settings_error(request, exc):
+        return JSONResponse(status_code=exc.status, content={'detail': str(exc)})
+
+    from .llm import deepseek
+
+    @app.get('/api/v1/llm/deepseek')
+    def deepseek_preset():
+        return deepseek.preset()
+
+    @app.post('/api/v1/llm/deepseek/models', dependencies=[Depends(browser_write)])
+    def deepseek_models(body: ProviderModels):
+        return deepseek.models(body.credential, body.api_key)
+
+    from .llm import qwen
+
+    @app.get('/api/v1/llm/qwen')
+    def qwen_preset():
+        return qwen.preset()
+
+    @app.post('/api/v1/llm/qwen/models', dependencies=[Depends(browser_write)])
+    def qwen_models(body: QwenModels):
+        return qwen.models(body.region, body.workspace, body.credential, body.api_key)
+
+    @app.get('/api/v1/llm/settings')
+    def llm_settings_get():
+        return llm_settings.get()
+
+    @app.post('/api/v1/llm/settings', dependencies=[Depends(browser_write)])
+    def llm_settings_save(body: LLMSettingsSave):
+        return llm_settings.save(body.config, body.keys, body.clear_keys, body.revision)
 
     @app.post('/api/v1/import/detect', dependencies=[Depends(browser_write)])
     def import_detect(body: ImportDetect):

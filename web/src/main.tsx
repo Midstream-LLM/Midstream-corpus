@@ -3,6 +3,7 @@ import { createRoot } from "react-dom/client";
 import Corpus from "./Corpus";
 import Stats from "./Stats";
 import Batches from "./Batches";
+import LLMSettings from "./LLMSettings";
 import "./style.css";
 function App() {
   const [page, setPage] = useState("corpus");
@@ -11,6 +12,7 @@ function App() {
     corpus: "语料浏览",
     review: "人工审核",
     batches: "批次管理",
+    llm: "LLM 配置",
   };
   return (
     <div className="app">
@@ -65,7 +67,9 @@ function App() {
             </button>
           ))}
         </div>
-        {page === "stats" ? (
+        {page === "llm" ? (
+          <LLMSettings />
+        ) : page === "stats" ? (
           <Stats />
         ) : page === "batches" ? (
           <Batches />

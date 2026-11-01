@@ -58,7 +58,7 @@ generation = "default"
 quality_check = "default"
 ```
 
-- `credentials` 的值是环境变量名。实际 key 由运行环境设置，多个接入点可共用同一引用；配置查看不会输出实际 key。
+- `credentials` 的值是环境变量名。实际 key 可由运行环境设置，也可通过 Web 保存到同一 TOML 的 `local_keys` 表；环境变量优先，多个接入点可共用同一引用。配置查看不会输出实际 key。
 - `endpoints` 管协议、地址和执行限制；`concurrency` 为该客户端内每个接入点的同时请求上限，`requests_per_second=0`（默认）表示不限制启动速率。不同客户端/进程的限制独立。
 - `profiles` 将接入点、模型及默认参数组成命名配置。`max_tokens` 在 Responses 下转换为 `max_output_tokens`；`parameters` 使用所选协议的原生参数名，调用时可覆盖。
 - `services` 分别指定生成与质检的默认 profile；函数和 CLI 也可显式选择。
@@ -143,8 +143,35 @@ midstream llm stream --profile default --input request.json
 
 连接建立失败和 HTTP 429/502/503/504 按配置重试，`max_retries` 是初次请求之外的次数；短数字 `Retry-After` 会被采用，单次等待上限 30 秒。读取/写入中断或超时标为 `outcome_unknown`，不会自动重试，因为供应商可能已执行。批量中的错误独立返回，调用方可选择后续处理方式；不保证外部请求只发生一次。
 
-测试使用 HTTPX MockTransport 和合成响应，验证四种协议的请求、认证、结果解析、原生字段、SSE、错误与重试、受限并发、逐条失败以及 CLI。尚未使用真实 key 调用 DeepSeek，真实接入的兼容性需另外联调。
+测试使用 HTTPX MockTransport 和合成响应，验证四种协议的请求、认证、结果解析、原生字段、SSE、错误与重试、受限并发、逐条失败以及 CLI。2026-11-01 用真实 key 调用 DeepSeek `deepseek-flash`：四种协议的非流式生成、Chat 流式和质检均成功。Prefix Completion、工具调用和批量未联调。思考占用 `max_tokens`，额度很小且未关闭思考时可能返回空文本。
 
 HTTPX 是共用 HTTP 客户端，采用 [BSD-3-Clause](https://github.com/encode/httpx/blob/0.28.1/LICENSE.md)，与本项目 GPL-3.0 兼容。模块不引入独立数据库任务系统。
 
 格式识别用途服务 `LLMServices.identify_import(sample, profile=...)` 复用共用接入配置；可设置 `[services] import_detection = "default"`。它返回声明式字段映射建议或无法识别，不执行代码、不猜测书目常量。Web 仅在用户选择 LLM 识别时发送未知文件的有限样本，规则识别不调用模型。模拟 API 已覆盖合法建议和物理格式篡改拒绝，未使用真实 key 联调。
+
+
+Web 的「LLM 配置」可编辑凭据、全部四种协议接入点、超时/并发/限速/重试、模型及参数、三种用途默认值。API 使用 `GET/POST /api/v1/llm/settings`，无需数据库。保存到 `MIDSTREAM_LLM_CONFIG` 或 `MIDSTREAM_HOME/llm.toml`，写入前验证全部引用并检测修订冲突，采用文件锁与原子替换，文件权限为 0600。保存会重写 TOML，注释和排版不会保留。
+
+环境变量引用保持兼容；从 Web 输入的 key 存在本地 `[local_keys]`（凭据名称到实际 key），该文件含明文凭据，不进入 Git。读取接口仅返回是否配置、环境变量/本地来源；密码输入留空保留本地值，勾选清除则移除本地值，移除凭据同时移除对应本地 key。环境变量仍由后端启动环境管理。保存不会调用付费 API或验证实际 key 有效性；后续新建的 LLM 请求读取新配置，已在运行的请求继续原配置。
+
+### DeepSeek 快速配置
+
+Web 的「DeepSeek 快速配置」按协议自动填入官方 Base URL、`DEEPSEEK_API_KEY` 引用、模型 ID 和基础参数，新增独立接入点/profile，不覆盖已有配置。空配置时同时设置三个用途默认值。预设默认关闭思考，输出预算 4096 tokens；模型允许的最大输出与本地预算分别显示，FIM 按官方指南另限 4096。
+
+离线候选 `deepseek-flash`、`deepseek-v4-pro` 依据 2026-11-01 官方文档，不代表账户实时可用列表。「从 DeepSeek 刷新模型」通过后端固定地址 `GET https://api.deepseek.com/models` 获取模型 ID、显示名称、可选上下文/输出限制和思考等级。可以使用页面新输入的 key，也可使用已保存的凭据；获取模型不会保存配置或发送正文生成请求。请求不跟随跳转，不回显上游错误正文或凭据；失败时仍可使用离线候选或手工填写。
+
+接口：`GET /api/v1/llm/deepseek`、`POST /api/v1/llm/deepseek/models`（`credential`、可选 `api_key`）。模型发现已用真实 key 调用成功（2026-11-01），Web 页面的完整流程未用真实 key 验证。
+
+官方依据：[初次调用与模型 ID](https://api-docs.deepseek.com/en/)、[模型发现及元数据](https://api-docs.deepseek.com/api/list-models/)、[Responses](https://api-docs.deepseek.com/guides/responses_api/)、[Messages](https://api-docs.deepseek.com/guides/anthropic_api/)、[FIM](https://api-docs.deepseek.com/guides/fim_completion/)。
+
+### Qwen 快速配置（阿里云百炼）
+
+Web 支持北京、新加坡、弗吉尼亚三个区域，填写百炼业务空间 ID 后自动生成工作空间域名与 `/compatible-mode/v1` 地址，复用 `chat_completions` 协议。模型 ID 可从候选选择或手工填写。添加时创建独立接入点及 profile，输出预算默认 4096，附加参数留空；空配置下同时设置用途默认值。暂未增加 DashScope 原生协议、Coding Plan、视觉或音频专用流程。
+
+凭据按区域命名，默认环境变量分别为 `DASHSCOPE_API_KEY_BEIJING`、`DASHSCOPE_API_KEY_SINGAPORE`、`DASHSCOPE_API_KEY_VIRGINIA`，也可在下方编辑成标准 `DASHSCOPE_API_KEY` 或选择已有引用。key 必须与区域匹配；选择区域时清空快速表单中的 key，防止将上一地域的新输入误用到另一地域。密钥保存和优先级沿用公共配置模块。
+
+「从百炼刷新模型」调用官方模型目录 `/api/v1/models`，筛选 Qwen 文本生成模型，解析显示名称及可选上下文/输出限制，按页读取，最多 5 页，未取完时明确标记截断。新加坡模型目录使用官方文档列出的 `dashscope-intl.aliyuncs.com` 区域入口，其他两个区域使用工作空间域名。服务端验证区域和业务空间标识，仅构造官方域名，不跟随跳转；不发送生成请求、不回显上游正文或 key。目录结果不代表该账户已开通全部模型的推理权限。
+
+新增接口：`GET /api/v1/llm/qwen` 与 `POST /api/v1/llm/qwen/models`，后者接收 `region`、`workspace`、`credential` 及可选 `api_key`。离线候选以 2026-11-01 官方示例中的 `qwen3.8-max` 为起点，不硬编码模型容量或价格。
+
+参考：[OpenAI 兼容调用及工作空间域名](https://www.alibabacloud.com/help/en/model-studio/compatibility-of-openai-with-dashscope)、[官方模型目录](https://help.aliyun.com/en/model-studio/list-models)。

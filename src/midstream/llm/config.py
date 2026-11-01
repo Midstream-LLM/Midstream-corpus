@@ -9,6 +9,11 @@ from urllib.parse import urlsplit
 
 from .errors import LLMError
 
+def config_path() -> Path:
+    return Path(os.environ.get("MIDSTREAM_LLM_CONFIG", str(Path(os.environ.get(
+        "MIDSTREAM_HOME", "~/.local/share/midstream")).expanduser() / "llm.toml"))).expanduser()
+
+
 PROTOCOLS = ("chat_completions", "responses", "anthropic_messages", "fim_completions")
 
 
@@ -76,7 +81,14 @@ class LLMConfig:
     profiles: dict[str, Profile]
     services: dict[str, str] = field(default_factory=dict)
 
+    local_keys: dict[str, str] = field(default_factory=dict, repr=False)
+
+    def key(self, credential: str) -> str | None:
+        return os.environ.get(self.credentials[credential]) or self.local_keys.get(credential)
+
     def __post_init__(self):
+        if set(self.local_keys) - set(self.credentials) or any(not isinstance(k, str) or not k.strip() for k in self.local_keys.values()):
+            raise LLMError("invalid_config", "本地凭据必须引用已登记的凭据名称且非空")
         if not self.endpoints or not self.profiles:
             raise LLMError("invalid_config", "至少配置一个接入点和模型 profile")
         for name, env in self.credentials.items():
@@ -95,13 +107,11 @@ class LLMConfig:
 
     @classmethod
     def load(cls, path: Path | None = None) -> "LLMConfig":
-        path = path or Path(os.environ.get(
-            "MIDSTREAM_LLM_CONFIG", str(Path(os.environ.get(
-                "MIDSTREAM_HOME", "~/.local/share/midstream")).expanduser() / "llm.toml")))
+        path = path or config_path()
         try:
             with Path(path).expanduser().open("rb") as handle:
                 data = tomllib.load(handle)
-            _keys(data, ("credentials", "endpoints", "profiles", "services"), "配置")
+            _keys(data, ("credentials", "endpoints", "profiles", "services", "local_keys"), "配置")
             endpoints, profiles = {}, {}
             for name, values in data.get("endpoints", {}).items():
                 _keys(values, Endpoint.__dataclass_fields__, f"接入点 {name}")
@@ -109,7 +119,7 @@ class LLMConfig:
             for name, values in data.get("profiles", {}).items():
                 _keys(values, Profile.__dataclass_fields__, f"profile {name}")
                 profiles[name] = Profile(**values)
-            return cls(data.get("credentials", {}), endpoints, profiles, data.get("services", {}))
+            return cls(data.get("credentials", {}), endpoints, profiles, data.get("services", {}), data.get("local_keys", {}))
         except (OSError, ValueError, TypeError, AttributeError) as exc:
             # TOML 原文可能包含用户误填的密钥，不回显解析器上下文。
             raise LLMError("invalid_config", "无法读取 LLM 配置或配置格式无效") from exc
@@ -125,7 +135,7 @@ class LLMConfig:
         return {
             "endpoints": {name: {"protocol": value.protocol, "base_url": value.base_url,
                                  "credential": value.credential,
-                                 "key_configured": bool(os.environ.get(self.credentials[value.credential]))}
+                                 "key_configured": bool(self.key(value.credential))}
                           for name, value in self.endpoints.items()},
             "profiles": {name: {"endpoint": value.endpoint, "model": value.model}
                          for name, value in self.profiles.items()},
