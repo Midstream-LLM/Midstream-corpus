@@ -16,6 +16,8 @@ type Metadata = {
   version_id: number;
   version_no: number;
   is_current: boolean;
+  variant: string | null;
+  variant_stale: boolean;
   parent_version_id: number | null;
   created_at: string;
   source: string;
@@ -30,7 +32,7 @@ type Metadata = {
   source_records: Record<string, unknown>[];
   [key: string]: unknown;
 };
-type Version = { version_no: number; version_id: number; is_current: boolean };
+type Version = { version_no: number; version_id: number; is_current: boolean; variant: string|null; variant_stale: boolean };
 type Work = {
   work_id: number;
   canonical_title: string;
@@ -354,11 +356,12 @@ export default function DocumentPanel({
               setEditing(false);
             }}
           >
-            <option value="">当前版本</option>
+            <option value="">当前主线版本</option>
             {versions.data?.map((v) => (
               <option key={v.version_id} value={v.version_no}>
                 v{v.version_no}
                 {v.is_current ? " · 当前" : ""}
+                {v.variant ? " · 简体派生版" + (v.variant_stale ? "（已过期）" : "") : ""}
               </option>
             ))}
           </select>
@@ -377,6 +380,7 @@ export default function DocumentPanel({
             <p>
               {m.source} · {count(m.char_count)} 字符 · v{m.version_no}
               {m.is_current ? " · 当前版" : " · 历史版"}
+              {m.variant ? " · 简体派生版" + (m.variant_stale ? "（已过期）" : "") : ""}
             </p>
           </div>
           <div className="tabs" role="tablist">

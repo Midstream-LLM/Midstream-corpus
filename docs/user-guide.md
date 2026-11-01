@@ -585,6 +585,16 @@ split/split_manifest.json
 
 ## 9. 添加来源适配器
 
+## 8B. 繁转简派生版本（M7）
+
+命令 midstream reprocess t2s-v1 默认预览；加 --apply 才追加 simplified 版本。固定使用已随项目提供的 OpenCC ver.1.1.9 TSCharacters.txt 第一候选，processing_run 保存 t2s-v1、表 SHA-256 和 length_preserving。只按字符映射，保留标点、空白、段落；当前表逐项检验均为一个 Unicode 码点映射到一个码点，所以原文字符偏移可复用，UTF-8 字节数不保证相同。
+
+派生版保持 is_current=false，parent_version_id 指向转换输入的当前主线。通过 (doc_id,variant,parent_version_id) 的部分唯一索引保证同一有效输入只有一个同类派生版；旧父版本的派生版保留，主线更新后自动识别为过期。重复 --apply 跳过已有有效派生版；原文已经是简体时仍可建立显式派生身份。
+
+配方增加 variant: "simplified" 显式选用。缺失或过期都会报错并列出前几个 doc_id，不回退主线；先运行转换再发布。去重仍按主线 doc_id 关联簇，实际成员固定派生 version_id，字符数和内容摘要使用选中的正文。文档版本列表、详情与数据集向导显示派生类别和过期提示。
+
+新增 3 项测试，隔离库全量 121 项通过、1 性能例跳过，前端构建通过。旧发布 verify 通过；未部署。
+
 适配器需实现 `src/midstream/adapters/base.py` 中的接口：
 
 | 成员 | 含义 |

@@ -455,11 +455,13 @@ def create_app(static_dir: Path | None = None) -> FastAPI:
 
     @app.get("/api/v1/documents/{doc_id}/versions")
     def versions(doc_id: int, conn=Depends(connection)):
-        rows = conn.execute("SELECT version_id, version_no, is_current, title, char_count, quality_status, created_at"
-            " FROM document_version WHERE doc_id = %s ORDER BY version_no DESC", (doc_id,)).fetchall()
+        rows = conn.execute("SELECT version_id,version_no,is_current,title,char_count,quality_status,created_at,variant,"
+            " variant IS NOT NULL AND parent_version_id IS DISTINCT FROM"
+            " (SELECT version_id FROM document_version WHERE doc_id=%s AND is_current) AS variant_stale"
+            " FROM document_version WHERE doc_id=%s ORDER BY version_no DESC", (doc_id,doc_id)).fetchall()
         if not rows:
             raise HTTPException(404, "文档不存在")
-        keys = ('version_id','version_no','is_current','title','char_count','quality_status','created_at')
+        keys = ('version_id','version_no','is_current','title','char_count','quality_status','created_at','variant','variant_stale')
         return [dict(zip(keys, row)) for row in rows]
 
     @app.get("/api/v1/documents/{doc_id}")

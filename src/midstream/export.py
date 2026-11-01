@@ -60,6 +60,7 @@ class _RecipeInput(_Input):
     stratify: list[Literal['source', 'category']] = Field(default_factory=list)
     limits: dict[Literal['train', 'val', 'test'], _Limit] = Field(default_factory=dict)
     reserved: dict[Literal['val', 'test'], _Reserved] = Field(default_factory=dict)
+    variant: Literal['simplified'] | None = None
 
 
 @dataclass(frozen=True)
@@ -95,6 +96,7 @@ class Recipe:
     stratify: tuple[str, ...] = ()
     limits: dict = field(default_factory=dict)
     reserved: dict = field(default_factory=dict)
+    variant: str | None = None
 
     @classmethod
     def load(cls, data: dict) -> "Recipe":
@@ -112,7 +114,7 @@ class Recipe:
         return cls(body.name, filters, splits, body.seed, data, Selection.load(body.selection),
                    includes, excludes, body.documents, body.split_by, tuple(body.stratify),
                    {key: value.model_dump(exclude_none=True) for key, value in body.limits.items()},
-                   {key: value.model_dump() for key, value in body.reserved.items()})
+                   {key: value.model_dump() for key, value in body.reserved.items()}, body.variant)
 
 
 class _Groups:
@@ -190,15 +192,16 @@ def _drop_duplicates(conn, selection: Selection, selected: list[Candidate]) -> l
     if not dedup.document_snapshot_current(conn):
         raise ExportError("文档级查重结果已过期，请先运行 midstream dedup")
     rank = {name: index for index, name in enumerate(selection.source_priority)}
-    by_version = {item.version_id: item for item in selected}
+    by_document = {item.doc_id: item for item in selected}
     clusters: dict[int, list[Candidate]] = {}
-    for cluster_id, version_id in conn.execute(
-        """SELECT m.cluster_id, m.version_id
+    for cluster_id, doc_id in conn.execute(
+        """SELECT m.cluster_id, v.doc_id
            FROM dup_cluster_member m JOIN dup_cluster c USING (cluster_id)
-           WHERE c.level = 'document' AND m.version_id = ANY(%s)""",
-        (list(by_version),),
+           JOIN document_version v USING(version_id)
+           WHERE c.level = 'document' AND v.is_current AND v.doc_id = ANY(%s)""",
+        (list(by_document),),
     ):
-        clusters.setdefault(cluster_id, []).append(by_version[version_id])
+        clusters.setdefault(cluster_id, []).append(by_document[doc_id])
     dropped = set()
     for members in clusters.values():
         keep = min(members, key=lambda item: (
@@ -401,6 +404,8 @@ def _distributions(kept, groups, assigned):
 def plan_release(conn: psycopg.Connection, recipe: Recipe, *, tokenizer=None) -> ReleasePlan:
     """仅用元数据试算；不生成发布、文件或正文解压。"""
     selected = _select(conn, recipe)
+    if recipe.variant and selected:
+        selected = _variant_selection(conn, recipe.variant, selected)
     if not selected:
         raise ExportError("配方没有选中任何文档")
     # 分组用去重前的全集：被舍弃的文档仍可能连接作品和重复簇。
@@ -439,6 +444,25 @@ def plan_release(conn: psycopg.Connection, recipe: Recipe, *, tokenizer=None) ->
         from . import token_stats
         plan.report['token_stats'] = token_stats.estimate(conn, kept, groups, assigned, tokenizer)
     return plan
+
+
+def _variant_selection(conn, variant, selected):
+    current = {item.doc_id: item.version_id for item in selected}
+    chosen, existing = {}, set()
+    for row in conn.execute(
+        'SELECT v.version_id,v.doc_id,v.text_hash,v.char_count,s.name,v.quality_status,v.category,'
+        ' lower(v.composed_years),upper(v.composed_years)-1,v.parent_version_id'
+        ' FROM document_version v JOIN document d USING(doc_id) JOIN source s USING(source_id)'
+        ' WHERE v.doc_id=ANY(%s) AND v.variant=%s', (list(current), variant)):
+        existing.add(row[1])
+        if row[-1] == current[row[1]]:
+            chosen[row[1]] = Candidate(*row[:-1])
+    missing = set(current) - chosen.keys()
+    if missing:
+        absent = sorted(missing-existing)[:5]
+        stale = sorted(missing & existing)[:5]
+        raise ExportError(f'缺少 {variant} 转换版 doc_id={absent}；已过期 doc_id={stale}，请运行 reprocess t2s-v1 --apply')
+    return [chosen[item.doc_id] for item in selected]
 
 
 def write_release(conn: psycopg.Connection, plan: ReleasePlan) -> int:

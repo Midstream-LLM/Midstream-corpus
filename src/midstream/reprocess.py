@@ -24,25 +24,28 @@ class Rule:
     version: str
     sources: list[str] | None
     apply: Callable[[dict], Change | None]
+    variant: str | None = None
+    config: dict = field(default_factory=dict)
 
 
 _METADATA = """quality_status quality_flags license title authors composed_years
     composed_label edition_years genre category topics legacy_category field_basis extra""".split()
 
 
-def _write_versions(conn: psycopg.Connection, run_id: int, changes: list[tuple]) -> None:
+def _write_versions(conn: psycopg.Connection, run_id: int, changes: list[tuple], *, variant=None) -> None:
     """每项为 (doc_id, parent_version_id, 新 text_hash 或 None, 字段覆盖)。"""
     docs, parents, hashes, metadata = zip(*changes)
-    conn.execute(
-        "UPDATE document_version SET is_current = false WHERE version_id = ANY(%s)",
-        (list(parents),),
-    )
+    if variant is None:
+        conn.execute(
+            "UPDATE document_version SET is_current = false WHERE version_id = ANY(%s)",
+            (list(parents),),
+        )
     conn.execute(
         f"""INSERT INTO document_version
-            (doc_id, version_no, parent_version_id, text_hash, run_id, is_current,
+            (doc_id, version_no, parent_version_id, text_hash, run_id, is_current, variant,
              char_count, {', '.join(_METADATA)})
             SELECT c.doc_id, latest.max_no + 1, p.version_id,
-                   coalesce(c.text_hash, p.text_hash), %s, true,
+                   coalesce(c.text_hash, p.text_hash), %s, %s, %s,
                    b.char_count, {', '.join('m.' + key for key in _METADATA)}
             FROM unnest(%s::bigint[], %s::bigint[], %s::bytea[], %s::jsonb[])
                  AS c(doc_id, parent_version_id, text_hash, metadata)
@@ -54,7 +57,7 @@ def _write_versions(conn: psycopg.Connection, run_id: int, changes: list[tuple])
             ) latest
             CROSS JOIN LATERAL jsonb_populate_record(p, c.metadata) m
             JOIN text_blob b ON b.text_hash = coalesce(c.text_hash, p.text_hash)""",
-        (run_id, list(docs), list(parents), list(hashes), [Jsonb(m) for m in metadata]),
+        (run_id, variant is None, variant, list(docs), list(parents), list(hashes), [Jsonb(m) for m in metadata]),
     )
 
 
@@ -77,7 +80,9 @@ def _write_blobs(conn: psycopg.Connection, texts: dict, pool: ProcessPoolExecuto
         )
 
 
-def reprocess(conn: psycopg.Connection, rule: Rule, dry_run=False, samples=20) -> dict:
+def reprocess(conn: psycopg.Connection, rule: Rule, dry_run=None, samples=20) -> dict:
+    if dry_run is None:
+        dry_run = rule.variant is not None
     changed = 0
     preview = []
     randomizer = random.Random(0)
@@ -94,12 +99,17 @@ def reprocess(conn: psycopg.Connection, rule: Rule, dry_run=False, samples=20) -
         source = stack.enter_context(psycopg.connect(conn.info.dsn))
         reader = stack.enter_context(source.cursor(name="current_versions"))
         condition = " AND s.name = ANY(%s)" if rule.sources is not None else ""
+        params = [rule.sources] if rule.sources is not None else []
+        if rule.variant:
+            condition += ' AND NOT EXISTS (SELECT 1 FROM document_version derived WHERE derived.doc_id=v.doc_id' \
+                         ' AND derived.variant=%s AND derived.parent_version_id=v.version_id)'
+            params.append(rule.variant)
         reader.execute(
             "SELECT to_jsonb(v), s.name, b.content FROM document_version v"
             " JOIN document d USING (doc_id) JOIN source s USING (source_id)"
             " JOIN text_blob b USING (text_hash) WHERE v.is_current" + condition +
             " ORDER BY v.doc_id",
-            (rule.sources,) if rule.sources is not None else (),
+            params,
         )
         while rows := reader.fetchmany(config.CHUNK_DOCS):
             changes = []
@@ -117,7 +127,7 @@ def reprocess(conn: psycopg.Connection, rule: Rule, dry_run=False, samples=20) -
                     metadata["quality_status"], metadata["quality_flags"] = clean.assess(after)
                     digest = textcodec.text_hash(after)
                 metadata = {key: value for key, value in metadata.items() if value != current[key]}
-                if digest is None and not metadata:
+                if digest is None and not metadata and rule.variant is None:
                     continue
                 changed += 1
                 slot = randomizer.randrange(changed)
@@ -141,11 +151,12 @@ def reprocess(conn: psycopg.Connection, rule: Rule, dry_run=False, samples=20) -
                         texts[digest] = after
             if not dry_run and changes:
                 _write_blobs(conn, texts, pool)
-                _write_versions(conn, run_id, changes)
+                _write_versions(conn, run_id, changes, variant=rule.variant)
         if not dry_run:
             conn.execute(
                 "UPDATE processing_run SET config = %s, finished_at = now() WHERE run_id = %s",
-                (Jsonb({"sources": rule.sources, "changed": changed}), run_id),
+                (Jsonb({"sources": rule.sources, "changed": changed, **rule.config,
+                        **({'variant': rule.variant} if rule.variant else {})}), run_id),
             )
     if not dry_run:
         conn.commit()

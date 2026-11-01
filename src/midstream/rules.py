@@ -1,6 +1,6 @@
 """重新处理规则，按版本注册。"""
 
-from . import clean
+from . import clean, variants
 from .reprocess import Change, Rule
 
 
@@ -40,5 +40,7 @@ RULES = {
     rule.version: rule for rule in (
         Rule("quality-v2", None, _quality),
         Rule("wanli-collation-v1", ["wanli"], _wanli_collation),
+        Rule("t2s-v1", None, lambda current: Change(text=variants.simplify(current['text'])),
+             variant='simplified', config=variants.info()),
     )
 }

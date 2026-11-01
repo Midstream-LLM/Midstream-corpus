@@ -12,6 +12,7 @@ export type Recipe = {
   splits: Record<string, number>; split_by?: string; stratify?: string[];
   limits?: Record<string, { max_chars?: number; max_documents?: number }>;
   reserved?: Record<string, Reservation>;
+  variant?: "simplified";
 };
 export type Facet = { value: string | null; documents: number; chars: number };
 export type Facets = Record<string, Facet[]>;

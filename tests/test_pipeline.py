@@ -56,6 +56,7 @@ def conn():
         connection.execute(SCHEMA.with_name("0011_dataset_recipes.sql").read_text(encoding="utf-8"))
         connection.execute(SCHEMA.with_name("0012_dataset_exports.sql").read_text(encoding="utf-8"))
         connection.execute(SCHEMA.with_name("0013_token_stats.sql").read_text(encoding="utf-8"))
+        connection.execute(SCHEMA.with_name("0014_text_variants.sql").read_text(encoding="utf-8"))
         connection.commit()
         yield connection
 
@@ -63,6 +64,64 @@ def conn():
 def write(path, lines):
     path.write_text("\n".join(lines) + "\n", encoding="utf-8")
     return path
+
+
+def test_simplified_variant_preserves_main_and_freezes_release(conn,tmp_path):
+    from midstream import variants
+    mapping,_,equal_length=variants.table()
+    assert equal_length and all(len(chr(key))==len(value)==1 for key,value in mapping.items())
+    text='齊高祖　歡喜。\n乾坤𠀋😀'
+    path=write(tmp_path/'t2s.jsonl',[row('t2s',text)])
+    ingest.ingest(conn,ADAPTERS['ccc_corpus'],[path])
+    before=conn.execute('SELECT version_id FROM document_version WHERE is_current').fetchone()[0]
+    old=export.create_release(conn,export.Recipe.load({'name':'main-old','seed':'s','splits':{'train':1}}))
+    assert reprocess.reprocess(conn,RULES['t2s-v1'])['changed']==1
+    assert conn.execute('SELECT count(*) FROM document_version WHERE variant IS NOT NULL').fetchone()[0]==0
+    reprocess.reprocess(conn,RULES['t2s-v1'],dry_run=False)
+    assert conn.execute('SELECT version_id FROM document_version WHERE is_current').fetchone()[0]==before
+    derived=conn.execute("SELECT version_id,version_no,text_hash,char_count,is_current FROM document_version WHERE variant='simplified'").fetchone()
+    assert not derived[4] and derived[3]==len(text)
+    converted=query.get_text(conn,1,derived[1])['text']
+    assert converted=='齐高祖　欢喜。\n干坤𠀋😀'
+    assert reprocess.reprocess(conn,RULES['t2s-v1'],dry_run=False)['changed']==0
+    recipe=export.Recipe.load({'name':'simplified','seed':'s','splits':{'train':1},'variant':'simplified'})
+    release=export.create_release(conn,recipe)
+    assert conn.execute('SELECT version_id FROM dataset_member WHERE release_id=%s',(release,)).fetchone()[0]==derived[0]
+    assert export.verify_release(conn,release) and export.verify_release(conn,old)
+    info=conn.execute("SELECT config FROM processing_run WHERE rule_version='t2s-v1' AND config->>'changed'='1'").fetchone()[0]
+    assert info['table_sha256']==variants.info()['table_sha256'] and info['length_preserving']
+
+
+def test_variant_missing_stale_and_old_release_unchanged(conn,tmp_path):
+    path=write(tmp_path/'stale-variant.jsonl',[row('v','繁體字')])
+    ingest.ingest(conn,ADAPTERS['ccc_corpus'],[path])
+    raw={'name':'variant-stale','seed':'s','splits':{'train':1},'variant':'simplified'}
+    with pytest.raises(export.ExportError,match='缺少'):
+        export.plan_release(conn,export.Recipe.load(raw))
+    reprocess.reprocess(conn,RULES['t2s-v1'],dry_run=False)
+    release=export.create_release(conn,export.Recipe.load(raw))
+    old=conn.execute('SELECT version_id FROM dataset_member WHERE release_id=%s',(release,)).fetchone()[0]
+    reprocess.reprocess(conn,reprocess.Rule('main-edit',None,lambda d:reprocess.Change(text=d['text']+'新')))
+    with pytest.raises(export.ExportError,match='已过期'):
+        export.plan_release(conn,export.Recipe.load({**raw,'name':'new'}))
+    assert query.metadata(conn,1,3)['variant_stale']
+    reprocess.reprocess(conn,RULES['t2s-v1'],dry_run=False)
+    assert export.plan_release(conn,export.Recipe.load({**raw,'name':'new'})).members[0][1]!=old
+    assert export.verify_release(conn,release)
+    assert conn.execute('SELECT version_id FROM dataset_member WHERE release_id=%s',(release,)).fetchone()[0]==old
+
+
+def test_variant_document_dedup_maps_main_clusters(conn,tmp_path):
+    text='齊高祖，歡喜天地。'*30
+    path=write(tmp_path/'variant-dedup.jsonl',[row('a',text,book='甲书'),row('b',text,book='乙书')])
+    ingest.ingest(conn,ADAPTERS['ccc_corpus'],[path])
+    reprocess.reprocess(conn,RULES['t2s-v1'],dry_run=False)
+    assert dedup.document_snapshot_current(conn)
+    plan=export.plan_release(conn,export.Recipe.load({'name':'dedup-simplified','seed':'s','splits':{'train':1},
+        'variant':'simplified','selection':{'dedup':'document'}}))
+    assert plan.report['documents']==1 and plan.report['dropped_documents']==1
+    version=conn.execute('SELECT variant FROM document_version WHERE version_id=%s',(plan.members[0][1],)).fetchone()[0]
+    assert version=='simplified'
 
 
 def test_import_uniform_samples(tmp_path):

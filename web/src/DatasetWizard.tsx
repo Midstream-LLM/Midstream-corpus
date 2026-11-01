@@ -115,6 +115,9 @@ export default function DatasetWizard({ initial, onJob, onClose }: { initial?: R
       <button key={label} className={step === index ? "primary" : ""} onClick={() => setStep(index)}>{label}</button>)}</nav>
     <State loading={!base.data && base.loading} error={base.error || saved.error} />
     {step === 0 && base.data && <div key={revision}>
+      <label>正文版本<select value={recipe.variant || ""} onChange={e => {
+        const next = { ...recipe }; if (e.target.value) next.variant = "simplified"; else delete next.variant; setRecipe(next);
+      }}><option value="">当前主线</option><option value="simplified">简体派生版（缺失或过期时报错）</option></select></label>
       {groups.map((filter, i) => <section className="settings-card" key={i}><h3>包含条件 {i + 1}（组间为或）</h3>
         <FilterEditor base={base.data!} filter={filter} onChange={next => setRecipe({ ...recipe, include: groups.map((x, j) => i === j ? next : x) })} />
         {groups.length > 1 && <button onClick={() => setRecipe({ ...recipe, include: groups.filter((_, j) => i !== j) })}>删除此组</button>}</section>)}

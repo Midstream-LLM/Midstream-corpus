@@ -82,7 +82,7 @@ def search(
     rows = conn.execute(
         f"""SELECT d.doc_id, v.version_id, s.name, v.version_no, v.title, v.authors, v.composed_label,
                    lower(v.composed_years), upper(v.composed_years) - 1,
-                   v.category, v.genre, v.quality_status, v.quality_flags, v.char_count
+                   v.category, v.genre, v.quality_status, v.quality_flags, v.char_count, v.variant
             FROM document_version v
             JOIN document d USING (doc_id)
             JOIN source s USING (source_id)
@@ -92,7 +92,7 @@ def search(
     ).fetchall()
     keys = ("doc_id", "version_id", "source", "version_no", "title", "authors",
             "composed_label", "year_from", "year_to", "category", "genre",
-            "quality_status", "quality_flags", "char_count")
+            "quality_status", "quality_flags", "char_count", "variant")
     return [dict(zip(keys, row)) for row in rows]
 
 
@@ -159,7 +159,11 @@ def metadata(conn: psycopg.Connection, doc_id: int, version_no: int | None = Non
         " ORDER BY sr.record_id DESC LIMIT 20", (doc_id,),
     ).fetchall()
     keys = ('record_id', 'batch_id', 'locator', 'raw_fields', 'path', 'sha256', 'size_bytes')
-    return {**row[0], "document": row[1], "source": row[2],
+    variant_stale = False
+    if row[0]['variant'] is not None:
+        variant_stale = not conn.execute('SELECT 1 FROM document_version WHERE doc_id=%s AND is_current'
+                                         ' AND version_id=%s', (doc_id,row[0]['parent_version_id'])).fetchone()
+    return {**row[0], "variant_stale": variant_stale, "document": row[1], "source": row[2],
             "processing": {"kind": row[3], "rule_version": row[4], "batch_id": row[5]},
             "source_records": [dict(zip(keys, record)) for record in records]}
 
