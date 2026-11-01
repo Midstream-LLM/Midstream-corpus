@@ -23,6 +23,8 @@ def _input_digest(conn) -> bytes:
     # 版本不可变，按 ID 排序的完整集合可识别新增、替换及移除；不读取正文。
     _read(conn, "COPY (SELECT version_id FROM document_version WHERE is_current"
           " ORDER BY version_id) TO STDOUT (FORMAT BINARY)", None, digest.update)
+    _read(conn, 'COPY (SELECT override_id,left_doc_id,right_doc_id FROM dedup_override'
+          ' ORDER BY override_id) TO STDOUT (FORMAT BINARY)',None,digest.update)
     return digest.digest()
 
 
@@ -83,6 +85,8 @@ def _write_clusters(conn, state, run_id, count):
             copy.write(block)
         copy.write(state.copy_end())
     conn.execute("ANALYZE dedup_result")
+    from .duplicates import apply_overrides
+    override_counts=apply_overrides(conn)
     conn.execute("CREATE TEMP TABLE dedup_anchors ON COMMIT DROP AS"
                  " SELECT cluster_key, min(version_id) AS anchor FROM dedup_result GROUP BY cluster_key")
     conn.execute("ANALYZE dedup_anchors")
@@ -127,7 +131,7 @@ def _write_clusters(conn, state, run_id, count):
                  " WHERE c.cluster_id = d.cluster_id", (run_id,))
     conn.execute("DELETE FROM dup_cluster c WHERE c.level = 'document'"
                  " AND NOT EXISTS (SELECT 1 FROM dup_cluster_member m WHERE m.cluster_id = c.cluster_id)")
-    return {"clusters_changed": changed, "members_written": written, "members_deleted": deleted}
+    return {"clusters_changed": changed, "members_written": written, "members_deleted": deleted, **override_counts}
 
 
 def _read(conn, query, params, consume):
@@ -342,6 +346,10 @@ def _dedup_spans(conn: psycopg.Connection, *, full: bool, progress=None) -> dict
                 while block := state.next_output(run_id):
                     copy.write(block)
                 copy.write(midstream_dedup.Deduper.copy_end())
+            conn.execute('DELETE FROM dup_span d USING document_version a,document_version b,dedup_override o'
+                         ' WHERE d.version_id=a.version_id AND d.source_version_id=b.version_id'
+                         ' AND o.left_doc_id=least(a.doc_id,b.doc_id) AND o.right_doc_id=greatest(a.doc_id,b.doc_id)')
+            report['spans']=conn.execute('SELECT count(*) FROM dup_span').fetchone()[0]
             report["write_seconds"] = perf_counter() - stage
             _save_snapshot(conn, "paragraph", digest, parameters, run_id)
             report["total_seconds"] = perf_counter() - started

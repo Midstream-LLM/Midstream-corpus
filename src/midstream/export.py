@@ -192,8 +192,6 @@ def _select(conn: psycopg.Connection, recipe: Recipe) -> list[Candidate]:
 
 def _drop_duplicates(conn, selection: Selection, selected: list[Candidate]) -> list[Candidate]:
     """每个文档簇只留一篇：来源优先，其次质量为 ok、字数多，最后按 doc_id 固定。"""
-    if not dedup.document_snapshot_current(conn):
-        raise ExportError("文档级查重结果已过期，请先运行 midstream dedup")
     rank = {name: index for index, name in enumerate(selection.source_priority)}
     by_document = {item.doc_id: item for item in selected}
     clusters: dict[int, list[Candidate]] = {}
@@ -414,6 +412,9 @@ def plan_release(conn: psycopg.Connection, recipe: Recipe, *, tokenizer=None) ->
         selected = _variant_selection(conn, recipe.variant, selected)
     if not selected:
         raise ExportError("配方没有选中任何文档")
+    if recipe.selection.dedup != 'none' or conn.execute('SELECT EXISTS(SELECT 1 FROM dedup_override)').fetchone()[0]:
+        if not dedup.document_snapshot_current(conn):
+            raise ExportError('文档级查重结果已过期，请先运行 midstream dedup')
     # 分组用去重前的全集：被舍弃的文档仍可能连接作品和重复簇。
     reserved = _reserved_docs(conn, recipe)
     groups = _group_keys(conn, list({item.doc_id for item in selected} | reserved.keys()))

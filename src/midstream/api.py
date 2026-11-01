@@ -12,7 +12,7 @@ from starlette.middleware.trustedhost import TrustedHostMiddleware
 from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
 
-from . import batches, config, export, exporters, management, query, importing, import_detection, jobs, token_stats, tokenizing
+from . import batches, config, duplicates, export, exporters, management, query, importing, import_detection, jobs, token_stats, tokenizing
 
 
 def write_connection():
@@ -62,6 +62,12 @@ class DatasetVerify(Operation):
 
 class TrainingRegister(Operation):
     run_name: str = Field(min_length=1, max_length=200, pattern=r'\S')
+
+
+class DedupOverride(Operation):
+    left_doc_id: int = Field(gt=0)
+    right_doc_id: int | None = Field(default=None,gt=0)
+    cluster_id: int | None = Field(default=None,gt=0)
 
 
 class ImportDetect(BaseModel):
@@ -219,6 +225,35 @@ def create_app(static_dir: Path | None = None) -> FastAPI:
     @app.get('/api/v1/stats')
     def stats(conn=Depends(connection)):
         return query.overview(conn)
+
+    @app.get('/api/v1/duplicates/clusters')
+    def duplicate_clusters(before: Annotated[int | None,Query(gt=0)]=None,
+                           kind: Literal['exact','near'] | None=None, source: str | None=None,
+                           min_size: Annotated[int,Query(ge=2)]=2, max_size: Annotated[int | None,Query(ge=2)]=None,
+                           limit: Annotated[int,Query(ge=1,le=100)]=30,conn=Depends(connection)):
+        return duplicates.clusters(conn,before=before,kind=kind,source=source,min_size=min_size,max_size=max_size,limit=limit)
+
+    @app.get('/api/v1/duplicates/clusters/{cluster_id}')
+    def duplicate_cluster(cluster_id:int,after:Annotated[int,Query(ge=0)]=0,
+                          limit:Annotated[int,Query(ge=1,le=100)]=30,conn=Depends(connection)):
+        return duplicates.cluster(conn,cluster_id,after=after,limit=limit)
+
+    @app.get('/api/v1/duplicates/compare')
+    def duplicate_compare(left:Annotated[int,Query(gt=0)],right:Annotated[int,Query(gt=0)],
+                          length:Annotated[int,Query(ge=1,le=20000)]=10000,conn=Depends(connection)):
+        return duplicates.compare(conn,left,right,length)
+
+    @app.get('/api/v1/duplicates/overrides')
+    def duplicate_overrides(doc_id:int|None=None,conn=Depends(connection)):
+        return duplicates.overrides(conn,doc_id)
+
+    @app.post('/api/v1/duplicates/overrides',dependencies=[Depends(browser_write)])
+    def duplicate_override(body:DedupOverride,conn=Depends(write_connection)):
+        return duplicates.override(conn,body.left_doc_id,body.right_doc_id,body.cluster_id,body.actor,body.reason)
+
+    @app.get('/api/v1/documents/{doc_id}/spans')
+    def duplicate_spans(doc_id:int,version:Annotated[int|None,Query(ge=1)]=None,conn=Depends(connection)):
+        return duplicates.document_spans(conn,doc_id,version)
 
     @app.get('/api/v1/years/options')
     def year_options(conn=Depends(connection)):

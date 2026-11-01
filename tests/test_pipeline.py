@@ -58,6 +58,7 @@ def conn():
         connection.execute(SCHEMA.with_name("0013_token_stats.sql").read_text(encoding="utf-8"))
         connection.execute(SCHEMA.with_name("0014_text_variants.sql").read_text(encoding="utf-8"))
         connection.execute(SCHEMA.with_name("0015_member_cuts.sql").read_text(encoding="utf-8"))
+        connection.execute(SCHEMA.with_name("0016_dedup_overrides.sql").read_text(encoding="utf-8"))
         connection.commit()
         yield connection
 
@@ -65,6 +66,72 @@ def conn():
 def write(path, lines):
     path.write_text("\n".join(lines) + "\n", encoding="utf-8")
     return path
+
+
+def test_dedup_override_survives_recompute_and_export_groups(conn,tmp_path):
+    from midstream import duplicates
+    text='天地玄黄宇宙洪荒日月盈昃。'*20
+    path=write(tmp_path/'overrides.jsonl',[row(str(i),text,book=f'独立书{i}') for i in range(3)])
+    ingest.ingest(conn,ADAPTERS['ccc_corpus'],[path])
+    old=export.create_release(conn,export.Recipe.load({'name':'before-denial','seed':'s','splits':{'train':1},'selection':{'dedup':'document'}}))
+    duplicates.override(conn,1,2,None,'test','不是同一文献')
+    assert not dedup.document_snapshot_current(conn)
+    with pytest.raises(export.ExportError,match='查重结果'):
+        export.plan_release(conn,export.Recipe.load({'name':'stale','seed':'s','splits':{'train':1}}))
+    for full in (False,True):
+        dedup.dedup(conn,full=full)
+        groups=export._group_keys(conn,[1,2,3])
+        assert groups[1]!=groups[2] and groups[3]==groups[1]
+    plan=export.plan_release(conn,export.Recipe.load({'name':'after-denial','seed':'s','splits':{'train':.8,'val':.1,'test':.1},
+        'selection':{'dedup':'document'},'reserved':{'val':{'doc_ids':[1]},'test':{'doc_ids':[2]}}}))
+    assert plan.report['documents']==2
+    frozen=export.write_release(conn,plan)
+    reprocess.reprocess(conn,reprocess.Rule('override-main-update',None,lambda d:reprocess.Change(text=d['text']+'新')))
+    dedup.dedup(conn)
+    assert export._group_keys(conn,[1,2,3])[1]!=export._group_keys(conn,[1,2,3])[2]
+    assert len(duplicates.overrides(conn))==1
+    assert export.verify_release(conn,old) and export.verify_release(conn,frozen)
+
+
+def test_dedup_member_override_api_and_audit(conn,tmp_path):
+    from fastapi.testclient import TestClient
+    from midstream import api,duplicates
+    path=write(tmp_path/'member-override.jsonl',[row(str(i),'甲乙丙丁天地玄黄。'*20,book=f'书{i}') for i in range(3)])
+    ingest.ingest(conn,ADAPTERS['ccc_corpus'],[path])
+    app=api.create_app();app.dependency_overrides[api.connection]=lambda:conn
+    app.dependency_overrides[api.write_connection]=lambda:conn
+    with TestClient(app) as client:
+        groups=client.get('/api/v1/duplicates/clusters?kind=exact&min_size=2&max_size=3&source=ccc_corpus').json()
+        cluster=groups['items'][0]['cluster_id']
+        assert len(client.get(f'/api/v1/duplicates/clusters/{cluster}').json()['members'])==3
+        before=conn.execute('SELECT count(*) FROM document_version').fetchone()[0]
+        assert client.get('/api/v1/duplicates/compare?left=1&right=2&length=10').json()['truncated']
+        payload={'left_doc_id':1,'cluster_id':cluster,'actor':'reviewer','reason':'人工否决'}
+        assert client.post('/api/v1/duplicates/overrides',json=payload).status_code==403
+        assert client.post('/api/v1/duplicates/overrides',json=payload,headers={'X-Midstream-Action':'1'}).json()['pairs']==2
+        assert conn.execute('SELECT count(*) FROM document_version').fetchone()[0]==before
+        assert len(duplicates.overrides(conn,1))==2
+        audit=management.events(conn,doc_id=1)
+        assert audit[0]['action']=='dedup_override' and audit[0]['actor']=='reviewer'
+        dedup.dedup(conn)
+        groups=export._group_keys(conn,[1,2,3])
+        assert groups[1]!=groups[2]==groups[3]
+
+
+def test_duplicate_highlights_use_raw_unicode_offsets(conn,tmp_path):
+    import midstream_dedup
+    from midstream import duplicates
+    rng=random.Random(903)
+    shared=''.join(rng.choices('天地玄黄宇宙洪荒日月盈昃辰宿列张',k=120))
+    texts=['😀'+'甲'*150+'，'.join(shared)+'丙'*150,'𠀋'+'乙'*150+shared+'丁'*150]
+    path=write(tmp_path/'raw-offsets.jsonl',[row(str(i),text,book=f'原文书{i}') for i,text in enumerate(texts)])
+    ingest.ingest(conn,ADAPTERS['ccc_corpus'],[path])
+    before=conn.execute('SELECT count(*) FROM document_version').fetchone()[0]
+    ranges=[duplicates.document_spans(conn,i+1)['items'] for i in range(2)]
+    assert all(ranges)
+    fragments=[midstream_dedup.span_normalize(texts[i][items[0]['start']:items[0]['end']])[0] for i,items in enumerate(ranges)]
+    assert fragments[0]==fragments[1] and len(fragments[0])>=64
+    assert conn.execute('SELECT count(*) FROM document_version').fetchone()[0]==before
 
 
 def test_span_cut_release_exports_tokens_and_frozen_proofs(conn,tmp_path,monkeypatch):

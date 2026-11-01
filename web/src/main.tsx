@@ -5,6 +5,7 @@ import Stats from "./Stats";
 import Batches from "./Batches";
 import Jobs from "./Jobs";
 import Datasets from "./Datasets";
+import Duplicates from "./Duplicates";
 import LLMSettings from "./LLMSettings";
 import "./style.css";
 function App() {
@@ -24,6 +25,7 @@ function App() {
     batches: "批次管理",
     jobs: "任务中心",
     datasets: "数据集",
+    duplicates: "重复",
     llm: "LLM 配置",
   };
   return (
@@ -83,6 +85,8 @@ function App() {
           <LLMSettings />
         ) : page === "stats" ? (
           <Stats />
+        ) : page === "duplicates" ? (
+          <Duplicates onJob={id => navigate("jobs/" + id)} />
         ) : page === "datasets" ? (
           <Datasets onJob={id => navigate("jobs/" + id)} />
         ) : page === "jobs" ? (

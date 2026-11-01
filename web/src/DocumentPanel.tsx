@@ -1,4 +1,5 @@
 import { rangeLabel } from "./Years";
+import RepeatHighlight from "./RepeatHighlight";
 import { useState } from "react";
 import {
   api,
@@ -306,6 +307,9 @@ export default function DocumentPanel({
       : null,
     tick,
   );
+  const [highlight,setHighlight]=useState(false);
+  const spans=useLoad<{items:{start:number;end:number}[];message:string|null}>(
+    highlight&&tab==="text"&&meta.data?"documents/"+id+"/spans?version="+meta.data.version_no:null,tick);
   function refresh() {
     setEditing(false);
     setVersion("");
@@ -499,10 +503,13 @@ export default function DocumentPanel({
             ))}
           {tab === "text" && (
             <>
+              <label className="check"><input type="checkbox" checked={highlight} onChange={e=>setHighlight(e.target.checked)}/>重复高亮（最多 200 条，不修改正文）</label>
+              {highlight&&spans.data?.message&&<p className="notice">{spans.data.message}</p>}
+              {highlight&&spans.error&&<p className="error">{spans.error}</p>}
               <State loading={text.loading} error={text.error} />
               {text.data && (
                 <>
-                  <pre className="text">{text.data.text}</pre>
+                  <pre className="text">{highlight?<RepeatHighlight text={text.data.text} offset={offset} spans={spans.data?.items||[]}/>:text.data.text}</pre>
                   <div className="pagination">
                     <span>字符 {count(offset)} 起</span>
                     <div>

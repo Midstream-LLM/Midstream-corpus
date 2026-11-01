@@ -67,9 +67,13 @@ def plan(conn, recipe, kept):
     ordered = sorted(kept, key=lambda x: (rank.get(x.source,len(rank)), x.quality!='ok',-x.char_count,x.doc_id))
     order = {item.version_id:i for i,item in enumerate(ordered)}
     by_doc = {item.doc_id:item for item in ordered}
-    canonical = {compare_hash:by_doc[doc_id] for doc_id,compare_hash in conn.execute(
+    hashes = dict(conn.execute(
         'SELECT v.doc_id,f.compare_hash FROM document_version v JOIN text_fingerprint f USING(text_hash)'
-        ' WHERE v.is_current AND v.doc_id=ANY(%s) AND f.rule_version=%s', (list(by_doc),dedup.RULE_VERSION))}
+        ' WHERE v.is_current AND v.doc_id=ANY(%s) AND f.rule_version=%s', (list(by_doc),dedup.RULE_VERSION)))
+    canonical={}
+    for item in ordered:
+        canonical.setdefault(hashes[item.doc_id],item)
+    denied=set(conn.execute('SELECT left_doc_id,right_doc_id FROM dedup_override').fetchall())
 
     @lru_cache(maxsize=8)
     def normalized(version_id):
@@ -92,6 +96,8 @@ def plan(conn, recipe, kept):
         for target,start,end,source,source_start,left_hash,right_hash in cursor:
             left,right=canonical[left_hash],canonical[right_hash]
             if left.version_id==right.version_id:
+                continue
+            if tuple(sorted((left.doc_id,right.doc_id))) in denied:
                 continue
             target_positions=normalized(target)[1]
             target_start=bisect_left(target_positions,start)
