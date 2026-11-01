@@ -9,7 +9,7 @@ from pathlib import Path
 
 import psycopg
 
-from . import batches, config, dedup, export, ingest, management, query, reprocess, server
+from . import batches, config, dedup, export, ingest, jobs, management, query, reprocess, server
 from .adapters import ADAPTERS
 from .rules import RULES
 
@@ -154,6 +154,26 @@ def main() -> int:
     commands = parser.add_subparsers(dest="command", required=True)
 
     commands.add_parser("init", help="构建、初始化私有 PostgreSQL 并迁移到最新版")
+    p = commands.add_parser("worker", help="串行执行持久任务；需手动启动")
+    p.set_defaults(handler=lambda conn, args: jobs.worker(conn))
+
+    p = commands.add_parser("jobs", help="查看、取消或重试持久任务")
+    actions = p.add_subparsers(dest="job_action", required=True)
+    p = actions.add_parser("list")
+    p.add_argument("--limit", type=int, choices=range(1, 101), default=30, metavar="1..100")
+    p.add_argument("--before", type=int)
+    p.set_defaults(handler=lambda conn, args: _print(jobs.list_jobs(
+        conn, limit=args.limit, before=args.before)) or 0)
+    p = actions.add_parser("show")
+    p.add_argument("job_id", type=int)
+    p.set_defaults(handler=lambda conn, args: _print(jobs.show(conn, args.job_id)) or 0)
+    for action in ("cancel", "retry"):
+        p = actions.add_parser(action)
+        p.add_argument("job_id", type=int)
+        p.add_argument("--actor", required=True)
+        p.add_argument("--reason", required=True)
+        p.set_defaults(handler=lambda conn, args: _print(getattr(jobs, args.job_action)(
+            conn, args.job_id, args.actor, args.reason)) or 0)
     p = commands.add_parser("server", help="管理私有 PostgreSQL 实例")
     p.add_argument("action", choices=("start", "stop", "status"))
 

@@ -1,17 +1,27 @@
-import React, { useState } from "react";
+import React, { useEffect, useState } from "react";
 import { createRoot } from "react-dom/client";
 import Corpus from "./Corpus";
 import Stats from "./Stats";
 import Batches from "./Batches";
+import Jobs from "./Jobs";
 import LLMSettings from "./LLMSettings";
 import "./style.css";
 function App() {
-  const [page, setPage] = useState("corpus");
+  const [route, setRoute] = useState(location.hash.slice(1) || "corpus");
+  const page = route.split("/")[0];
+  const jobId = route.startsWith("jobs/") ? Number(route.split("/")[1]) : null;
+  const navigate = (next: string) => { location.hash = next; };
+  useEffect(() => {
+    const changed = () => setRoute(location.hash.slice(1) || "corpus");
+    window.addEventListener("hashchange", changed);
+    return () => window.removeEventListener("hashchange", changed);
+  }, []);
   const names: Record<string, string> = {
     stats: "统计概览",
     corpus: "语料浏览",
     review: "人工审核",
     batches: "批次管理",
+    jobs: "任务中心",
     llm: "LLM 配置",
   };
   return (
@@ -29,7 +39,7 @@ function App() {
             <button
               className={"nav " + (page === k ? "active" : "")}
               key={k}
-              onClick={() => setPage(k)}
+              onClick={() => navigate(k)}
               aria-current={page === k ? "page" : undefined}
             >
               <span>{k === "stats" ? "◫" : k === "batches" ? "▦" : "▤"}</span>
@@ -60,7 +70,7 @@ function App() {
           {Object.entries(names).map(([k, v]) => (
             <button
               key={k}
-              onClick={() => setPage(k)}
+              onClick={() => navigate(k)}
               className={page === k ? "chosen" : ""}
             >
               {v}
@@ -71,8 +81,10 @@ function App() {
           <LLMSettings />
         ) : page === "stats" ? (
           <Stats />
+        ) : page === "jobs" ? (
+          <Jobs id={jobId} onSelect={id => navigate(`jobs/${id}`)} />
         ) : page === "batches" ? (
-          <Batches />
+          <Batches onJob={id => navigate(`jobs/${id}`)} />
         ) : (
           <Corpus key={page} review={page === "review"} />
         )}

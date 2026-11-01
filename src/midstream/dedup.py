@@ -4,6 +4,7 @@ import hashlib
 import shutil
 import tempfile
 from time import perf_counter
+from typing import Callable
 
 import midstream_dedup
 import psycopg
@@ -164,19 +165,22 @@ def _fingerprints(source, conn, state):
     )
 
 
-def dedup(conn: psycopg.Connection, *, full: bool = False) -> dict:
-    report = _dedup(conn, full=full)
+def dedup(conn: psycopg.Connection, *, full: bool = False,
+          progress: Callable[[int, int, str], None] | None = None) -> dict:
+    report = _dedup(conn, full=full, progress=progress)
     conn.commit()
     return report
 
 
-def _dedup(conn: psycopg.Connection, *, full: bool) -> dict:
+def _dedup(conn: psycopg.Connection, *, full: bool, progress=None) -> dict:
     started = perf_counter()
     state = midstream_dedup.Deduper(RULE_VERSION, BANDS, ROWS, THRESHOLD)
     report = {"rule_version": RULE_VERSION, "threshold": THRESHOLD, "bands": BANDS, "rows": ROWS}
     parameters = {**report, "algorithm": "lsh-rotation-v1"}
     # 同一连接不能同时 COPY 读写。source 只读取已经提交的正文。
     with conn.transaction(), psycopg.connect(conn.info.dsn) as source:
+        if progress:
+            progress(0, 5, "文档查重：检查快照")
         # 文档和段落流程共用指纹缓存，避免两个 CLI 同时写同一份缓存。
         conn.execute("SELECT pg_advisory_xact_lock(762031)")
         digest = _input_digest(conn)
@@ -184,10 +188,14 @@ def _dedup(conn: psycopg.Connection, *, full: bool) -> dict:
             return reused
         report.update(reused_snapshot=False, input_seconds=perf_counter() - started)
         stage = perf_counter()
+        if progress:
+            progress(1, 5, "文档查重：生成指纹")
         _fingerprints(source, conn, state)
         report["fingerprinted"] = state.fingerprinted
         report["fingerprint_seconds"] = perf_counter() - stage
         stage = perf_counter()
+        if progress:
+            progress(2, 5, "文档查重：分组与索引")
         _read(
             conn,
             """COPY (SELECT v.version_id, f.compare_hash, f.signature
@@ -201,6 +209,8 @@ def _dedup(conn: psycopg.Connection, *, full: bool) -> dict:
         state.build_lsh()
         report["lsh_seconds"] = perf_counter() - stage
         stage = perf_counter()
+        if progress:
+            progress(3, 5, "文档查重：验证候选")
         conn.execute("CREATE TEMP TABLE dedup_verify (version_id bigint PRIMARY KEY) ON COMMIT DROP")
         conn.execute("CREATE TEMP TABLE dedup_pairs (left_hash bytea, right_hash bytea) ON COMMIT DROP")
         conn.execute("CREATE TEMP TABLE dedup_pair_result"
@@ -239,6 +249,8 @@ def _dedup(conn: psycopg.Connection, *, full: bool) -> dict:
         report["cached_pairs"] = state.cache_hits
         report["computed_pairs"] = state.computed_pairs
         stage = perf_counter()
+        if progress:
+            progress(4, 5, "文档查重：保存结果")
         (report["clusters"], report["members"], report["candidates"],
          report["verified_pairs"]) = state.clusters()
         run_id = conn.execute(
@@ -256,25 +268,30 @@ def _dedup(conn: psycopg.Connection, *, full: bool) -> dict:
     return {"run_id": run_id, **report}
 
 
-def dedup_spans(conn: psycopg.Connection, *, full: bool = False) -> dict:
-    report = _dedup_spans(conn, full=full)
+def dedup_spans(conn: psycopg.Connection, *, full: bool = False,
+                progress: Callable[[int, int, str], None] | None = None) -> dict:
+    report = _dedup_spans(conn, full=full, progress=progress)
     conn.commit()
     return report
 
 
-def _dedup_spans(conn: psycopg.Connection, *, full: bool) -> dict:
+def _dedup_spans(conn: psycopg.Connection, *, full: bool, progress=None) -> dict:
     started = perf_counter()
     report = {"rule_version": "span-v1", "k": 32, "w": 32, "min_span": 64}
     parameters = {**report, "comparison_rule": RULE_VERSION}
     directory = tempfile.mkdtemp(prefix="midstream-spans-")
     try:
         with conn.transaction(), psycopg.connect(conn.info.dsn) as source:
+            if progress:
+                progress(0, 5, "段落查重：检查快照")
             conn.execute("SELECT pg_advisory_xact_lock(762031)")
             digest = _input_digest(conn)
             if not full and (reused := _reuse_snapshot(conn, "paragraph", digest, parameters, started)):
                 return reused
             report.update(reused_snapshot=False, input_seconds=perf_counter() - started)
             stage = perf_counter()
+            if progress:
+                progress(1, 5, "段落查重：生成指纹")
             fingerprints = midstream_dedup.Deduper(RULE_VERSION, BANDS, ROWS, THRESHOLD)
             _fingerprints(source, conn, fingerprints)
             report["compare_fingerprinted"] = fingerprints.fingerprinted
@@ -300,12 +317,18 @@ def _dedup_spans(conn: psycopg.Connection, *, full: bool) -> dict:
              report["fingerprints"]) = state.counts()
             report["fingerprint_seconds"] = perf_counter() - stage
             stage = perf_counter()
+            if progress:
+                progress(2, 5, "段落查重：生成种子")
             report["seeds"], report["template_hashes"] = state.seeds()
             report["seed_seconds"] = perf_counter() - stage
             stage = perf_counter()
+            if progress:
+                progress(3, 5, "段落查重：验证匹配")
             report["matches"], report["spans"] = state.verify()
             report["verify_seconds"] = perf_counter() - stage
             stage = perf_counter()
+            if progress:
+                progress(4, 5, "段落查重：保存结果")
             run_id = conn.execute(
                 "INSERT INTO processing_run (kind, rule_version) VALUES ('dedup', 'span-v1')"
                 " RETURNING run_id"

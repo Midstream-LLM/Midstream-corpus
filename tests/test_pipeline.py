@@ -15,7 +15,7 @@ from alembic.migration import MigrationContext
 from alembic.operations import Operations
 from sqlalchemy import create_engine
 
-from midstream import batches, dedup, export, ingest, management, query, reprocess
+from midstream import batches, dedup, export, ingest, jobs, management, query, reprocess
 from midstream.adapters import ADAPTERS
 from midstream.rules import RULES
 
@@ -52,6 +52,7 @@ def conn():
         connection.execute(SCHEMA.with_name("0007_manual_batch.sql").read_text(encoding="utf-8"))
         connection.execute(SCHEMA.with_name("0008_import_plan.sql").read_text(encoding="utf-8"))
         connection.execute(SCHEMA.with_name("0009_release_selection.sql").read_text(encoding="utf-8"))
+        connection.execute(SCHEMA.with_name("0010_jobs.sql").read_text(encoding="utf-8"))
         connection.commit()
         yield connection
 
@@ -59,6 +60,176 @@ def conn():
 def write(path, lines):
     path.write_text("\n".join(lines) + "\n", encoding="utf-8")
     return path
+
+
+def test_jobs_submit_complete(conn, tmp_path, monkeypatch):
+    from fastapi.testclient import TestClient
+    from midstream.api import create_app, connection, write_connection
+
+    path = write(tmp_path / 'job.jsonl', [row('job#1', '任务正文。')])
+    batch_id = ingest.register_batch(conn, ADAPTERS['ccc_corpus'], [path])
+    app = create_app()
+    app.dependency_overrides[connection] = lambda: conn
+    app.dependency_overrides[write_connection] = lambda: conn
+    headers = {'X-Midstream-Action': '1'}
+    with TestClient(app) as client, psycopg.connect(DSN, autocommit=True) as control:
+        payload = {'kind': 'batch_resume', 'params': {'batch_id': batch_id},
+                   'actor': 'tester', 'reason': '任务发布'}
+        # 浏览器写保护覆盖任务提交、取消和重试。
+        assert client.post('/api/v1/jobs', json=payload).status_code == 403
+        response = client.post('/api/v1/jobs', json=payload, headers=headers)
+        assert response.status_code == 200
+        job_id = response.json()['job_id']
+        assert response.json()['status'] == 'queued'
+        operation = {'actor': 'tester', 'reason': '管理任务'}
+        for action in ('cancel', 'retry'):
+            assert client.post(f'/api/v1/jobs/{job_id}/{action}', json=operation).status_code == 403
+        assert client.post('/api/v1/jobs', json={**payload, 'kind': 'arbitrary'}, headers=headers).status_code == 422
+        handler = jobs.HANDLERS['batch_resume']
+
+        def observed(conn, params, actor, reason, progress):
+            running = jobs.show(control, job_id)
+            assert running['status'] == 'running' and running['heartbeat_at']
+            return handler(conn, params, actor, reason, progress)
+
+        monkeypatch.setitem(jobs.HANDLERS, 'batch_resume', observed)
+        assert jobs._run_next(conn, control)
+        completed = client.get(f'/api/v1/jobs/{job_id}').json()
+        assert completed['status'] == 'succeeded'
+        assert completed['result']['status'] == 'published'
+        assert completed['progress']['current'] == completed['progress']['total']
+        assert completed['events'][-1]['message'] == '执行完成'
+        assert any('验证暂存' in e['message'] for e in completed['events'])
+        assert client.get('/api/v1/jobs').json()['items'][0]['job_id'] == job_id
+        assert conn.execute('SELECT count(*) FROM document_version').fetchone()[0] == 2
+
+
+def test_jobs_worker_interrupted_retry(conn):
+    import subprocess
+    import sys
+    from time import monotonic, sleep
+
+    job_id = jobs.submit(conn, 'dedup', {'full': True}, 'tester', '中断恢复')['job_id']
+    conn.commit()
+    # 阻塞查重阶段，使真实 worker 保持 running；心跳仍应独立提交。
+    conn.execute('SELECT pg_advisory_xact_lock(762031)')
+    env = {**os.environ, 'MIDSTREAM_DSN': DSN}
+    command = [sys.executable, '-m', 'midstream.cli', 'worker']
+
+    def wait_status(control, target, status):
+        deadline = monotonic() + 15
+        while monotonic() < deadline:
+            job = jobs.show(control, target)
+            if job['status'] == status:
+                return job
+            sleep(0.1)
+        pytest.fail(f'任务 {target} 未到达 {status}：{job}')
+
+    process = subprocess.Popen(command, env=env)
+    try:
+        with psycopg.connect(DSN, autocommit=True) as control:
+            running = wait_status(control, job_id, 'running')
+            second = subprocess.run(command, env=env, capture_output=True, timeout=10)
+            assert second.returncode == 2
+            sleep(5.2)
+            assert jobs.show(control, job_id)['heartbeat_at'] > running['heartbeat_at']
+            process.kill()
+            process.wait(timeout=10)
+            conn.rollback()
+            control.execute("UPDATE job SET heartbeat_at = now() - interval '61 seconds' WHERE job_id = %s", (job_id,))
+            process = subprocess.Popen(command, env=env)
+            failed = wait_status(control, job_id, 'failed')
+            assert failed['error'] == 'interrupted'
+            new = jobs.retry(conn, job_id, 'tester', '重试中断任务')
+            assert new['job_id'] != job_id and new['params'] == {'full': True}
+            assert wait_status(control, new['job_id'], 'succeeded')['result']['run_id']
+            assert jobs.show(control, job_id)['status'] == 'failed'
+    finally:
+        process.kill()
+        process.wait(timeout=10)
+        conn.rollback()
+
+
+def test_jobs_cancel_between_stages(conn, tmp_path, monkeypatch):
+    from fastapi.testclient import TestClient
+    from midstream.api import create_app, connection, write_connection
+
+    app = create_app()
+    app.dependency_overrides[connection] = lambda: conn
+    app.dependency_overrides[write_connection] = lambda: conn
+    headers = {'X-Midstream-Action': '1'}
+    operation = {'actor': 'tester', 'reason': '取消测试'}
+    with TestClient(app) as client, psycopg.connect(DSN, autocommit=True) as control:
+        queued = jobs.submit(conn, 'dedup_spans', {}, 'tester', '排队取消')['job_id']
+        assert client.post(f'/api/v1/jobs/{queued}/cancel', json=operation, headers=headers).json()['status'] == 'cancelled'
+        assert not jobs._run_next(conn, control)
+        path = write(tmp_path / 'cancel.jsonl', [row('cancel#1', '取消前已暂存。')])
+        batch_id = ingest.register_batch(conn, ADAPTERS['ccc_corpus'], [path])
+        job_id = jobs.submit(conn, 'batch_resume', {'batch_id': batch_id}, 'tester', '阶段取消')['job_id']
+        validate = ingest.validate
+
+        def cancel_after_validate(conn, batch_id):
+            status = validate(conn, batch_id)
+            jobs.cancel(control, job_id, 'tester', '验证后停止')
+            return status
+
+        monkeypatch.setattr(ingest, 'validate', cancel_after_validate)
+        jobs._run_next(conn, control)
+        assert jobs.show(control, job_id)['status'] == 'cancelled'
+        assert batches.inspect(conn, batch_id)['status'] == 'validated'
+        assert conn.execute('SELECT count(*) FROM document_version').fetchone()[0] == 0
+        retried = client.post(f'/api/v1/jobs/{job_id}/retry', json=operation, headers=headers).json()
+        jobs._run_next(conn, control)
+        assert jobs.show(control, retried['job_id'])['result']['status'] == 'published'
+        assert conn.execute('SELECT count(*) FROM source_record').fetchone()[0] == 1
+
+
+def test_jobs_batch_failure_no_republish(conn, tmp_path, monkeypatch):
+    with psycopg.connect(DSN, autocommit=True) as control:
+        bad = write(tmp_path / 'bad-job.jsonl', [row('same', '甲'), row('same', '乙')])
+        batch_id = ingest.register_batch(conn, ADAPTERS['ccc_corpus'], [bad])
+        job = jobs.submit(conn, 'batch_resume', {'batch_id': batch_id}, 'tester', '暂存失败')
+        jobs._run_next(conn, control)
+        assert jobs.show(control, job['job_id'])['status'] == 'failed'
+        assert batches.inspect(conn, batch_id)['status'] == 'failed'
+        assert conn.execute('SELECT count(*) FROM source_record WHERE batch_id = %s', (batch_id,)).fetchone()[0] == 0
+        path = write(tmp_path / 'publish-job.jsonl', [row('published', '发布后查重失败。')])
+        batch_id = ingest.register_batch(conn, ADAPTERS['ccc_corpus'], [path])
+        job = jobs.submit(conn, 'batch_resume', {'batch_id': batch_id}, 'tester', '发布后失败')
+
+        def fail(conn, **kwargs):
+            raise RuntimeError('dedup failed')
+
+        monkeypatch.setattr(dedup, 'dedup', fail)
+        jobs._run_next(conn, control)
+        assert jobs.show(control, job['job_id'])['error'] == 'dedup failed'
+        assert batches.inspect(conn, batch_id)['status'] == 'published'
+        versions = conn.execute('SELECT version_id FROM document_version ORDER BY version_id').fetchall()
+        retried = jobs.retry(conn, job['job_id'], 'tester', '不重复发布')
+        jobs._run_next(conn, control)
+        assert jobs.show(control, retried['job_id'])['result']['status'] == 'already_published'
+        assert conn.execute('SELECT version_id FROM document_version ORDER BY version_id').fetchall() == versions
+
+
+def test_jobs_dedup_cancel_rolls_back(conn, tmp_path, monkeypatch):
+    path = write(tmp_path / 'dedup-cancel.jsonl', [row('rollback', '查重事务取消。')])
+    ingest.ingest(conn, ADAPTERS['ccc_corpus'], [path])
+    conn.execute('DELETE FROM text_fingerprint')
+    conn.commit()
+    job_id = jobs.submit(conn, 'dedup', {'full': True}, 'tester', '查重取消')['job_id']
+    handler = jobs.HANDLERS['dedup']
+    with psycopg.connect(DSN, autocommit=True) as control:
+        def cancelled(conn, params, actor, reason, progress):
+            def boundary(current, total, message):
+                if current == 4:
+                    jobs.cancel(control, job_id, 'tester', '结果写入前取消')
+                progress(current, total, message)
+            return handler(conn, params, actor, reason, boundary)
+
+        monkeypatch.setitem(jobs.HANDLERS, 'dedup', cancelled)
+        jobs._run_next(conn, control)
+        assert jobs.show(control, job_id)['status'] == 'cancelled'
+        assert conn.execute('SELECT count(*) FROM text_fingerprint').fetchone()[0] == 0
 
 
 def test_ingest_query_update_export(conn, tmp_path):

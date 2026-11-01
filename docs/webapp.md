@@ -1,6 +1,6 @@
 # Web app：元数据、统计与管理
 
-前端为 React + TypeScript + Vite，后端为 FastAPI，直接调用现有 Python core。浏览器与未来 SwiftUI 客户端共用 `/api/v1`；未来 macOS App 可启动同一 Python 后端及私有 PostgreSQL，并连接 loopback。目前未实现 macOS 打包或进程托管。
+前端为 React + TypeScript + Vite，后端为 FastAPI，直接调用现有 Python core。数据库和后端长期留在校园服务器，浏览器与未来 SwiftUI 远程客户端共用 `/api/v1`，经 SSH 隧道访问。目前未实现 macOS 打包或进程托管。
 
 ## 已提供
 
@@ -50,6 +50,35 @@ Linux 部署时可从客户端建立 SSH 隧道，将本机端口转发到服务
 本地独立 PostgreSQL 17 合成库中 66 个 Python 测试通过，覆盖真实版本与元数据读取、写入和审计、冲突、批次恢复/放弃以及年份分组；前端 TypeScript 检查和生产构建通过。实际浏览器验证了元数据默认视图、变更预览与新版本保存、审计记录、统计页面、批次恢复、世纪范围查询和包含未知年份。尚未在正式库上验证性能。
 
 使用 FastAPI（MIT）、Uvicorn（BSD-3-Clause）、React/Vite（MIT）、TypeScript（Apache-2.0）。构建依赖在 `web/package-lock.json` 中固定。
+
+## 持久任务与 worker
+
+先在运行后端的机器上执行迁移 `0010`（私有实例用 `midstream init`，外部实例用 `alembic upgrade head`）。worker **必须另外手动启动**，API 不会代为启动：
+
+```bash
+midstream worker
+midstream jobs list --limit 30
+midstream jobs show 123
+midstream jobs cancel 123 --actor operator --reason '停止本次处理'
+midstream jobs retry 123 --actor operator --reason '原因已修复，按原参数重试'
+```
+
+worker 与 API 使用同一 `MIDSTREAM_DSN` 或私有数据库配置。数据库锁限制为一份 worker，同一时间只执行一个任务，按编号取队列；重复启动会退出。任务开始后每 5 秒写一次独立心跳。启动时及后续取任务前，将超过 60 秒没有心跳的 running 任务设为 failed，`error=interrupted`，不会自动重试。刚中断后立即重启，可能需等到旧心跳超过 60 秒。
+
+批次页“继续处理 / 发布”现在提交 `batch_resume` 任务并跳到 `#jobs/{id}`。任务中心显示列表、阶段进度、结果及最近 100 条日志，排队或运行时每 2 秒刷新；关闭页面不会停止任务。取消和重试均需填写操作人、依据，记录在任务事件中。重试只接受 failed/cancelled，保留旧任务，按原 kind/params 新建任务。
+
+取消排队任务立即生效；运行中仅在下一阶段开始前检查，当前阶段不会强行中断，也不回滚已提交阶段。最后阶段完成前发出的取消请求可能来不及生效。阶段进度表示阶段数，不表示预计剩余时间。批次验证未通过时任务可正常结束，结果为 `needs_review`，需继续检查批次。
+
+批次失败沿用同步恢复逻辑：暂存失败为 failed；验证/发布中断保留此前已提交状态；发布后的查重失败仍为 published。重试已发布批次返回 `already_published` 和 `next_action=dedup`，不会重复发布，应另行提交文档与段落查重任务。原有 CLI 及 `/batches/{id}/resume` 仍同步执行。
+
+HTTP 接口（写请求继续要求 `X-Midstream-Action: 1`，并检查同源）：
+
+- `GET /api/v1/jobs?limit=30&before=123`：返回 `items`、`next_cursor`，按编号倒序。
+- `GET /api/v1/jobs/{id}`：任务字段及 `events`，最近 100 条按发生顺序返回。
+- `POST /api/v1/jobs`：`{"kind":"batch_resume","params":{"batch_id":123},"actor":"operator","reason":"继续处理"}`。白名单仅 batch_resume、dedup、dedup_spans；后两者 params 为 `{}` 或 `{"full":true}`。
+- `POST /api/v1/jobs/{id}/cancel`、`POST /api/v1/jobs/{id}/retry`：请求体为 `{"actor":"operator","reason":"操作依据"}`；retry 返回新任务。
+
+本轮在指定隔离 PostgreSQL 17 容器中全量 103 项 Python 测试通过（新增 5 项），包含真实 worker 被杀后的恢复、独立心跳、单实例限制、阶段取消与事务回滚、不重复发布；前端构建通过。浏览器走过一次合成批次提交、取消、重试至完成与日志显示；未连接正式库、部署或调用真实 LLM API。
 
 
 ## 年份粒度与统计口径

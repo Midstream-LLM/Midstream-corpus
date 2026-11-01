@@ -1,5 +1,5 @@
 import Import from "./Import";
-import { useState, useEffect } from "react";
+import { useState } from "react";
 import {
   api,
   useLoad,
@@ -34,7 +34,7 @@ type Detail = {
   }[];
   raw_objects: { path: string; size_bytes: number; sha256: string }[];
 };
-export default function Batches() {
+export default function Batches({ onJob }: { onJob: (id: number) => void }) {
   const [all, setAll] = useState(false),
     [before, setBefore] = useState<number | null>(null),
     [history, setHistory] = useState<(number | null)[]>([]),
@@ -54,17 +54,19 @@ export default function Batches() {
       id !== null ? `events?batch_id=${id}` : null,
       tick,
     );
-  useEffect(() => {
-    if (!busy) return;
-    const t = setInterval(() => setTick((n) => n + 1), 3000);
-    return () => clearInterval(t);
-  }, [busy]);
   async function act(action: string) {
     if (id === null) return;
     setBusy(true);
     setMessage("");
     setConfirm(false);
     try {
+      if (action === "resume") {
+        const job = await api<{ job_id: number }>("jobs", undefined, {
+          kind: "batch_resume", params: { batch_id: id }, actor, reason,
+        });
+        onJob(job.job_id);
+        return;
+      }
       const result = await api<{ status: string; next_action?: string }>(
         `batches/${id}/${action}`,
         undefined,

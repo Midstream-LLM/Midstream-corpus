@@ -11,7 +11,7 @@ from starlette.middleware.trustedhost import TrustedHostMiddleware
 from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
 
-from . import batches, config, management, query, importing, import_detection
+from . import batches, config, management, query, importing, import_detection, jobs
 
 
 def write_connection():
@@ -30,6 +30,11 @@ class ImportPreview(BaseModel):
     source: str = Field(min_length=1, max_length=200)
     plan: dict | None = None
     paths: list[str] = Field(min_length=1, max_length=20)
+
+
+class JobSubmit(Operation):
+    kind: Literal['batch_resume', 'dedup', 'dedup_spans']
+    params: dict = Field(default_factory=dict)
 
 
 class ImportDetect(BaseModel):
@@ -225,6 +230,28 @@ def create_app(static_dir: Path | None = None) -> FastAPI:
                    limit: Annotated[int, Query(ge=1, le=100)] = 30, conn=Depends(connection)):
         rows = batches.list_batches(conn, limit=limit+1, include_published=include_published, before=before)
         return {'items': rows[:limit], 'next_cursor': rows[limit-1]['batch_id'] if len(rows)>limit else None}
+
+    @app.get('/api/v1/jobs')
+    def job_list(before: Annotated[int | None, Query(gt=0)] = None,
+                 limit: Annotated[int, Query(ge=1, le=100)] = 30, conn=Depends(connection)):
+        rows = jobs.list_jobs(conn, limit=limit+1, before=before)
+        return {'items': rows[:limit], 'next_cursor': rows[limit-1]['job_id'] if len(rows)>limit else None}
+
+    @app.get('/api/v1/jobs/{job_id}')
+    def job_detail(job_id: int, conn=Depends(connection)):
+        return jobs.show(conn, job_id)
+
+    @app.post('/api/v1/jobs', dependencies=[Depends(browser_write)])
+    def job_submit(body: JobSubmit, conn=Depends(write_connection)):
+        return jobs.submit(conn, body.kind, body.params, body.actor, body.reason)
+
+    @app.post('/api/v1/jobs/{job_id}/cancel', dependencies=[Depends(browser_write)])
+    def job_cancel(job_id: int, body: Operation, conn=Depends(write_connection)):
+        return jobs.cancel(conn, job_id, body.actor, body.reason)
+
+    @app.post('/api/v1/jobs/{job_id}/retry', dependencies=[Depends(browser_write)])
+    def job_retry(job_id: int, body: Operation, conn=Depends(write_connection)):
+        return jobs.retry(conn, job_id, body.actor, body.reason)
 
     @app.get('/api/v1/batches/{batch_id}')
     def batch_detail(batch_id: int, conn=Depends(connection)):

@@ -3,6 +3,7 @@
 import multiprocessing
 from concurrent.futures import ProcessPoolExecutor
 from pathlib import Path
+from typing import Callable
 
 import psycopg
 from psycopg.types.json import Jsonb
@@ -127,7 +128,8 @@ def _event(conn: psycopg.Connection, action: str, batch_id: int, actor: str,
     ).fetchone()[0]
 
 
-def resume(conn: psycopg.Connection, batch_id: int, *, actor: str, reason: str) -> dict:
+def resume(conn: psycopg.Connection, batch_id: int, *, actor: str, reason: str,
+           progress: Callable[[int, int, str], None] | None = None) -> dict:
     """按状态重入流程；发布成功后的查重失败不会触发二次发布。"""
     _identity(actor, reason)
     conn.execute("SELECT pg_advisory_lock(%s)", (batch_id,))
@@ -138,12 +140,16 @@ def resume(conn: psycopg.Connection, batch_id: int, *, actor: str, reason: str) 
                     "next_action": "dedup"}
         if status == "abandoned":
             raise ManagementError("not_recoverable", "已放弃的批次不能恢复")
+        if progress:
+            progress(0, 6, "核对原文件")
         adapter, _ = _verify_inputs(conn, batch_id, source, version)
         before = status
         with ProcessPoolExecutor(
             max_workers=WORKERS, mp_context=multiprocessing.get_context("spawn")
         ) as pool:
             if status in ("received", "failed"):
+                if progress:
+                    progress(1, 6, "解析与暂存")
                 # stage 是整笔事务；上次失败不应留下半批记录，仍防御性清理。
                 if conn.execute(
                     "SELECT EXISTS (SELECT 1 FROM document_version v"
@@ -168,6 +174,8 @@ def resume(conn: psycopg.Connection, batch_id: int, *, actor: str, reason: str) 
                     raise
                 status = "staged"
             if status in ("staged", "needs_review"):
+                if progress:
+                    progress(2, 6, "验证暂存数据")
                 if not _partition(conn, batch_id):
                     raise ManagementError("not_recoverable", "暂存分区缺失，不能验证")
                 status = ingest.validate(conn, batch_id)
@@ -178,6 +186,8 @@ def resume(conn: psycopg.Connection, batch_id: int, *, actor: str, reason: str) 
                     return {"status": status, "batch_id": batch_id, "event_id": event_id}
             if status != "validated" or not _partition(conn, batch_id):
                 raise ManagementError("not_recoverable", "批次缺少完整的已验证暂存层")
+            if progress:
+                progress(3, 6, "发布版本")
             report = ingest.publish(conn, batch_id, pool)
         event_id = _event(conn, "batch_resume", batch_id, actor, reason,
                           before, "published")
@@ -185,8 +195,14 @@ def resume(conn: psycopg.Connection, batch_id: int, *, actor: str, reason: str) 
         result = {"status": "published", "batch_id": batch_id, "event_id": event_id,
                   "new_documents": report.new_documents,
                   "new_versions": report.new_versions, "unchanged": report.unchanged}
-        result["dedup"] = dedup.dedup(conn)
-        result["dedup_spans"] = dedup.dedup_spans(conn)
+        if progress:
+            result["dedup"] = dedup.dedup(
+                conn, progress=lambda current, total, message: progress(4, 6, message))
+            result["dedup_spans"] = dedup.dedup_spans(
+                conn, progress=lambda current, total, message: progress(5, 6, message))
+        else:
+            result["dedup"] = dedup.dedup(conn)
+            result["dedup_spans"] = dedup.dedup_spans(conn)
         return result
     finally:
         conn.rollback()
