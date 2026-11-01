@@ -6,7 +6,7 @@ from time import sleep
 import psycopg
 from psycopg.types.json import Jsonb
 
-from . import batches, dedup
+from . import batches, dedup, export
 from .management import ManagementError, _identity
 
 
@@ -23,7 +23,28 @@ def _dedup_spans(conn, params, actor, reason, progress):
     return dedup.dedup_spans(conn, **params, progress=progress)
 
 
-HANDLERS = {'batch_resume': _batch_resume, 'dedup': _dedup, 'dedup_spans': _dedup_spans}
+def _dataset_create(conn, params, actor, reason, progress):
+    recipe = export.Recipe.load(params['recipe'])
+    existing = conn.execute('SELECT release_id, recipe FROM dataset_release WHERE name = %s',
+                            (recipe.name,)).fetchone()
+    if existing:
+        if existing[1] != recipe.raw:
+            raise export.ExportError('已有同名数据集，配方不同')
+        return {'release_id': existing[0]}
+    progress(0, 2, '试算选用与划分')
+    plan = export.plan_release(conn, recipe)
+    progress(1, 2, '固定数据集成员')
+    return {'release_id': export.write_release(conn, plan), 'plan': plan.report}
+
+
+def _dataset_export(conn, params, actor, reason, progress):
+    from . import exporters
+    return exporters.export_release(conn, params['release_id'],
+                                    exporters.Options.model_validate(params.get('options', {})), progress=progress)
+
+
+HANDLERS = {'batch_resume': _batch_resume, 'dedup': _dedup, 'dedup_spans': _dedup_spans,
+            'dataset_create': _dataset_create, 'dataset_export': _dataset_export}
 
 
 def _event(conn, job_id, message, level='info'):
@@ -38,10 +59,20 @@ def submit(conn, kind, params, actor, reason):
     if kind == 'batch_resume':
         valid = (set(params) == {'batch_id'} and type(params['batch_id']) is int
                  and params['batch_id'] > 0)
+    elif kind == 'dataset_create':
+        valid = set(params) == {'recipe'}
+        if valid:
+            export.Recipe.load(params['recipe'])
+    elif kind == 'dataset_export':
+        from . import exporters
+        valid = (set(params) <= {'release_id', 'options'} and type(params.get('release_id')) is int
+                 and params['release_id'] > 0)
+        if valid:
+            exporters.Options.model_validate(params.get('options', {}))
     else:
         valid = set(params) <= {'full'} and type(params.get('full', False)) is bool
     if not valid:
-        raise ManagementError('invalid_input', '批次任务需要 batch_id；查重仅接受 full 布尔值')
+        raise ManagementError('invalid_input', '任务参数与类型不匹配')
     job_id = conn.execute(
         'INSERT INTO job (kind, params, actor, reason) VALUES (%s, %s, %s, %s) RETURNING job_id',
         (kind, Jsonb(params), actor, reason),

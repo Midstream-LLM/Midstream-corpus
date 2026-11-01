@@ -370,12 +370,19 @@ midstream dedup --spans
 | `splits` | 必填，各划分的比例。键只允许 `train`、`val`、`test`，可省略其中某项，省略视为 0；比例之和必须为 1。填写 0 到 1 之间的数值。 |
 | `seed` | 必填，字符串。用于确定组的划分和成员顺序。 |
 | `selection` | 可省略；重复文本的选用规则，见下方。省略时不去重，与旧配方行为相同。 |
+| `include` / `exclude` | 多组 filters；include 组间为或，exclude 命中即排除。没写 include 时使用 filters；空 include 只选择手动 add。 |
+| `documents` | `{"add":[1,2],"remove":[3]}`，使用 doc_id。add 覆盖筛选和 exclude，remove 最后生效。仍只选择当前版本。 |
+| `split_by` | `chars`（默认）或 `documents`，决定划分目标的计量单位。 |
+| `stratify` | 可选 `source`、`category` 字段列表，如 `["source","category"]`。 |
+| `limits` | 各划分的硬上限，如 `{"val":{"max_chars":20000000,"max_documents":10000}}`，按整个发布计数。 |
+| `reserved` | 将文档或已有发布划分所在的整组固定到 val/test，格式见下方。不会自动增加候选文档。 |
 
 `filters` 支持以下全部字段；未知筛选字段会报错。
 
 | 字段 | 类型与默认值 | 行为 |
 |---|---|---|
 | `sources` | 字符串数组，默认 `[]` | 指定来源，空数组表示不限来源。 |
+| `authors`、`genres`、`categories` | 字符串数组，默认 `[]` | 字段内为或，字段间为且；作者匹配作者数组中的任意完整姓名。与对应旧单值字段同时出现时合并为或。 |
 | `title_prefix` | 字符串，默认空 | 标题前缀，对应 CLI 的 `--title`。 |
 | `author` | 字符串，默认空 | 作者数组中的完整姓名。 |
 | `genre` | 字符串，默认空 | 体裁精确匹配。 |
@@ -405,6 +412,29 @@ midstream dedup --spans
 
 查重结果落后于当前版本时导出会报错，先运行 `midstream dedup`。舍弃的篇数和字数写入发布记录，可用 `release-stats` 的 `selection` 字段查看。段落级重复目前不影响导出。
 
+保留划分示例（片段合并进完整配方）：
+
+```json
+{
+  "reserved": {
+    "val": {"doc_ids": [123], "releases": [{"release_id": 7, "split": "val"}]},
+    "test": {"doc_ids": [456]}
+  }
+}
+```
+
+`releases` 的源划分可为 train/val/test，目标仅 val/test。预留文档即使被去重舍弃，其组仍被固定；它们不在筛选结果中时，也参与与候选文档的分组。一个组不能同时保留到 val 和 test；reserved 超过 limits 会报错，不会悄悄缩减。已有发布的成员、配方和摘要不因新配方或新划分算法而改变。
+
+### 不落库试算
+
+```bash
+midstream export-preview recipes/small-sources-v1.json
+```
+
+使用只读事务和元数据，不解压正文，不写发布或文件。返回候选数、去重舍弃数/字数、各划分篇数/字数与比例，以及来源、类别、世纪分布和 warnings。`ratio` 使用 split_by，另有 `char_ratio`、`document_ratio`。比例偏差超过 1 个百分点或出现超大组时告警；整组无法满足 limits/目标容量时需调整配方。
+
+分布按划分输出；未知类别和没有完整起止年份的世纪保留 `null`。世纪 `value` 是与年代统计一致的整数桶编号：0 为公元 1 世纪，9 为公元 10 世纪，-1 为公元前 1 世纪。跨世纪的文档在每个相交桶计数，因此世纪栏位合计可能超过独立文档数。
+
 ### 创建数据集并导出
 
 ```bash
@@ -412,9 +442,9 @@ midstream dedup
 midstream export recipes/small-sources-v1.json
 ```
 
-命令先在数据库中固定成员和字符数，再生成 Parquet 文件，输出 `release_id`、名称、总字符数 `char_count`、各划分字符数 `split_char_counts` 和文件路径。文件写到 `MIDSTREAM_EXPORT_ROOT/<name>/`，每个非空划分一个文件：`train.parquet`、`val.parquet`、`test.parquet`。空划分不生成文件。
+命令先在数据库中固定成员和字符数，再生成 Parquet 文件，输出 `release_id`、`export_id`、名称、字符数、manifest 和文件路径。每次导出独立写到 `MIDSTREAM_EXPORT_ROOT/<name>/<export_id>/`，文件名如 `train-00000.parquet`；空划分不生成数据分片。
 
-每行包含 `ordinal`、`version_id`、`doc_id`、`title`、`text`，文件内按 `ordinal` 排序。`ordinal` 是整个数据集的成员序号，因此单个划分中的序号可能不连续。Parquet 使用 zstd 压缩，写临时文件后再改名；数据库记录文件 SHA-256、PyArrow 版本等导出信息。
+默认每行包含 `ordinal`、`version_id`、`doc_id`、`split`、`title`、`text`，保留旧 Parquet 列。划分内按 ordinal 排序；ordinal 是整个发布的成员序号，单个划分中可能不连续。Parquet 使用 zstd 压缩。
 
 没有选中任何文档会报错。同名数据集不能再次创建；要基于当前库状态发布新数据集，应改用新名称。
 
@@ -443,37 +473,42 @@ midstream release-stats 1
 
 选中的文档通过非 `rejected` 的作品关联和最新一次查重的文档级簇形成连通组。同一组整体落入一个划分；同作品或同重复簇的已选文档不会跨 train/val/test。作品关联不只使用 `confirmed`，`candidate` 也参与。
 
-组以组内最小 `doc_id` 标识，结合 `seed` 决定划分；成员顺序结合 `seed` 和 `version_id` 决定。比例是分组哈希的分配比例，不保证文档数或字符数精确达到比例，小数据集可能有空划分。查重分组用于避免跨划分重复，不会在重复簇中自动只保留一篇。
+组以组内最小 `doc_id` 标识，按 seed/组标识的 SHA-256 顺序处理，依次放入相对目标缺口最大的划分。val/test 容不下的组进入 train；不会为了凑比例拆组。没有可容纳的划分时会报错。成员顺序仍结合 seed 和 version_id 决定。组大小会限制可达到的比例，小数据集可能有空划分；查重分组不会自动只留一篇。
+
+stratify 在每层内分别分配，limits 仍是全局限制。跨层组以保留成员中最小 doc_id 的来源/类别归层，并产生 warning；组不会跨划分。reserved 先占用容量，再分配普通组。
 
 ### 训练历史检查
 
 创建数据集时，会检查将进入 val/test 的文档是否出现在已登记训练使用的数据集的 train 划分中，也会检查它们是否与这些训练文档属于同一作品（双方关联状态均非 `rejected`）。命中则报 `TrainingLeak`，本次数据集不创建；不会自动把这些文档改分到 train。
 
-这个检查只依据已登记的训练历史，通过文档身份和作品关联反查，不沿历史重复簇或相同正文哈希扩展检查。未登记的训练不会被系统识别。
+检查也沿文档级重复簇反查已训练文档，包含筛选结果之外的已训练副本。检查去重前的组，避免通过舍弃连接文档绕过隔离。不单独按相同正文哈希扩展检查；未登记的训练不会被系统识别。
 
 ### verify 与复现范围
 
 ```bash
 # 将 1 换成 export 输出的 release_id
 midstream verify 1
+midstream verify 1 --hash
 ```
 
-`verify` 重算数据库内成员顺序、版本、划分和正文哈希组成的摘要，核对总字符数及各划分字符数，再解压数据集涉及的正文逐一核对 SHA-256 和正文长度。通过时打印“通过”并返回 0，摘要、字符数或正文哈希不符时打印“未通过”并返回 1；数据集不存在或解压错误会抛出异常。它不读取 Parquet 文件，也不核对磁盘文件是否被删除或改写。
+`verify` 保留库内 content_digest 和字符数核对，不解压库内正文。产物默认只检查已完成导出的文件/manifest 是否存在、文件大小和行数；`--hash` 才重新读取文件核对 SHA-256。通过时打印“通过”并返回 0，检查不符返回 1；不存在的发布或无法读取的格式会报错。旧导出记录没有 size_bytes/row_count 的字段保留未知；旧 train/val/test.parquet 可按固定成员数核对行数，大小待重新导出后记录。
 
 复现保证的是已发布数据集的成员、顺序、划分和正文内容一致，不保证重新写出的 Parquet 文件字节一致。文件格式或工具版本变化可能影响字节。相同配方在库内容、当前版本或分组变化后再次筛选，也不保证得到同一数据集；固定下来的发布记录才是复现依据。
 
-当前 CLI 没有按 `release_id` 重建文件的命令。若导出写文件失败，数据库发布记录可能已经提交；可通过已有 Python 接口按原发布重写文件，避免创建同名数据集：
+### 按已有发布多次导出
 
-```python
-from pathlib import Path
-
-import psycopg
-from midstream import config
-from midstream.export import write_parquet
-
-with psycopg.connect(config.dsn()) as conn:
-    write_parquet(conn, release_id=1, out_dir=Path("/path/to/rebuilt-export"))
+```bash
+midstream export-release 1 --format parquet
+midstream export-release 1 --format jsonl --compression zst --shard-mb 256
+midstream export-release 1 --format pkl --fields ordinal version_id doc_id split title text authors era category genre source
+midstream export-release 1 --format jsonl --unit sample --max-chars 8192 --overlap-chars 256
 ```
+
+formats 为 parquet/jsonl/pkl；JSONL 可加外层 zst 压缩。fields 默认六列，可增加 authors、era、category、genre、source，也可只取需要的列。pkl 每片是一个 `list[dict]`，**只加载可信的 pkl 文件**；文件校验也会加载这些分片。
+
+shard_mb 默认 256，以行的 UTF-8 JSON 大小预算分片，不是压缩后文件字节上限；单篇或单个 sample 超过预算时单独成片。内存受分片预算与最大单篇正文限制，读取不累积全库正文。sample 默认 max_chars=8192、overlap_chars=0，优先段落、其次句末，再按字符截断；自动增加 sample_index/start_char/end_char（Unicode 码点偏移）。相邻 sample 重叠长度固定，去除后续 sample 的重叠前缀可还原原文。原发布的 ordinal、成员和摘要不变。
+
+每次创建新 export_id；manifest.json 固定发布 ID、原配方、内容摘要、格式、实际字段、unit/切分参数和各文件的行数、字节数、SHA-256。数据文件写出时顺带计算一次哈希，先临时文件再改名；全部分片和 manifest 完成后才公布整个目录并登记 completed。异常中断清理本次临时目录；强制杀进程时可能留下 `.<export_id>.tmp`，它不是已完成导出，也没有完成产物记录。重试生成新目录，不覆盖旧导出。
 
 ### 登记训练使用
 
@@ -584,4 +619,4 @@ CLI 会导入 Rust 查重扩展。安装主包之外，还需在同一 Python 3.
 
 ### verify 通过，是否说明导出的文件也没问题？
 
-它只验证库内发布记录和正文，不检查导出文件。文件丢失时可用已有发布记录调用 `write_parquet` 重建，见上文。
+默认检查固定成员元数据、文件存在/大小/行数；需要核对内容改写时使用 `--hash`。文件丢失可用 `export-release` 按同一发布另行导出，不改变发布成员。

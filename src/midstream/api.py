@@ -1,5 +1,6 @@
 """本机/SSH 隧道使用的 HTTP API，Web 与未来 SwiftUI 共用。"""
 import os
+import json
 from urllib.parse import urlsplit
 from pathlib import Path
 from typing import Annotated, Literal
@@ -11,7 +12,7 @@ from starlette.middleware.trustedhost import TrustedHostMiddleware
 from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
 
-from . import batches, config, management, query, importing, import_detection, jobs
+from . import batches, config, export, exporters, management, query, importing, import_detection, jobs
 
 
 def write_connection():
@@ -33,8 +34,21 @@ class ImportPreview(BaseModel):
 
 
 class JobSubmit(Operation):
-    kind: Literal['batch_resume', 'dedup', 'dedup_spans']
+    kind: Literal['batch_resume', 'dedup', 'dedup_spans', 'dataset_create', 'dataset_export']
     params: dict = Field(default_factory=dict)
+
+
+class DatasetPreview(BaseModel):
+    model_config = ConfigDict(extra='forbid')
+    recipe: dict
+
+
+class DatasetCreate(Operation):
+    recipe: dict
+
+
+class DatasetExport(Operation):
+    options: exporters.Options = Field(default_factory=exporters.Options)
 
 
 class ImportDetect(BaseModel):
@@ -110,6 +124,19 @@ def create_app(static_dir: Path | None = None) -> FastAPI:
     @app.exception_handler(psycopg.DataError)
     async def invalid_data(request, exc):
         return JSONResponse(status_code=422, content={'detail': '元数据格式无效，请检查年份区间和字段类型'})
+
+    @app.exception_handler(export.ExportError)
+    async def export_error(request, exc):
+        return JSONResponse(status_code=409 if isinstance(exc, export.TrainingLeak) else 422,
+                            content={'detail': str(exc)})
+
+    @app.exception_handler(ValueError)
+    async def recipe_error(request, exc):
+        return JSONResponse(status_code=422, content={'detail': str(exc)})
+
+    @app.exception_handler(psycopg.errors.UniqueViolation)
+    async def duplicate(request, exc):
+        return JSONResponse(status_code=409, content={'detail': '名称或记录已存在'})
 
     from .llm.errors import LLMError
 
@@ -236,6 +263,64 @@ def create_app(static_dir: Path | None = None) -> FastAPI:
                  limit: Annotated[int, Query(ge=1, le=100)] = 30, conn=Depends(connection)):
         rows = jobs.list_jobs(conn, limit=limit+1, before=before)
         return {'items': rows[:limit], 'next_cursor': rows[limit-1]['job_id'] if len(rows)>limit else None}
+
+    @app.get('/api/v1/datasets/facets')
+    def dataset_facets(filters: str = '{}', recipe: str | None = None, conn=Depends(connection)):
+        body = json.loads(recipe) if recipe else {
+            'name': 'facets', 'seed': '', 'splits': {'train': 1}, 'filters': json.loads(filters)}
+        return export.facets(conn, export.Recipe.load(body))
+
+    @app.post('/api/v1/datasets/preview')
+    def dataset_preview(body: DatasetPreview, conn=Depends(connection)):
+        return export.plan_release(conn, export.Recipe.load(body.recipe)).report
+
+    @app.post('/api/v1/datasets', dependencies=[Depends(browser_write)])
+    def dataset_create(body: DatasetCreate, conn=Depends(write_connection)):
+        return jobs.submit(conn, 'dataset_create', {'recipe': body.recipe}, body.actor, body.reason)
+
+    @app.get('/api/v1/datasets')
+    def dataset_list(before: Annotated[int | None, Query(gt=0)] = None,
+                     limit: Annotated[int, Query(ge=1, le=100)] = 30, conn=Depends(connection)):
+        rows = export.list_releases(conn, limit=limit+1, before=before)
+        return {'items': rows[:limit], 'next_cursor': rows[limit-1]['release_id'] if len(rows)>limit else None}
+
+    @app.get('/api/v1/datasets/{release_id}')
+    def dataset_detail(release_id: int, conn=Depends(connection)):
+        return export.get_release(conn, release_id)
+
+    @app.post('/api/v1/datasets/{release_id}/exports', dependencies=[Depends(browser_write)])
+    def dataset_export(release_id: int, body: DatasetExport, conn=Depends(write_connection)):
+        export.get_release(conn, release_id)
+        return jobs.submit(conn, 'dataset_export', {'release_id': release_id, 'options': body.options.model_dump()},
+                           body.actor, body.reason)
+
+    @app.get('/api/v1/datasets/{release_id}/exports')
+    def dataset_exports(release_id: int, conn=Depends(connection)):
+        export.get_release(conn, release_id)
+        return exporters.list_exports(conn, release_id)
+
+    @app.get('/api/v1/dataset-recipes')
+    def recipe_list(conn=Depends(connection)):
+        return export.list_recipes(conn)
+
+    @app.get('/api/v1/dataset-recipes/{name}')
+    def recipe_get(name: str, conn=Depends(connection)):
+        return export.get_recipe(conn, name)
+
+    @app.post('/api/v1/dataset-recipes', dependencies=[Depends(browser_write)])
+    def recipe_create(body: DatasetCreate, conn=Depends(write_connection)):
+        management._identity(body.actor, body.reason)
+        return export.save_recipe(conn, export.Recipe.load(body.recipe))
+
+    @app.put('/api/v1/dataset-recipes/{name}', dependencies=[Depends(browser_write)])
+    def recipe_update(name: str, body: DatasetCreate, conn=Depends(write_connection)):
+        management._identity(body.actor, body.reason)
+        return export.save_recipe(conn, export.Recipe.load(body.recipe), previous=name)
+
+    @app.delete('/api/v1/dataset-recipes/{name}', dependencies=[Depends(browser_write)])
+    def recipe_delete(name: str, body: Operation, conn=Depends(write_connection)):
+        management._identity(body.actor, body.reason)
+        return export.delete_recipe(conn, name)
 
     @app.get('/api/v1/jobs/{job_id}')
     def job_detail(job_id: int, conn=Depends(connection)):

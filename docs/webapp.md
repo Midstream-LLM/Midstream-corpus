@@ -75,10 +75,25 @@ HTTP 接口（写请求继续要求 `X-Midstream-Action: 1`，并检查同源）
 
 - `GET /api/v1/jobs?limit=30&before=123`：返回 `items`、`next_cursor`，按编号倒序。
 - `GET /api/v1/jobs/{id}`：任务字段及 `events`，最近 100 条按发生顺序返回。
-- `POST /api/v1/jobs`：`{"kind":"batch_resume","params":{"batch_id":123},"actor":"operator","reason":"继续处理"}`。白名单仅 batch_resume、dedup、dedup_spans；后两者 params 为 `{}` 或 `{"full":true}`。
+- `POST /api/v1/jobs`：`{"kind":"batch_resume","params":{"batch_id":123},"actor":"operator","reason":"继续处理"}`。白名单为 batch_resume、dedup、dedup_spans、dataset_create、dataset_export；两类查重 params 为 `{}` 或 `{"full":true}`，数据集任务参数见下方。
 - `POST /api/v1/jobs/{id}/cancel`、`POST /api/v1/jobs/{id}/retry`：请求体为 `{"actor":"operator","reason":"操作依据"}`；retry 返回新任务。
 
 本轮在指定隔离 PostgreSQL 17 容器中全量 103 项 Python 测试通过（新增 5 项），包含真实 worker 被杀后的恢复、独立心跳、单实例限制、阶段取消与事务回滚、不重复发布；前端构建通过。浏览器走过一次合成批次提交、取消、重试至完成与日志显示；未连接正式库、部署或调用真实 LLM API。
+
+## 数据集后端接口（M2 / M3）
+
+先执行迁移 0011、0012。配方和导出参数见 [使用指南](user-guide.md#8-配方导出校验与训练登记)。当前提供后端能力，尚无选材/导出表单；任务中心可显示创建和导出任务。
+
+- `GET /api/v1/datasets/facets`：`filters` 查询参数为 JSON 对象字符串，或传完整配方的 `recipe` JSON 字符串；返回当前选用条件下 sources/categories/genres/eras 各值的 documents/chars，未知值为 null，按去重前候选统计。
+- `POST /api/v1/datasets/preview`：`{"recipe":{...}}`，使用只读数据库连接，返回候选/舍弃数、划分比例和分布、warnings，不写发布或文件。
+- `POST /api/v1/datasets`：`{"recipe":{...},"actor":"operator","reason":"发布依据"}`，返回排队的 dataset_create 任务；完成结果包含 release_id。该任务重试时，同名同配方复用已固定发布，同名异配方报错。
+- `GET /api/v1/datasets?limit=30&before=123`：发布列表及 next_cursor；`GET /api/v1/datasets/{id}` 返回固定配方、content_digest、字符数和各划分篇数/字数。
+- `GET /api/v1/dataset-recipes`、`GET /api/v1/dataset-recipes/{name}`：草稿配方。`POST /api/v1/dataset-recipes` 新增，`PUT /api/v1/dataset-recipes/{name}` 修改（可改名），请求体与创建数据集相同；`DELETE /api/v1/dataset-recipes/{name}` 请求体为 actor/reason。删改草稿不影响已发布配方。
+- `POST /api/v1/datasets/{id}/exports`：`{"actor":"operator","reason":"导出依据","options":{"format":"jsonl","compression":"zst","unit":"sample","max_chars":8192,"overlap_chars":256,"shard_mb":256}}`，返回 dataset_export 任务；`GET /api/v1/datasets/{id}/exports` 返回该发布全部导出状态、manifest 路径和分片记录。
+
+创建、导出和配方写操作均使用现有 browser_write 同源保护；API 不接收输出路径，使用后端 MIDSTREAM_EXPORT_ROOT。通用 `/jobs` 的 dataset_create params 为 `{"recipe":{...}}`，dataset_export params 为 `{"release_id":123,"options":{...}}`。worker 仍需手动启动。
+
+本轮最终隔离库全量 110 项测试通过；百万行试算用例另行验收，常规全量运行跳过。前端构建通过，仅补任务类型名称，未新增数据集前端或重做浏览器验收。
 
 
 ## 年份粒度与统计口径

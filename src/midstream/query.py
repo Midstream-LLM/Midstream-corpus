@@ -3,6 +3,7 @@
 from dataclasses import dataclass, field
 
 import psycopg
+from pydantic import TypeAdapter
 
 from . import textcodec
 
@@ -10,6 +11,9 @@ from . import textcodec
 @dataclass(frozen=True)
 class Filters:
     sources: list[str] = field(default_factory=list)
+    authors: list[str] = field(default_factory=list)
+    genres: list[str] = field(default_factory=list)
+    categories: list[str] = field(default_factory=list)
     title_prefix: str | None = None
     author: str | None = None
     genre: str | None = None
@@ -27,7 +31,7 @@ class Filters:
         unknown = set(data) - set(cls.__dataclass_fields__)
         if unknown:
             raise ValueError(f"未知的筛选条件：{sorted(unknown)}")
-        return cls(**data)
+        return TypeAdapter(cls).validate_python(data)
 
 
 def where_clause(filters: Filters) -> tuple[str, dict]:
@@ -41,15 +45,16 @@ def where_clause(filters: Filters) -> tuple[str, dict]:
         clauses.append("v.title LIKE %(title)s")
         escaped = filters.title_prefix.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
         params["title"] = escaped + "%"
-    if filters.author:
-        clauses.append("v.authors @> ARRAY[%(author)s]::text[]")
-        params["author"] = filters.author
-    if filters.genre:
-        clauses.append("v.genre = %(genre)s")
-        params["genre"] = filters.genre
-    if filters.category:
-        clauses.append("v.category = %(category)s")
-        params["category"] = filters.category
+    authors = filters.authors + ([filters.author] if filters.author else [])
+    if authors:
+        clauses.append("v.authors && %(authors)s::text[]")
+        params["authors"] = authors
+    for field, values, legacy in (("genre", filters.genres, filters.genre),
+                                  ("category", filters.categories, filters.category)):
+        values = values + ([legacy] if legacy else [])
+        if values:
+            clauses.append(f"v.{field} = ANY(%({field})s)")
+            params[field] = values
     if filters.composed_label:
         clauses.append("v.composed_label = %(composed_label)s")
         params["composed_label"] = filters.composed_label

@@ -9,7 +9,7 @@ from pathlib import Path
 
 import psycopg
 
-from . import batches, config, dedup, export, ingest, jobs, management, query, reprocess, server
+from . import batches, config, dedup, export, exporters, ingest, jobs, management, query, reprocess, server
 from .adapters import ADAPTERS
 from .rules import RULES
 
@@ -69,8 +69,23 @@ def _export(conn, args) -> int:
     data = json.loads(Path(args.recipe).read_text(encoding="utf-8"))
     recipe = export.Recipe.load(data)
     release_id = export.create_release(conn, recipe)
-    files = export.write_parquet(conn, release_id, config.EXPORT_ROOT / recipe.name)
-    _print({**export.release_stats(conn, release_id), "files": [str(f) for f in files]})
+    result = exporters.export_release(conn, release_id)
+    _print({**export.release_stats(conn, release_id), **result})
+    return 0
+
+
+def _export_preview(conn, args) -> int:
+    recipe = export.Recipe.load(json.loads(Path(args.recipe).read_text(encoding='utf-8')))
+    conn.execute('SET TRANSACTION READ ONLY')
+    _print(export.plan_release(conn, recipe).report)
+    return 0
+
+
+def _export_release(conn, args) -> int:
+    options = exporters.Options(format=args.format, fields=args.fields, unit=args.unit,
+                                shard_mb=args.shard_mb, max_chars=args.max_chars,
+                                overlap_chars=args.overlap_chars, compression=args.compression)
+    _print(exporters.export_release(conn, args.release_id, options))
     return 0
 
 
@@ -80,7 +95,7 @@ def _release_stats(conn, args) -> int:
 
 
 def _verify(conn, args) -> int:
-    ok = export.verify_release(conn, args.release_id)
+    ok = export.verify_release(conn, args.release_id, hash_files=args.hash)
     print("通过" if ok else "未通过")
     return 0 if ok else 1
 
@@ -215,12 +230,29 @@ def main() -> int:
     p.add_argument("recipe")
     p.set_defaults(handler=_export)
 
+    p = commands.add_parser('export-preview', help='只读试算选用、划分和分布')
+    p.add_argument('recipe')
+    p.set_defaults(handler=_export_preview)
+
+    p = commands.add_parser('export-release', help='按固定发布导出 Parquet、JSONL 或 PKL')
+    p.add_argument('release_id', type=int)
+    p.add_argument('--format', choices=('parquet', 'jsonl', 'pkl'), default='parquet')
+    p.add_argument('--fields', nargs='+', default=exporters.DEFAULT_FIELDS,
+                   choices=exporters.FieldName.__args__)
+    p.add_argument('--unit', choices=('document', 'sample'), default='document')
+    p.add_argument('--shard-mb', type=float, default=256)
+    p.add_argument('--max-chars', type=int, default=8192)
+    p.add_argument('--overlap-chars', type=int, default=0)
+    p.add_argument('--compression', choices=('zst',))
+    p.set_defaults(handler=_export_release)
+
     p = commands.add_parser("release-stats", help="查看数据集发布的总字符数及各划分字符数")
     p.add_argument("release_id", type=int)
     p.set_defaults(handler=_release_stats)
 
-    p = commands.add_parser("verify", help="校验数据集成员、字符数与正文")
+    p = commands.add_parser("verify", help="校验数据集成员和导出文件；可选文件哈希")
     p.add_argument("release_id", type=int)
+    p.add_argument('--hash', action='store_true', help='额外重算产物文件 SHA-256')
     p.set_defaults(handler=_verify)
 
     p = commands.add_parser("record-training", help="登记数据集的训练使用")
@@ -307,6 +339,9 @@ def main() -> int:
             return args.handler(conn, args)
         except management.ManagementError as exc:
             _print({"status": "error", "code": exc.code, "message": str(exc)})
+            return 2
+        except (export.ExportError, ValueError) as exc:
+            _print({'status': 'error', 'message': str(exc)})
             return 2
 
 

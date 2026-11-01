@@ -53,6 +53,8 @@ def conn():
         connection.execute(SCHEMA.with_name("0008_import_plan.sql").read_text(encoding="utf-8"))
         connection.execute(SCHEMA.with_name("0009_release_selection.sql").read_text(encoding="utf-8"))
         connection.execute(SCHEMA.with_name("0010_jobs.sql").read_text(encoding="utf-8"))
+        connection.execute(SCHEMA.with_name("0011_dataset_recipes.sql").read_text(encoding="utf-8"))
+        connection.execute(SCHEMA.with_name("0012_dataset_exports.sql").read_text(encoding="utf-8"))
         connection.commit()
         yield connection
 
@@ -60,6 +62,305 @@ def conn():
 def write(path, lines):
     path.write_text("\n".join(lines) + "\n", encoding="utf-8")
     return path
+
+
+def seed_metadata(conn, count, group_size=1):
+    from midstream import textcodec
+    sources = [conn.execute('INSERT INTO source (name) VALUES (%s) RETURNING source_id',
+                            (name,)).fetchone()[0] for name in ('meta-a', 'meta-b')]
+    hashes = []
+    for length in (1000, 10):
+        text = '测' * length
+        digest = textcodec.text_hash(text)
+        hashes.append(digest)
+        conn.execute('INSERT INTO text_blob (text_hash, codec, char_count, byte_count, content)'
+                     " VALUES (%s, 'zstd', %s, %s, %s)",
+                     (digest, length, length * 3, textcodec.compress(text)))
+    run = conn.execute("INSERT INTO processing_run (kind, rule_version) VALUES ('parse', 'synthetic')"
+                       ' RETURNING run_id').fetchone()[0]
+    conn.execute('INSERT INTO document (source_id, source_key)'
+                 ' SELECT (%s::bigint[])[1 + i %% 2], i::text FROM generate_series(1,%s) g(i)',
+                 (sources, count))
+    conn.execute(
+        'INSERT INTO document_version (doc_id, version_no, text_hash, run_id, is_current,'
+        ' quality_status, char_count, title, authors, category, genre, composed_years, composed_label)'
+        " SELECT doc_id, 1, (%s::bytea[])[1 + source_key::int %% 2], %s, true, 'ok',"
+        " CASE WHEN source_key::int %% 2 = 0 THEN 1000 ELSE 10 END, source_key,"
+        " ARRAY[CASE WHEN source_key::int %% 2 = 0 THEN '甲作者' ELSE '乙作者' END],"
+        " CASE WHEN source_key::int %% 4 < 2 THEN '史' ELSE '集' END,"
+        " CASE WHEN source_key::int %% 2 = 0 THEN '文' ELSE '诗' END,"
+        " CASE WHEN source_key::int %% 10 > 0 THEN int4range(901,950,'[]') END, NULL FROM document",
+        (hashes, run))
+    if group_size > 1:
+        conn.execute("INSERT INTO work (canonical_title) SELECT i::text FROM generate_series(1,%s) g(i)",
+                     ((count + group_size - 1) // group_size,))
+        conn.execute('INSERT INTO document_work (doc_id, work_id, relation, basis, status)'
+                     " SELECT doc_id, (doc_id-1)/%s+1, 'whole', 'source', 'confirmed' FROM document",
+                     (group_size,))
+    conn.commit()
+
+
+def test_dataset_selection_preview_api(conn, monkeypatch):
+    from fastapi.testclient import TestClient
+    from midstream import api, textcodec
+    seed_metadata(conn, 100)
+    body = {'name': 'selection-api', 'seed': 'm2', 'splits': {'train': 1},
+            'include': [{'authors': ['甲作者'], 'genres': ['文'], 'categories': ['史']},
+                        {'author': '乙作者', 'genre': '诗', 'category': '集'}],
+            'exclude': [{'title_prefix': '1'}], 'documents': {'add': [1], 'remove': [2]}}
+    expected = [item.doc_id for item in export._select(conn, export.Recipe.load(body))]
+    assert 1 in expected and 2 not in expected and 10 not in expected and 11 not in expected
+    assert export._select(conn, export.Recipe.load({**body, 'include': [{'sources': ['meta-a', 'meta-b']}],
+                                                  'exclude': [], 'documents': {}}))
+    conn.commit()
+    with psycopg.connect(DSN) as readonly:
+        readonly.execute('SET TRANSACTION READ ONLY')
+        def no_body(*args):
+            raise AssertionError('试算不能解压正文')
+        monkeypatch.setattr(textcodec, 'decompress', no_body)
+        report = export.plan_release(readonly, export.Recipe.load(body)).report
+        assert report['candidates'] == len(expected)
+        assert readonly.execute('SELECT count(*) FROM dataset_release').fetchone()[0] == 0
+    app = api.create_app()
+    app.dependency_overrides[api.connection] = lambda: conn
+    app.dependency_overrides[api.write_connection] = lambda: conn
+    headers = {'X-Midstream-Action': '1'}
+    operation = {'recipe': body, 'actor': 'test', 'reason': '合成选用'}
+    with TestClient(app) as client, psycopg.connect(DSN, autocommit=True) as control:
+        assert client.post('/api/v1/datasets/preview', json={'recipe': body}).json() == report
+        facets = client.get('/api/v1/datasets/facets', params={'recipe': json.dumps(body)}).json()
+        assert sum(x['documents'] for x in facets['sources']) == len(expected)
+        assert client.post('/api/v1/datasets', json=operation).status_code == 403
+        job = client.post('/api/v1/datasets', json=operation, headers=headers).json()
+        jobs._run_next(conn, control)
+        release = jobs.show(control, job['job_id'])['result']['release_id']
+        assert client.get(f'/api/v1/datasets/{release}').json()['char_count'] == report['chars']
+        assert client.get('/api/v1/datasets').json()['items'][0]['release_id'] == release
+        assert client.post('/api/v1/dataset-recipes', json=operation, headers=headers).status_code == 200
+        assert client.get('/api/v1/dataset-recipes/selection-api').json()['body'] == body
+        changed = {**operation, 'recipe': {**body, 'seed': 'new'}}
+        assert client.put('/api/v1/dataset-recipes/selection-api', json=changed, headers=headers).status_code == 200
+        assert client.get('/api/v1/datasets/' + str(release)).json()['recipe']['seed'] == 'm2'
+        assert client.request('DELETE', '/api/v1/dataset-recipes/selection-api', headers=headers,
+                              json={'actor': 'test', 'reason': '删草稿'}).status_code == 200
+        assert client.get('/api/v1/dataset-recipes').json() == []
+
+
+def test_dataset_balanced_reserved_and_deterministic(conn, monkeypatch):
+    seed_metadata(conn, 2000, group_size=5)
+    body = {'name': 'balanced', 'seed': 'm2', 'splits': {'train': .9, 'val': .05, 'test': .05}}
+    first = export.plan_release(conn, export.Recipe.load(body))
+    for split, expected in body['splits'].items():
+        assert abs(first.report['splits'][split]['ratio'] - expected) <= .01
+    release = export.write_release(conn, first)
+    selected = export._select
+    monkeypatch.setattr(export, '_select', lambda conn, recipe: list(reversed(selected(conn, recipe))))
+    assert export.plan_release(conn, export.Recipe.load(body)).members == first.members
+    groups = export._group_keys(conn, list(range(1, 2001)))
+    splits = {version: split for _, version, split, _ in first.members}
+    for doc_id, group in groups.items():
+        assert splits[doc_id] == splits[group]
+    test_doc = next(version for version, split in splits.items() if split == 'test')
+    reserved = {**body, 'name': 'reserved', 'seed': 'another', 'split_by': 'documents',
+                'stratify': ['source', 'category'],
+                'limits': {'val': {'max_chars': first.report['splits']['val']['chars']}},
+                'reserved': {'val': {'releases': [{'release_id': release, 'split': 'val'}]},
+                             'test': {'doc_ids': [test_doc]}}}
+    plan = export.plan_release(conn, export.Recipe.load(reserved))
+    next_splits = {version: split for _, version, split, _ in plan.members}
+    assert all(next_splits[doc] == 'val' for doc, split in splits.items() if split == 'val')
+    assert next_splits[test_doc] == 'test'
+    assert plan.report['splits']['val']['chars'] <= reserved['limits']['val']['max_chars']
+    assert abs(plan.report['splits']['train']['document_ratio'] - .9) <= .01
+
+
+def test_dataset_reserved_training_leak_and_group_conflict(conn):
+    seed_metadata(conn, 100, group_size=5)
+    body = {'name': 'reserved-safety', 'seed': 's', 'splits': {'train': .9, 'val': .05, 'test': .05}}
+    with pytest.raises(export.ExportError, match='同一作品'):
+        export.plan_release(conn, export.Recipe.load({**body, 'reserved': {
+            'val': {'doc_ids': [1]}, 'test': {'doc_ids': [2]}}}))
+    used = export.create_release(conn, export.Recipe.load({**body, 'name': 'trained', 'splits': {'train': 1},
+                                                          'include': [], 'documents': {'add': [1]}}))
+    export.record_training(conn, 'trained', 'fixture-training')
+    with pytest.raises(export.TrainingLeak):
+        export.plan_release(conn, export.Recipe.load({**body,
+            'documents': {'remove': [1]}, 'reserved': {'val': {'doc_ids': [1]}}}))
+    run = conn.execute("INSERT INTO processing_run (kind, rule_version) VALUES ('dedup', 'synthetic') RETURNING run_id").fetchone()[0]
+    cluster = conn.execute("INSERT INTO dup_cluster (run_id, level) VALUES (%s, 'document') RETURNING cluster_id", (run,)).fetchone()[0]
+    conn.execute("INSERT INTO dup_cluster_member (cluster_id, version_id, kind) VALUES (%s,1,'exact'),(%s,6,'exact')",
+                 (cluster, cluster))
+    conn.commit()
+    with pytest.raises(export.TrainingLeak):
+        export.plan_release(conn, export.Recipe.load({**body, 'splits': {'val': 1},
+            'include': [], 'documents': {'add': [6]}}))
+    assert export.verify_release(conn, used)
+
+
+def test_dataset_large_groups_warn_without_splitting(conn):
+    seed_metadata(conn, 100, group_size=80)
+    plan = export.plan_release(conn, export.Recipe.load({
+        'name': 'huge-groups', 'seed': 's', 'splits': {'train': .9, 'val': .05, 'test': .05}}))
+    assert {split for _, _, split, _ in plan.members} == {'train'}
+    assert any('超大组' in message for message in plan.report['warnings'])
+    assert any('百分点' in message for message in plan.report['warnings'])
+
+
+def read_export(result):
+    import io
+    import pickle
+    import zstandard
+    manifest = json.loads(Path(result['manifest']).read_text())
+    rows = []
+    for file in manifest['files']:
+        path = Path(result['manifest']).parent / file['file']
+        if manifest['format'] == 'parquet':
+            rows.extend(pq.read_table(path).to_pylist())
+        elif manifest['format'] == 'pkl':
+            with path.open('rb') as handle:
+                rows.extend(pickle.load(handle))
+        elif manifest['compression'] == 'zst':
+            with path.open('rb') as handle, zstandard.ZstdDecompressor().stream_reader(handle) as reader:
+                rows.extend(json.loads(line) for line in io.TextIOWrapper(reader))
+        else:
+            rows.extend(json.loads(line) for line in path.read_text().splitlines())
+    return sorted(rows, key=lambda item: (item['ordinal'], item.get('sample_index', 0)))
+
+
+def test_multiformat_export_job_roundtrip(conn, tmp_path, monkeypatch):
+    from fastapi.testclient import TestClient
+    from midstream import api, config, exporters
+    seed_metadata(conn, 20)
+    monkeypatch.setattr(config, 'EXPORT_ROOT', tmp_path)
+    recipe = export.Recipe.load({'name': 'formats', 'seed': 's', 'splits': {'train': .8, 'val': .2}})
+    release = export.create_release(conn, recipe)
+    before = export.get_release(conn, release)
+    app = api.create_app()
+    app.dependency_overrides[api.connection] = lambda: conn
+    app.dependency_overrides[api.write_connection] = lambda: conn
+    headers = {'X-Midstream-Action': '1'}
+    outputs = []
+    fields = exporters.DEFAULT_FIELDS + ['authors', 'era', 'category', 'genre', 'source']
+    with TestClient(app) as client, psycopg.connect(DSN, autocommit=True) as control:
+        for format, compression in [('parquet', None), ('jsonl', None), ('pkl', None), ('jsonl', 'zst')]:
+            payload = {'actor': 'tester', 'reason': '格式一致性',
+                       'options': {'format': format, 'fields': fields, 'shard_mb': .003, 'compression': compression}}
+            job = client.post(f'/api/v1/datasets/{release}/exports', json=payload, headers=headers).json()
+            jobs._run_next(conn, control)
+            completed = jobs.show(control, job['job_id'])
+            assert completed['status'] == 'succeeded', completed['error']
+            result = completed['result']
+            manifest = json.loads(Path(result['manifest']).read_text())
+            assert manifest['recipe'] == recipe.raw and manifest['content_digest'] == before['content_digest']
+            assert sum(file['rows'] for file in manifest['files']) == 20
+            outputs.append(read_export(result))
+        assert all(rows == outputs[0] for rows in outputs)
+        assert outputs[0][0]['era'] is None
+        repeated = exporters.export_release(conn, release, exporters.Options(fields=fields, shard_mb=.003))
+        assert read_export(repeated) == outputs[0]
+        assert len(client.get(f'/api/v1/datasets/{release}/exports').json()) == 5
+        assert export.get_release(conn, release) == before
+        assert export.verify_release(conn, release, hash_files=True)
+        # 同字节数的文本变化：默认检查结构，--hash 才检测内容哈希变化。
+        json_export = next(item for item in exporters.list_exports(conn, release)
+                           if item['format'] == 'jsonl' and item['options']['compression'] is None)
+        path = Path(json_export['files'][0]['path'])
+        path.write_bytes(path.read_bytes().replace('测'.encode(), '改'.encode(), 1))
+        assert export.verify_release(conn, release)
+        assert not export.verify_release(conn, release, hash_files=True)
+        path.unlink()
+        assert not export.verify_release(conn, release)
+
+
+def test_sample_exports_reconstruct_text(conn, tmp_path, monkeypatch):
+    from midstream import config, exporters
+    monkeypatch.setattr(config, 'EXPORT_ROOT', tmp_path / 'outputs')
+    texts = ['甲段落。乙句！\n\n第三段\n末段。' * 8 + '𠀋😀　尾', '无标点长文' * 30]
+    path = write(tmp_path / 'samples.jsonl', [row(str(i), text, book=f'书{i}') for i, text in enumerate(texts)])
+    ingest.ingest(conn, ADAPTERS['ccc_corpus'], [path])
+    release = export.create_release(conn, export.Recipe.load({'name': 'samples', 'seed': 's', 'splits': {'train': 1}}))
+    originals = {item['ordinal']: item['text'] for item in read_export(exporters.export_release(conn, release))}
+    for overlap in (0, 7):
+        options = exporters.Options(format='jsonl', unit='sample', max_chars=31, overlap_chars=overlap, shard_mb=.001)
+        result = exporters.export_release(conn, release, options)
+        samples = read_export(result)
+        assert samples == read_export(exporters.export_release(conn, release, options))
+        restored, previous = {}, {}
+        for sample in samples:
+            ordinal = sample['ordinal']
+            start, end = sample['start_char'], sample['end_char']
+            assert end - start <= 31
+            assert sample['text'] == originals[ordinal][start:end]
+            if sample['sample_index'] == 0:
+                restored[ordinal] = sample['text']
+            else:
+                assert previous[ordinal] - start == overlap
+                restored[ordinal] += sample['text'][overlap:]
+            previous[ordinal] = end
+        assert restored == originals
+        assert json.loads(Path(result['manifest']).read_text())['overlap_chars'] == overlap
+
+
+def test_export_interruption_keeps_no_completed_artifacts(conn, tmp_path, monkeypatch):
+    from midstream import config, exporters
+    seed_metadata(conn, 20)
+    monkeypatch.setattr(config, 'EXPORT_ROOT', tmp_path)
+    release = export.create_release(conn, export.Recipe.load({'name': 'interrupted', 'seed': 's', 'splits': {'train': 1}}))
+    write_shard = exporters._write_shard
+
+    def interrupted(*args):
+        write_shard(*args)
+        raise KeyboardInterrupt()
+
+    monkeypatch.setattr(exporters, '_write_shard', interrupted)
+    with pytest.raises(KeyboardInterrupt):
+        exporters.export_release(conn, release, exporters.Options(shard_mb=.001))
+    assert conn.execute('SELECT count(*) FROM export_artifact').fetchone()[0] == 0
+    assert exporters.list_exports(conn, release)[0]['status'] == 'failed'
+    assert not list((tmp_path / 'interrupted').iterdir())
+    monkeypatch.setattr(exporters, '_write_shard', write_shard)
+    result = exporters.export_release(conn, release)
+    assert len(read_export(result)) == 20
+    assert export.verify_release(conn, release, hash_files=True)
+
+
+def test_export_memory_stays_bounded(conn, tmp_path, monkeypatch):
+    import tracemalloc
+    from midstream import config, exporters
+    seed_metadata(conn, 10000)
+    monkeypatch.setattr(config, 'EXPORT_ROOT', tmp_path)
+    small = export.create_release(conn, export.Recipe.load({
+        'name': 'small-memory', 'seed': 's', 'splits': {'train': 1}, 'include': [],
+        'documents': {'add': list(range(1, 1001))}}))
+    large = export.create_release(conn, export.Recipe.load({
+        'name': 'large-memory', 'seed': 's', 'splits': {'train': 1}}))
+    peaks = []
+    for release in (small, large):
+        tracemalloc.start()
+        result = exporters.export_release(conn, release, exporters.Options(format='jsonl', shard_mb=.25))
+        peaks.append(tracemalloc.get_traced_memory()[1])
+        tracemalloc.stop()
+        assert Path(result['manifest']).is_file()
+    assert peaks[1] < peaks[0] * 2 + 2 * 1024 ** 2
+
+
+@pytest.mark.skipif(os.environ.get('MIDSTREAM_PLAN_BENCHMARK') != '1', reason='百万行性能验收单独运行一次')
+def test_dataset_plan_million_metadata(conn):
+    import resource
+    import sys
+    from time import perf_counter
+    seed_metadata(conn, 1_000_000, group_size=10)
+    conn.execute('SET TRANSACTION READ ONLY')
+    started = perf_counter()
+    plan = export.plan_release(conn, export.Recipe.load({
+        'name': 'million', 'seed': 'scale', 'splits': {'train': .9, 'val': .05, 'test': .05},
+        'stratify': ['source', 'category']}))
+    elapsed = perf_counter() - started
+    peak = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / (1024 ** 2 if sys.platform == 'darwin' else 1024)
+    assert plan.report['documents'] == 1_000_000
+    assert all(abs(plan.report['splits'][name]['ratio'] - ratio) <= .01
+               for name, ratio in (('train', .9), ('val', .05), ('test', .05)))
+    print(f'PLAN_BENCHMARK rows=1000000 seconds={elapsed:.3f} peak_rss_mib={peak:.1f}')
 
 
 def test_jobs_submit_complete(conn, tmp_path, monkeypatch):
@@ -320,7 +621,7 @@ def test_release_char_counts(conn, tmp_path, splits):
     for path in files:
         values = pq.read_table(path).column("text").to_pylist()
         exported.extend(values)
-        expected[path.stem] = sum(map(len, values))
+        expected[path.stem.split('-')[0]] += sum(map(len, values))
     assert sorted(exported) == sorted(texts)
     assert all(expected[split] > 0 for split in splits)
     assert export.release_stats(conn, release) == {

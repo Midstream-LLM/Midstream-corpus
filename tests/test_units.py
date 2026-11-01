@@ -8,7 +8,6 @@ import midstream_dedup
 from midstream import clean, eras, textcodec
 from midstream.adapters import ADAPTERS
 from midstream.adapters.ccc import _title
-from midstream.export import Recipe, _assign_split
 from midstream.ingest import _cleaned_metadata, _prepare
 from midstream.adapters.base import ParsedRecord
 from midstream.query import Filters, where_clause
@@ -115,13 +114,6 @@ def test_where_clause_escapes_like_and_uses_overlap():
     assert "&&" in where and "IS NULL" not in where
     where, _ = where_clause(Filters(year_from=800, include_unknown_years=True))
     assert "IS NULL" in where
-
-
-def test_split_assignment_is_stable_and_rejects_bad_ratio():
-    recipe = Recipe.load({"name": "x", "seed": "s", "splits": {"train": 0.9, "val": 0.1}})
-    first = [_assign_split(recipe, group) for group in range(200)]
-    assert first == [_assign_split(recipe, group) for group in range(200)]
-    assert set(first) == {"train", "val"}
 
 
 def test_dedup_recall():
