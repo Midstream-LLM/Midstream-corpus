@@ -51,6 +51,7 @@ def conn():
         connection.execute(SCHEMA.with_name("0006_incremental_dedup.sql").read_text(encoding="utf-8"))
         connection.execute(SCHEMA.with_name("0007_manual_batch.sql").read_text(encoding="utf-8"))
         connection.execute(SCHEMA.with_name("0008_import_plan.sql").read_text(encoding="utf-8"))
+        connection.execute(SCHEMA.with_name("0009_release_selection.sql").read_text(encoding="utf-8"))
         connection.commit()
         yield connection
 
@@ -154,6 +155,7 @@ def test_release_char_counts(conn, tmp_path, splits):
     assert export.release_stats(conn, release) == {
         "release_id": release, "name": "chars",
         "char_count": sum(map(len, texts)), "split_char_counts": expected,
+        "selection": {"candidates": len(texts), "dropped_documents": 0, "dropped_chars": 0},
     }
     assert export.verify_release(conn, release)
     with pytest.raises(export.ExportError, match="不存在"):
@@ -529,6 +531,75 @@ def test_document_dedup(conn, tmp_path):
     assert conn.execute(
         "SELECT count(*) FROM dup_cluster WHERE run_id = %s", (first["run_id"],)
     ).fetchone()[0] == 0
+
+
+def test_export_selection_keeps_one_per_cluster(conn, tmp_path):
+    rng = random.Random(763)
+    alphabet = "天地玄黄宇宙洪荒日月盈昃辰宿列张寒来暑往秋收冬藏"
+    def text():
+        return "".join(rng.choices(alphabet, k=1000))
+    base = text()
+    path = write(tmp_path / "selection.jsonl", [
+        row("short", base, chapter="甲书‧卷一", book="甲书"),
+        row("long", base + "！", chapter="乙书‧卷一", book="乙书"),
+        row("solo", text(), chapter="丙书‧卷一", book="丙书"),
+    ])
+    ingest.ingest(conn, ADAPTERS["ccc_corpus"], [path])
+    conn.execute("INSERT INTO source (name) VALUES ('second')")
+    second = conn.execute("SELECT source_id FROM source WHERE name = 'second'").fetchone()[0]
+    docs = dict(conn.execute("SELECT source_key, doc_id FROM document"))
+    conn.execute("UPDATE document SET source_id = %s WHERE doc_id = %s", (second, docs["short"]))
+    conn.commit()
+
+    def release(name, selection):
+        recipe = {"name": name, "seed": "s", "splits": {"train": 1.0}, "selection": selection}
+        release_id = export.create_release(conn, export.Recipe.load(recipe))
+        members = {doc for doc, in conn.execute(
+            "SELECT v.doc_id FROM dataset_member m JOIN document_version v USING (version_id)"
+            " WHERE m.release_id = %s", (release_id,))}
+        return release_id, members
+
+    _, everything = release("all", {})
+    assert everything == set(docs.values())
+    longest, members = release("longest", {"dedup": "document"})
+    assert members == {docs["long"], docs["solo"]}
+    assert export.release_stats(conn, longest)["selection"] == {
+        "candidates": 3, "dropped_documents": 1, "dropped_chars": 1000}
+    assert export.verify_release(conn, longest)
+    _, members = release("preferred", {"dedup": "document", "source_priority": ["second"]})
+    assert members == {docs["short"], docs["solo"]}
+    with pytest.raises(export.ExportError):
+        export.Recipe.load({"name": "bad", "seed": "s", "splits": {"train": 1.0},
+                            "selection": {"dedup": "span"}})
+    reprocess.reprocess(conn, reprocess.Rule(
+        "selection-test-v1", None, lambda doc: reprocess.Change(text=text())))
+    with pytest.raises(export.ExportError, match="已过期"):
+        release("stale", {"dedup": "document"})
+
+
+def test_export_selection_splits_with_dropped_bridge(conn, tmp_path):
+    """被舍弃的文档仍要连接作品和重复簇，否则两侧会共享文本。"""
+    rng = random.Random(764)
+    alphabet = "天地玄黄宇宙洪荒日月盈昃辰宿列张寒来暑往秋收冬藏"
+    base = "".join(rng.choices(alphabet, k=1000))
+    other = "".join(rng.choices(alphabet, k=1000))
+    path = write(tmp_path / "bridge.jsonl", [
+        row("kept", base + "！", chapter="甲书‧卷一", book="甲书"),
+        row("bridge", base, chapter="乙书‧卷一", book="乙书"),
+        row("work", other, chapter="乙书‧卷二", book="乙书"),
+    ])
+    ingest.ingest(conn, ADAPTERS["ccc_corpus"], [path])
+    docs = dict(conn.execute("SELECT source_key, doc_id FROM document"))
+    groups = export._group_keys(conn, list(docs.values()))
+    assert groups[docs["kept"]] == groups[docs["work"]]
+    release = export.create_release(conn, export.Recipe.load({
+        "name": "bridge", "seed": "s", "splits": {"train": 0.5, "val": 0.5},
+        "selection": {"dedup": "document"}}))
+    splits = conn.execute(
+        "SELECT v.doc_id, m.split FROM dataset_member m JOIN document_version v USING (version_id)"
+        " WHERE m.release_id = %s", (release,)).fetchall()
+    assert {doc for doc, _ in splits} == {docs["kept"], docs["work"]}
+    assert len({split for _, split in splits}) == 1
 
 
 def test_span_dedup_pipeline(conn, tmp_path):

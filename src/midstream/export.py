@@ -9,12 +9,13 @@ import json
 import os
 from dataclasses import dataclass
 from pathlib import Path
+from typing import NamedTuple
 
 import psycopg
 import pyarrow as pa
 import pyarrow.parquet as pq
 
-from . import textcodec
+from . import dedup, textcodec
 from .query import Filters, where_clause
 
 SPLIT_NAMES = ("test", "train", "val")
@@ -30,12 +31,31 @@ class TrainingLeak(ExportError):
 
 
 @dataclass(frozen=True)
+class Selection:
+    """重复文本的选用规则；默认不去重，保留筛选结果的全部文档。"""
+
+    dedup: str = "none"
+    source_priority: tuple[str, ...] = ()
+
+    @classmethod
+    def load(cls, data: dict) -> "Selection":
+        unknown = set(data) - set(cls.__dataclass_fields__)
+        if unknown:
+            raise ExportError(f"未知的选用字段：{sorted(unknown)}")
+        selection = cls(data.get("dedup", "none"), tuple(data.get("source_priority", ())))
+        if selection.dedup not in ("none", "document"):
+            raise ExportError(f"未知的去重方式：{selection.dedup}")
+        return selection
+
+
+@dataclass(frozen=True)
 class Recipe:
     name: str
     filters: Filters
     splits: dict[str, float]
     seed: str
     raw: dict
+    selection: Selection = Selection()
 
     @classmethod
     def load(cls, data: dict) -> "Recipe":
@@ -45,7 +65,8 @@ class Recipe:
         if abs(sum(splits.values()) - 1) > 1e-9:
             raise ExportError("划分比例之和必须为 1")
         filters = {"quality": ["ok"], **data.get("filters", {})}
-        return cls(data["name"], Filters.from_dict(filters), splits, data["seed"], data)
+        selection = Selection.load(data.get("selection", {}))
+        return cls(data["name"], Filters.from_dict(filters), splits, data["seed"], data, selection)
 
 
 class _Groups:
@@ -66,17 +87,48 @@ class _Groups:
         self.parent[self.find(a)] = self.find(b)
 
 
-def _select(conn: psycopg.Connection, filters: Filters) -> list[tuple[int, int, bytes, int]]:
+class Candidate(NamedTuple):
+    version_id: int
+    doc_id: int
+    text_hash: bytes
+    char_count: int
+    source: str
+    quality: str
+
+
+def _select(conn: psycopg.Connection, filters: Filters) -> list[Candidate]:
     where, params = where_clause(filters)
     rows = conn.execute(
-        f"""SELECT v.version_id, v.doc_id, v.text_hash, v.char_count
+        f"""SELECT v.version_id, v.doc_id, v.text_hash, v.char_count, s.name, v.quality_status
             FROM document_version v
             JOIN document d USING (doc_id)
             JOIN source s USING (source_id)
             WHERE {where} ORDER BY v.version_id""",
         params,
     ).fetchall()
-    return [(row[0], row[1], bytes(row[2]), row[3]) for row in rows]
+    return [Candidate(row[0], row[1], bytes(row[2]), row[3], row[4], row[5]) for row in rows]
+
+
+def _drop_duplicates(conn, selection: Selection, selected: list[Candidate]) -> list[Candidate]:
+    """每个文档簇只留一篇：来源优先，其次质量为 ok、字数多，最后按 doc_id 固定。"""
+    if not dedup.document_snapshot_current(conn):
+        raise ExportError("文档级查重结果已过期，请先运行 midstream dedup")
+    rank = {name: index for index, name in enumerate(selection.source_priority)}
+    by_version = {item.version_id: item for item in selected}
+    clusters: dict[int, list[Candidate]] = {}
+    for cluster_id, version_id in conn.execute(
+        """SELECT m.cluster_id, m.version_id
+           FROM dup_cluster_member m JOIN dup_cluster c USING (cluster_id)
+           WHERE c.level = 'document' AND m.version_id = ANY(%s)""",
+        (list(by_version),),
+    ):
+        clusters.setdefault(cluster_id, []).append(by_version[version_id])
+    dropped = set()
+    for members in clusters.values():
+        keep = min(members, key=lambda item: (
+            rank.get(item.source, len(rank)), item.quality != "ok", -item.char_count, item.doc_id))
+        dropped.update(item.version_id for item in members if item is not keep)
+    return [item for item in selected if item.version_id not in dropped]
 
 
 def _group_keys(conn: psycopg.Connection, doc_ids: list[int]) -> dict[int, int]:
@@ -158,10 +210,15 @@ def create_release(conn: psycopg.Connection, recipe: Recipe) -> int:
     selected = _select(conn, recipe.filters)
     if not selected:
         raise ExportError("配方没有选中任何文档")
-    groups = _group_keys(conn, [doc_id for _, doc_id, _, _ in selected])
+    # 分组用去重前的全集：被舍弃的文档仍可能连接作品和重复簇。
+    groups = _group_keys(conn, [item.doc_id for item in selected])
+    kept = selected
+    if recipe.selection.dedup == "document":
+        kept = _drop_duplicates(conn, recipe.selection, selected)
     assigned = [
-        (version_id, _assign_split(recipe, groups[doc_id]), doc_id, text_hash, char_count)
-        for version_id, doc_id, text_hash, char_count in selected
+        (item.version_id, _assign_split(recipe, groups[item.doc_id]), item.doc_id,
+         item.text_hash, item.char_count)
+        for item in kept
     ]
     _check_training_history(
         conn, [doc_id for _, split, doc_id, _, _ in assigned if split != "train"]
@@ -174,13 +231,19 @@ def create_release(conn: psycopg.Connection, recipe: Recipe) -> int:
     char_counts = {split: 0 for split in SPLIT_NAMES}
     for _, split, _, _, char_count in assigned:
         char_counts[split] += char_count
+    selection_report = {
+        "candidates": len(selected),
+        "dropped_documents": len(selected) - len(kept),
+        "dropped_chars": sum(item.char_count for item in selected) - sum(char_counts.values()),
+    }
     release_id = conn.execute(
         "INSERT INTO dataset_release (name, recipe, content_digest, char_count,"
-        " train_char_count, val_char_count, test_char_count)"
-        " VALUES (%s, %s, %s, %s, %s, %s, %s)"
+        " train_char_count, val_char_count, test_char_count, selection_report)"
+        " VALUES (%s, %s, %s, %s, %s, %s, %s, %s)"
         " RETURNING release_id",
         (recipe.name, json.dumps(recipe.raw, ensure_ascii=False), _digest(members),
-         sum(char_counts.values()), char_counts["train"], char_counts["val"], char_counts["test"]),
+         sum(char_counts.values()), char_counts["train"], char_counts["val"], char_counts["test"],
+         json.dumps(selection_report)),
     ).fetchone()[0]
     with conn.cursor() as cursor, cursor.copy(
         "COPY dataset_member (release_id, version_id, ordinal, split) FROM STDIN"
@@ -192,10 +255,10 @@ def create_release(conn: psycopg.Connection, recipe: Recipe) -> int:
 
 
 def release_stats(conn: psycopg.Connection, release_id: int) -> dict:
-    """读取发布时固定的字符数；空划分为 0。"""
+    """读取发布时固定的字符数和选用结果；空划分为 0，旧发布没有选用结果。"""
     row = conn.execute(
-        "SELECT name, char_count, train_char_count, val_char_count, test_char_count"
-        " FROM dataset_release WHERE release_id = %s", (release_id,),
+        "SELECT name, char_count, train_char_count, val_char_count, test_char_count,"
+        " selection_report FROM dataset_release WHERE release_id = %s", (release_id,),
     ).fetchone()
     if row is None:
         raise ExportError(f"数据集 {release_id} 不存在")
@@ -204,6 +267,7 @@ def release_stats(conn: psycopg.Connection, release_id: int) -> dict:
         "name": row[0],
         "char_count": row[1],
         "split_char_counts": {"train": row[2], "val": row[3], "test": row[4]},
+        "selection": row[5],
     }
 
 

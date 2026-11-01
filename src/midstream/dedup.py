@@ -25,6 +25,14 @@ def _input_digest(conn) -> bytes:
     return digest.digest()
 
 
+def document_snapshot_current(conn) -> bool:
+    """文档级快照是否覆盖全部当前版本。"""
+    row = conn.execute(
+        "SELECT input_digest FROM dedup_snapshot WHERE level = 'document'"
+    ).fetchone()
+    return row is not None and bytes(row[0]) == _input_digest(conn)
+
+
 def _reuse_snapshot(conn, level, digest, parameters, started):
     row = conn.execute(
         "SELECT s.input_digest, s.parameters, s.run_id, r.config"
