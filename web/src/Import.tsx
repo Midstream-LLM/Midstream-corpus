@@ -1,6 +1,8 @@
 import { useState } from "react";
-import { api, useLoad, State, count } from "./shared";
-type Preview = { source: string; parser_version: string; objects: {path: string; size_bytes: number; sha256: string}[]; samples: {file: string; source_key: string; metadata: unknown; error: string | null; text_preview: string}[] };
+import { api, useLoad, State, count, show } from "./shared";
+type Preview = { source: string; parser_version: string; objects: {path: string; size_bytes: number; sha256: string}[];
+  fill_rates: {field: string; filled: number; total: number}[];
+  samples: {file: string; position: string; source_key: string; metadata: Record<string,unknown>; error: string | null; text_preview: string}[] };
 export default function Import({onRegistered}: {onRegistered: (id: number) => void}) {
   const adapters = useLoad<{name: string; description: string; license_note: string}[]>("import/adapters");
   const [source, setSource] = useState(""), [paths, setPaths] = useState(""), [actor, setActor] = useState(""), [reason, setReason] = useState("");
@@ -40,12 +42,16 @@ export default function Import({onRegistered}: {onRegistered: (id: number) => vo
     {(planText || (source && !adapters.data?.some(a => a.name === source))) && <div className="edit-grid"><label>来源名称<input disabled={busy} value={source} onChange={e => {setSource(e.target.value); setPreview(null);}}/></label><label>导入映射方案（JSON）<textarea disabled={busy} rows={8} value={planText} onChange={e => {setPlanText(e.target.value); setPreview(null);}}/></label><p>同一批次使用同一来源和方案。混合格式请分批导入；字段映射不会猜测作者、年份或许可证。</p></div>}
     {adapters.data?.filter(a => a.name === source).map(a => <p key={a.name}>来源许可证说明：{a.license_note || "未知"}</p>)}
     <button disabled={busy || !source || !names.length || names.length > 20} onClick={() => submit(false)}>{busy ? "处理中…" : "检查文件并预览"}</button>
-    {preview && <div className="change-preview"><h3>登记确认</h3><p>解析器：{preview.parser_version}。每个文件最多抽看 3 条，正文截取前 500 字；这不是全量校验结果。</p>
+    {preview && <div className="change-preview"><h3>登记确认</h3><p>解析器：{preview.parser_version}。按首、中、尾窗口抽样，Parquet 按行组抽样；正文最多 500 字。这是抽样填充率，不是全量校验结果。</p>
       {preview.objects.map(o => <details key={o.path}><summary>{o.path} · {count(o.size_bytes)} 字节</summary><pre>SHA-256: {o.sha256}</pre></details>)}
-      {preview.samples.map((s,i) => <details key={i}><summary>{s.source_key || "解析失败"} · {s.file.split("/").pop()}</summary>{s.error && <p role="alert">{s.error}</p>}<pre>{JSON.stringify(s.metadata,null,2)}</pre><pre>{s.text_preview}</pre></details>)}
+      <table><thead><tr><th>映射字段</th><th>已填样本 / 总样本</th><th>填充率</th></tr></thead><tbody>{preview.fill_rates.map(rate => <tr key={rate.field}><td>{rate.field}</td><td>{rate.filled} / {rate.total}</td><td>{rate.total ? (100*rate.filled/rate.total).toFixed(1) : 0}%</td></tr>)}</tbody></table>
+      <div className="table-scroll"><table><thead><tr><th>文件 / 位置 / 来源键</th><th>映射后的元数据</th><th>正文样本 / 问题</th></tr></thead><tbody>{preview.samples.map((s,i) => <tr key={i}>
+        <td>{s.file.split("/").pop()}<small>{s.position} · {s.source_key || "来源键待暂存确定"}</small></td>
+        <td><dl className="fields">{Object.entries(s.metadata).filter(([key]) => key !== "field_basis" && key !== "extra").map(([key,value]) => <div key={key}><dt>{key}</dt><dd>{show(value)}</dd></div>)}</dl></td>
+        <td><p className="text-preview">{s.text_preview}</p>{s.error && <p className="error">{s.error}</p>}</td></tr>)}</tbody></table></div>
       {!preview.samples.length && <p>没有解析出样本，请检查文件与来源格式。</p>}
       <div className="edit-grid"><label>操作人<input disabled={busy} value={actor} onChange={e => setActor(e.target.value)}/></label><label>入库依据<input disabled={busy} value={reason} onChange={e => setReason(e.target.value)}/></label></div>
-      <p>确认后仅登记批次。随后在批次详情中继续处理，完成暂存、全量验证及发布。</p>
+      <p>确认后仅登记批次。随后先暂存验证，查看第二层预览，再确认发布。</p>
       <button className="primary" disabled={busy || !actor.trim() || !reason.trim() || !preview.samples.length} onClick={() => submit(true)}>确认登记批次</button>
     </div>}
   </details>;

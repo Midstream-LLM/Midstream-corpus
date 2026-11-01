@@ -26,6 +26,7 @@ const kinds: Record<string, string> = {
   dataset_create: "数据集发布", dataset_export: "数据集导出",
   token_stats: "Token 统计", tokenize: "Token 分片",
   dataset_verify: "数据集校验",
+  batch_stage: "批次暂存验证", batch_publish: "批次确认发布",
 };
 const active = (job: Job) => ["queued", "running"].includes(job.status);
 

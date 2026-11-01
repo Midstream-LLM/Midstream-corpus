@@ -1,4 +1,5 @@
 import Import from "./Import";
+import BatchPreview from "./BatchPreview";
 import { useState } from "react";
 import {
   api,
@@ -60,9 +61,9 @@ export default function Batches({ onJob }: { onJob: (id: number) => void }) {
     setMessage("");
     setConfirm(false);
     try {
-      if (action === "resume") {
+      if (action === "resume" || action === "publish") {
         const job = await api<{ job_id: number }>("jobs", undefined, {
-          kind: "batch_resume", params: { batch_id: id }, actor, reason,
+          kind: action === "publish" ? "batch_publish" : "batch_stage", params: { batch_id: id }, actor, reason,
         });
         onJob(job.job_id);
         return;
@@ -255,11 +256,12 @@ export default function Batches({ onJob }: { onJob: (id: number) => void }) {
                     </button>
                     <button
                       className="primary"
-                      disabled={busy || !allowed}
+                      disabled={busy || !allowed || d.status === "validated"}
                       onClick={() => act("resume")}
                     >
-                      继续处理 / 发布
+                      暂存并验证
                     </button>
+                    <button className="primary" disabled={busy || !allowed || d.status !== "validated"} onClick={() => act("publish")}>确认发布</button>
                   </div>
                   {confirm && (
                     <div className="change-preview">
@@ -278,6 +280,7 @@ export default function Batches({ onJob }: { onJob: (id: number) => void }) {
                       </div>
                     </div>
                   )}
+                  {d.has_partition && !["published","abandoned"].includes(d.status) && <BatchPreview key={d.batch_id} id={d.batch_id} tick={tick}/>}
                   <h3>原文件</h3>
                   {d.raw_objects.map((o) => (
                     <details key={o.path}>

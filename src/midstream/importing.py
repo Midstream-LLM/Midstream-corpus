@@ -1,8 +1,7 @@
 """Web 入库准备：复用适配器，原文件保持原位。"""
-from itertools import islice
 from pathlib import Path
 
-from . import ingest
+from . import ingest, sampling
 from .batches import _event
 from .adapters import ADAPTERS
 from .management import ManagementError, _identity
@@ -53,14 +52,17 @@ def preview(source, names, plan=None):
     samples = []
     try:
         for path in paths:
-            for record in islice(adapter.parse(path), 3):
-                samples.append({'file': str(path), 'source_key': record.source_key,
+            for position, record in sampling.sample(adapter, path):
+                samples.append({'file': str(path), 'source_key': record.source_key, 'position': position,
                                 'metadata': record.metadata, 'error': record.error,
                                 'text_preview': (record.text or '')[:500]})
     except (ValueError, KeyError, TypeError, UnicodeError) as exc:
         raise ManagementError('invalid_input', '文件不能按所选来源格式解析') from exc
+    fields = sorted({key for item in samples for key in item['metadata'] if key not in ('field_basis', 'extra')})
+    filled = [{'field': key, 'filled': sum(item['metadata'].get(key) not in (None, '', []) for item in samples),
+               'total': len(samples)} for key in fields]
     return {'source': source, 'parser_version': adapter.parser_version,
-            'objects': objects, 'samples': samples}
+            'objects': objects, 'samples': samples, 'fill_rates': filled}
 
 
 def register(conn, source, names, expected, parser_version, actor, reason, plan=None):

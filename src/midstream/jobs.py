@@ -15,6 +15,14 @@ def _batch_resume(conn, params, actor, reason, progress):
                           progress=progress)
 
 
+def _batch_stage(conn, params, actor, reason, progress):
+    return batches.stage(conn, params['batch_id'], actor=actor, reason=reason, progress=progress)
+
+
+def _batch_publish(conn, params, actor, reason, progress):
+    return batches.publish(conn, params['batch_id'], actor=actor, reason=reason, progress=progress)
+
+
 def _dedup(conn, params, actor, reason, progress):
     return dedup.dedup(conn, **params, progress=progress)
 
@@ -63,7 +71,8 @@ def _dataset_verify(conn, params, actor, reason, progress):
     return {'release_id': params['release_id'], 'valid': True}
 
 
-HANDLERS = {'batch_resume': _batch_resume, 'dedup': _dedup, 'dedup_spans': _dedup_spans,
+HANDLERS = {'batch_resume': _batch_resume, 'batch_stage': _batch_stage, 'batch_publish': _batch_publish,
+            'dedup': _dedup, 'dedup_spans': _dedup_spans,
             'dataset_create': _dataset_create, 'dataset_export': _dataset_export,
             'token_stats': _token_stats, 'tokenize': _tokenize, 'dataset_verify': _dataset_verify}
 
@@ -77,7 +86,7 @@ def submit(conn, kind, params, actor, reason):
     _identity(actor, reason)
     if kind not in HANDLERS or not isinstance(params, dict):
         raise ManagementError('invalid_input', '任务类型或参数无效')
-    if kind == 'batch_resume':
+    if kind in ('batch_resume', 'batch_stage', 'batch_publish'):
         valid = (set(params) == {'batch_id'} and type(params['batch_id']) is int
                  and params['batch_id'] > 0)
     elif kind == 'dataset_create':

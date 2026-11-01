@@ -34,7 +34,7 @@ class ImportPreview(BaseModel):
 
 
 class JobSubmit(Operation):
-    kind: Literal['batch_resume', 'dedup', 'dedup_spans', 'dataset_create', 'dataset_export', 'token_stats', 'tokenize', 'dataset_verify']
+    kind: Literal['batch_resume', 'batch_stage', 'batch_publish', 'dedup', 'dedup_spans', 'dataset_create', 'dataset_export', 'token_stats', 'tokenize', 'dataset_verify']
     params: dict = Field(default_factory=dict)
 
 
@@ -390,6 +390,28 @@ def create_app(static_dir: Path | None = None) -> FastAPI:
     @app.post('/api/v1/batches/{batch_id}/resume', dependencies=[Depends(browser_write)])
     def resume(batch_id: int, body: Operation, conn=Depends(write_connection)):
         return batches.resume(conn, batch_id, actor=body.actor, reason=body.reason)
+
+    @app.post('/api/v1/batches/{batch_id}/stage', dependencies=[Depends(browser_write)])
+    def batch_stage(batch_id: int, body: Operation, conn=Depends(write_connection)):
+        return jobs.submit(conn, 'batch_stage', {'batch_id': batch_id}, body.actor, body.reason)
+
+    @app.post('/api/v1/batches/{batch_id}/publish', dependencies=[Depends(browser_write)])
+    def batch_publish(batch_id: int, body: Operation, conn=Depends(write_connection)):
+        return jobs.submit(conn, 'batch_publish', {'batch_id': batch_id}, body.actor, body.reason)
+
+    @app.get('/api/v1/batches/{batch_id}/preview')
+    def batch_preview(batch_id: int, conn=Depends(connection)):
+        return batches.preview(conn, batch_id)
+
+    @app.get('/api/v1/batches/{batch_id}/records')
+    def batch_records(batch_id: int, status: Literal['new','updated','unchanged','failed'] | None = None,
+                      after: Annotated[int, Query(ge=0)] = 0, limit: Annotated[int, Query(ge=1,le=100)] = 30,
+                      conn=Depends(connection)):
+        return batches.records(conn, batch_id, status=status, after=after, limit=limit)
+
+    @app.get('/api/v1/batches/{batch_id}/records/{record_id}/diff')
+    def batch_diff(batch_id: int, record_id: int, conn=Depends(connection)):
+        return batches.record_diff(conn, batch_id, record_id)
 
     @app.post('/api/v1/batches/{batch_id}/abandon', dependencies=[Depends(browser_write)])
     def abandon(batch_id: int, body: Operation, conn=Depends(write_connection)):

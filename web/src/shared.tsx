@@ -7,7 +7,7 @@ export const quality: Record<string, string> = {
 export const batchLabels: Record<string, string> = {
   received: "已登记",
   staged: "已暂存",
-  validated: "已验证",
+  validated: "已验证 · 待确认发布",
   published: "已发布",
   failed: "失败",
   needs_review: "待检查",

@@ -65,6 +65,82 @@ def write(path, lines):
     return path
 
 
+def test_import_uniform_samples(tmp_path):
+    from midstream import importing
+    path=write(tmp_path/'uniform.jsonl',[row(str(i),'甲'+str(i),chapter='样本'+str(i)) for i in range(200)])
+    result=importing.preview('ccc_corpus',[str(path)])
+    keys={int(item['source_key']) for item in result['samples']}
+    assert 0 in keys and 199 in keys and any(60<i<140 for i in keys)
+    assert len(keys)<=9 and result['fill_rates']
+    data=tmp_path/'uniform.json'
+    data.write_text(json.dumps([{'id':i,'body':'甲'+str(i),'title':'题'+str(i)} for i in range(100)],ensure_ascii=False))
+    mapped=importing.preview('sample-json',[str(data)],{'format':'json','text_field':'body','id_field':'id','fields':{'title':'title'}})
+    assert any(item['metadata']['title']=='题99' for item in mapped['samples'])
+    assert any(item['metadata']['title']=='题0' for item in mapped['samples'])
+    for encoding in ('utf-16','gb18030'):
+        lines=tmp_path/(encoding+'.jsonl')
+        lines.write_text('\n'.join(json.dumps({'id':i,'body':'甲文','title':'题'+str(i)},ensure_ascii=False) for i in range(100)),encoding=encoding)
+        result=importing.preview('sample-lines',[str(lines)],{'format':'jsonl','encoding':encoding,'text_field':'body','id_field':'id','fields':{'title':'title'}})
+        assert {'题0','题99'} <= {item['metadata']['title'] for item in result['samples']}
+
+
+def test_batch_two_layer_preview_matches_direct_publish(conn,tmp_path,monkeypatch):
+    from copy import copy
+    from midstream import importing
+    first=write(tmp_path/'baseline.jsonl',[row('same','甲文'),row('changed','乙文')])
+    ingest.ingest(conn,ADAPTERS['ccc_corpus'],[first])
+    incoming=write(tmp_path/'incoming.jsonl',[row('same','甲文'),row('changed','乙文改'),row('new','甲\r\n新文'),'{坏行'])
+    preview=importing.preview('ccc_corpus',[str(incoming)])
+    batch=importing.register(conn,'ccc_corpus',[str(incoming)],preview['objects'],preview['parser_version'],'test','登记')
+    batch_id=batch['batch_id']
+    before=conn.execute('SELECT version_id,text_hash,is_current FROM document_version ORDER BY version_id').fetchall()
+    assert batches.stage(conn,batch_id,actor='test',reason='暂存')['awaiting_confirmation']
+    with psycopg.connect(DSN) as readonly:
+        readonly.execute('SET TRANSACTION READ ONLY')
+        report=batches.preview(readonly,batch_id)
+        assert {key:value['documents'] for key,value in report['counts'].items()}=={'new':1,'updated':1,'unchanged':1,'failed':1}
+        assert report['counts']['failed']['chars'] is None and report['exact_match_documents']==1
+        records=batches.records(readonly,batch_id,limit=2)
+        assert records['next_cursor'] and len(records['items'])==2
+        new=batches.records(readonly,batch_id,status='new')['items'][0]
+        difference=batches.record_diff(readonly,batch_id,new['record_id'])
+        assert difference['before']=='甲\r\n新文' and difference['after']=='甲\n新文'
+    assert conn.execute('SELECT version_id,text_hash,is_current FROM document_version ORDER BY version_id').fetchall()==before
+    published=batches.publish(conn,batch_id,actor='test',reason='确认')
+    assert (published['new_documents'],published['new_versions'],published['unchanged'])==(1,4,1)
+    assert batches.publish(conn,batch_id,actor='test',reason='重试')['status']=='already_published'
+    other=copy(ADAPTERS['ccc_corpus']);other.name='direct-preview-fixture'
+    ingest.ingest(conn,other,[first]);direct=ingest.ingest(conn,other,[incoming])
+    assert (direct.new_documents,direct.new_versions,direct.unchanged)==(1,4,1)
+    def current(source):
+        return conn.execute('SELECT d.source_key,v.text_hash,v.char_count FROM document_version v JOIN document d USING(doc_id)'
+                            ' JOIN source s USING(source_id) WHERE v.is_current AND s.name=%s ORDER BY source_key',(source,)).fetchall()
+    assert current('ccc_corpus')==current(other.name)
+    assert conn.execute('SELECT count(*) FROM staging_text WHERE batch_id=%s',(batch_id,)).fetchone()[0]==0
+
+
+def test_staged_interruption_resume_and_abandon(conn,tmp_path,monkeypatch):
+    path=write(tmp_path/'stage-interrupt.jsonl',[row('recover','恢复正文')])
+    batch=ingest.register_batch(conn,ADAPTERS['ccc_corpus'],[path])
+    validate=ingest.validate
+    def interrupted(conn,batch):
+        validate(conn,batch)
+        raise KeyboardInterrupt()
+    monkeypatch.setattr(ingest,'validate',interrupted)
+    with pytest.raises(KeyboardInterrupt):
+        batches.stage(conn,batch,actor='test',reason='暂存中断')
+    assert batches.inspect(conn,batch)['status']=='validated'
+    monkeypatch.setattr(ingest,'validate',validate)
+    assert batches.stage(conn,batch,actor='test',reason='恢复')['awaiting_confirmation']
+    assert batches.preview(conn,batch)['counts']['new']['documents']==1
+    batches.abandon(conn,batch,actor='test',reason='放弃')
+    assert not batches.inspect(conn,batch)['has_partition']
+    assert conn.execute('SELECT count(*) FROM staging_text').fetchone()[0]==0
+    assert conn.execute('SELECT count(*) FROM document_version').fetchone()[0]==0
+    with pytest.raises(management.ManagementError):
+        batches.publish(conn,batch,actor='test',reason='不可发布')
+
+
 def test_dataset_workbench_actions(conn, tmp_path, monkeypatch):
     from fastapi.testclient import TestClient
     from midstream import api, config, exporters

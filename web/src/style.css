@@ -882,5 +882,6 @@ textarea {
 .dataset-detail .file-path { overflow-wrap: anywhere; min-width: 180px; }
 .dataset-detail pre { white-space: pre-wrap; overflow-wrap: anywhere; }
 .warning { border-left: 4px solid #9c5e17; background: #fff3d9; color: #6c4214; }
+.text-preview { white-space: pre-wrap; overflow-wrap: anywhere; max-height: 320px; overflow: auto; }
 @media(max-width: 950px) { .facet-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
 @media(max-width: 600px) { .facet-grid { grid-template-columns: 1fr; } }
