@@ -59,6 +59,7 @@ def conn():
         connection.execute(SCHEMA.with_name("0014_text_variants.sql").read_text(encoding="utf-8"))
         connection.execute(SCHEMA.with_name("0015_member_cuts.sql").read_text(encoding="utf-8"))
         connection.execute(SCHEMA.with_name("0016_dedup_overrides.sql").read_text(encoding="utf-8"))
+        connection.execute(SCHEMA.with_name("0017_backups.sql").read_text(encoding="utf-8"))
         connection.commit()
         yield connection
 
@@ -66,6 +67,153 @@ def conn():
 def write(path, lines):
     path.write_text("\n".join(lines) + "\n", encoding="utf-8")
     return path
+
+
+class MemoryOss:
+    def __init__(self):
+        self.objects={};self.uploads={};self.fail=False;self.serial=0
+    def get_bucket_info(self):
+        return None
+    def init_multipart_upload(self,key):
+        from types import SimpleNamespace
+        self.serial+=1;upload=str(self.serial);self.uploads[upload]={}
+        return SimpleNamespace(upload_id=upload)
+    def upload_part(self,key,upload,number,data):
+        from types import SimpleNamespace
+        if self.fail:
+            raise RuntimeError('synthetic upload interrupted')
+        self.uploads[upload][number]=bytes(data)
+        return SimpleNamespace(etag=str(number))
+    def complete_multipart_upload(self,key,upload,parts):
+        data=self.uploads.pop(upload)
+        self.objects[key]=b''.join(data[part.part_number] for part in parts)
+    def abort_multipart_upload(self,key,upload):
+        self.uploads.pop(upload)
+    def put_object(self,key,data):
+        self.objects[key]=bytes(data)
+    def get_object(self,key):
+        from io import BytesIO
+        return BytesIO(self.objects[key])
+    def delete_object(self,key):
+        self.objects.pop(key,None)
+
+
+def backup_fixture(monkeypatch,tmp_path,**changes):
+    from midstream import backup,backup_settings,config
+    from psycopg.conninfo import conninfo_to_dict,make_conninfo
+    monkeypatch.setattr(config,'HOME',tmp_path/'backup-home')
+    for env in backup_settings.ENV.values():
+        monkeypatch.delenv(env,raising=False)
+    values={**backup_settings.BackupConfig().model_dump(),'endpoint':'https://oss.invalid','bucket':'synthetic',
+            **changes}
+    backup_settings.save(values,{'access_key_id':'test-id','access_key_secret':'test-secret'},[],'missing')
+    store=MemoryOss()
+    monkeypatch.setattr(backup,'_bucket',lambda *args,**kwargs:store)
+    def command(tool,dsn=None,*options):
+        result=['docker','exec','-i','midstream-test-pg',tool]
+        if dsn:
+            db=conninfo_to_dict(dsn)['dbname']
+            result+=['--dbname',make_conninfo(host='/var/run/postgresql',user='postgres',dbname=db)]
+        return result+list(options),dict(os.environ)
+    monkeypatch.setattr(backup,'_command',command)
+    return store
+
+
+def test_backup_settings_redaction_revision_and_default_schedule(conn,tmp_path,monkeypatch):
+    import stat
+    from fastapi.testclient import TestClient
+    from midstream import api,backup,backup_settings,config
+    monkeypatch.setattr(config,'HOME',tmp_path/'settings')
+    for env in backup_settings.ENV.values():
+        monkeypatch.delenv(env,raising=False)
+    backup.schedule(conn)
+    assert conn.execute('SELECT count(*) FROM job').fetchone()[0]==0
+    app=api.create_app()
+    with TestClient(app) as client:
+        first=client.get('/api/v1/backup/settings').json()
+        assert first['config']['schedule']=='none'
+        payload={'config':{**first['config'],'endpoint':'https://oss.invalid','bucket':'test'},
+                 'keys':{'access_key_id':'local-id','access_key_secret':'local-secret'},'revision':first['revision']}
+        headers={'X-Midstream-Action':'1'}
+        saved=client.post('/api/v1/backup/settings',json=payload,headers=headers)
+        assert saved.status_code==200
+        assert stat.S_IMODE(backup_settings.path().stat().st_mode)==0o600
+        monkeypatch.setenv('OSS_ACCESS_KEY_SECRET','environment-secret')
+        visible=client.get('/api/v1/backup/settings')
+        assert all(key not in visible.text for key in ('local-id','local-secret','environment-secret'))
+        assert backup_settings.credentials(backup_settings.read()[1])['access_key_secret']=='environment-secret'
+        assert client.post('/api/v1/backup/settings',json=payload,headers=headers).status_code==409
+        backup.schedule(conn)
+        assert conn.execute('SELECT count(*) FROM job').fetchone()[0]==0
+        current=visible.json()
+        daily={**payload,'config':{**current['config'],'schedule':'daily'},'keys':{},'revision':current['revision']}
+        assert client.post('/api/v1/backup/settings',json=daily,headers=headers).status_code==200
+        backup.schedule(conn);backup.schedule(conn)
+        assert conn.execute("SELECT count(*) FROM job WHERE kind='backup'").fetchone()[0]==1
+
+
+def test_backup_stream_verify_restore_new_database_and_retention(conn,tmp_path,monkeypatch):
+    import uuid
+    from fastapi.testclient import TestClient
+    from psycopg.conninfo import make_conninfo
+    from midstream import api,backup,backup_settings
+    from midstream.llm import config as llm_config
+    store=backup_fixture(monkeypatch,tmp_path,keep=1,include_config=True)
+    fake_config=tmp_path/'llm.toml';fake_config.write_text('[services]\ndefault = "synthetic"\n')
+    monkeypatch.setattr(llm_config,'config_path',lambda:fake_config)
+    seed_metadata(conn,20)
+    release=export.create_release(conn,export.Recipe.load({'name':'backup-source','seed':'s','splits':{'train':1}}))
+    app=api.create_app();app.dependency_overrides[api.connection]=lambda:conn
+    app.dependency_overrides[api.write_connection]=lambda:conn
+    headers={'X-Midstream-Action':'1'};operation={'actor':'test','reason':'隔离备份'}
+    with TestClient(app) as client,psycopg.connect(DSN,autocommit=True) as control:
+        assert client.post('/api/v1/backup/test',json={},headers=headers).json()['connected']
+        job=client.post('/api/v1/backups',json=operation,headers=headers).json()
+        jobs._run_next(conn,control)
+        result=jobs.show(control,job['job_id'])
+        assert result['status']=='succeeded',result['error']
+        backup_id=result['result']['backup_id']
+        assert any(key.endswith('/config/llm.toml') for key in store.objects)
+        assert any(key.endswith('/config/backup.toml') for key in store.objects)
+        verify=client.post(f'/api/v1/backups/{backup_id}/verify',json=operation,headers=headers).json()
+        jobs._run_next(conn,control)
+        assert jobs.show(control,verify['job_id'])['result']['verified']
+        new='midstream_restore_'+uuid.uuid4().hex[:10]
+        backup.restore(conn,backup_id,new)
+        with psycopg.connect(make_conninfo(DSN,dbname=new)) as restored:
+            for table in ('document','document_version','dataset_member','dataset_release'):
+                assert restored.execute('SELECT count(*) FROM '+table).fetchone()[0]==conn.execute('SELECT count(*) FROM '+table).fetchone()[0]
+        with pytest.raises(management.ManagementError):
+            backup.restore(conn,backup_id,'midstream')
+        with pytest.raises(psycopg.errors.DuplicateDatabase):
+            backup.restore(conn,backup_id,new)
+        assert export.verify_release(conn,release)
+        old_key=result['result']['object_key']
+        second=backup.run(conn,'test','保留策略')
+        assert old_key not in store.objects
+        history=client.get('/api/v1/backups').json()
+        assert history[0]['backup_id']==second['backup_id'] and history[1]['status']=='deleted'
+
+
+def test_backup_failure_aborts_multipart_and_recovery(conn,tmp_path,monkeypatch):
+    from midstream import backup
+    store=backup_fixture(monkeypatch,tmp_path)
+    seed_metadata(conn,5)
+    store.fail=True
+    with pytest.raises(RuntimeError,match='synthetic upload'):
+        backup.run(conn,'test','中断')
+    assert not store.uploads and not store.objects
+    assert backup.list_backups(conn)[0]['status']=='failed'
+    store.fail=False
+    result=backup.run(conn,'test','重试')
+    store.objects[result['object_key']]=b'not a PostgreSQL archive'
+    with pytest.raises(management.ManagementError,match='pg_restore'):
+        backup.verify(conn,result['backup_id'])
+    assert backup.list_backups(conn)[0]['verified_at'] is None
+    conn.execute("INSERT INTO backup_record(endpoint,bucket,object_key,database_name,status,actor,reason)"
+                 " VALUES('https://oss.invalid','synthetic','interrupted','midstream_test','running','test','模拟进程中断')")
+    conn.commit();backup.recover(conn);conn.commit()
+    assert backup.list_backups(conn)[0]['error']=='interrupted'
 
 
 def test_dedup_override_survives_recompute_and_export_groups(conn,tmp_path):
@@ -924,7 +1072,7 @@ def test_jobs_submit_complete(conn, tmp_path, monkeypatch):
         assert conn.execute('SELECT count(*) FROM document_version').fetchone()[0] == 2
 
 
-def test_jobs_worker_interrupted_retry(conn):
+def test_jobs_worker_interrupted_retry(conn,tmp_path):
     import subprocess
     import sys
     from time import monotonic, sleep
@@ -933,7 +1081,7 @@ def test_jobs_worker_interrupted_retry(conn):
     conn.commit()
     # 阻塞查重阶段，使真实 worker 保持 running；心跳仍应独立提交。
     conn.execute('SELECT pg_advisory_xact_lock(762031)')
-    env = {**os.environ, 'MIDSTREAM_DSN': DSN}
+    env = {**os.environ, 'MIDSTREAM_DSN': DSN, 'MIDSTREAM_HOME':str(tmp_path/'worker-home')}
     command = [sys.executable, '-m', 'midstream.cli', 'worker']
 
     def wait_status(control, target, status):

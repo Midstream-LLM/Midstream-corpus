@@ -12,7 +12,7 @@ from starlette.middleware.trustedhost import TrustedHostMiddleware
 from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
 
-from . import batches, config, duplicates, export, exporters, management, query, importing, import_detection, jobs, token_stats, tokenizing
+from . import backup, backup_settings, batches, config, duplicates, export, exporters, management, query, importing, import_detection, jobs, token_stats, tokenizing
 
 
 def write_connection():
@@ -34,7 +34,7 @@ class ImportPreview(BaseModel):
 
 
 class JobSubmit(Operation):
-    kind: Literal['batch_resume', 'batch_stage', 'batch_publish', 'dedup', 'dedup_spans', 'dataset_create', 'dataset_export', 'token_stats', 'tokenize', 'dataset_verify']
+    kind: Literal['batch_resume', 'batch_stage', 'batch_publish', 'dedup', 'dedup_spans', 'dataset_create', 'dataset_export', 'token_stats', 'tokenize', 'dataset_verify', 'backup', 'backup_verify']
     params: dict = Field(default_factory=dict)
 
 
@@ -99,6 +99,14 @@ class LLMSettingsSave(BaseModel):
     keys: dict[str, str] = Field(default_factory=dict)
     clear_keys: list[str] = Field(default_factory=list)
     revision: str
+
+
+class BackupSettingsSave(BaseModel):
+    model_config=ConfigDict(extra='forbid')
+    config:dict
+    keys:dict[str,str]=Field(default_factory=dict)
+    clear_keys:list[str]=Field(default_factory=list)
+    revision:str
 
 
 class DocumentReview(Operation):
@@ -169,8 +177,9 @@ def create_app(static_dir: Path | None = None) -> FastAPI:
 
     @app.exception_handler(RequestValidationError)
     async def validation_error(request, exc):
-        if request.url.path.startswith('/api/v1/llm/'):
-            return JSONResponse(status_code=422, content={'detail': 'LLM 配置请求格式无效'})
+        if request.url.path.startswith(('/api/v1/llm/','/api/v1/backup/')):
+            return JSONResponse(status_code=422, content={'detail':
+                '备份配置请求格式无效' if request.url.path.startswith('/api/v1/backup/') else 'LLM 配置请求格式无效'})
         return await request_validation_exception_handler(request, exc)
 
     @app.exception_handler(llm_settings.SettingsError)
@@ -204,6 +213,30 @@ def create_app(static_dir: Path | None = None) -> FastAPI:
     @app.post('/api/v1/llm/settings', dependencies=[Depends(browser_write)])
     def llm_settings_save(body: LLMSettingsSave):
         return llm_settings.save(body.config, body.keys, body.clear_keys, body.revision)
+
+    @app.get('/api/v1/backup/settings')
+    def backup_settings_get():
+        return backup_settings.get()
+
+    @app.post('/api/v1/backup/settings',dependencies=[Depends(browser_write)])
+    def backup_settings_save(body:BackupSettingsSave):
+        return backup_settings.save(body.config,body.keys,body.clear_keys,body.revision)
+
+    @app.post('/api/v1/backup/test',dependencies=[Depends(browser_write)])
+    def backup_connection_test():
+        return backup.test_connection()
+
+    @app.get('/api/v1/backups')
+    def backup_list(conn=Depends(connection)):
+        return backup.list_backups(conn)
+
+    @app.post('/api/v1/backups',dependencies=[Depends(browser_write)])
+    def backup_run(body:Operation,conn=Depends(write_connection)):
+        return jobs.submit(conn,'backup',{},body.actor,body.reason)
+
+    @app.post('/api/v1/backups/{backup_id}/verify',dependencies=[Depends(browser_write)])
+    def backup_verify(backup_id:int,body:Operation,conn=Depends(write_connection)):
+        return jobs.submit(conn,'backup_verify',{'backup_id':backup_id},body.actor,body.reason)
 
     @app.post('/api/v1/import/detect', dependencies=[Depends(browser_write)])
     def import_detect(body: ImportDetect):

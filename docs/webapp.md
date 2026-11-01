@@ -1,5 +1,13 @@
 # Web app：元数据、统计与管理
 
+## 备份设置（M10）
+
+导航“设置”保留 LLM 配置，并增加阿里云 OSS 备份一节：endpoint、bucket、前缀、凭据、周期、保留份数、可选配置文件。留空凭据保留本地值，清除仅影响本地值，环境变量仍优先。默认不自动备份。测试连接针对已保存配置；手动备份和历史校验填写操作人/依据，跳转任务中心。
+
+GET/POST /api/v1/backup/settings 共用 backup.toml，POST 为 config、keys、clear_keys、revision；POST /backup/test 测试已保存连接。GET/POST /backups 查看历史/提交 backup 任务；POST /backups/{id}/verify 提交 backup_verify。写操作都要求 browser_write，任务写操作使用 actor/reason。恢复仅提供 CLI，且只允许全新库。详见 [使用指南](user-guide.md#8d-oss-备份m10)。
+
+最终全量 130 项通过、2 个已另验收性能例跳过，构建通过；之后备份键唯一性/调度连接小修，策略测试通过，返回值解包修复后主流程定向通过。OSS 全是假传输，真实 PostgreSQL 工具在指定隔离容器运行；无真实 OSS、正式库或部署，本轮未新增备份浏览器验收。
+
 ## 重复浏览（M9）
 
 导航“重复”可按完全/近重复、成员数和来源分页查看文档簇，分页读成员元数据、选两篇做服务端限长差异。可提交文档/段落查重任务；文档正文页可叠加最多 200 条重复高亮，不生成版本，补充平面字符按 Unicode 码点坐标显示。
@@ -159,7 +167,7 @@ HTTP 接口（写请求继续要求 `X-Midstream-Action: 1`，并检查同源）
 
 浏览器写请求带 `X-Midstream-Action: 1`，且只接受同源 Origin；没有配置跨站 CORS。原生客户端也需此请求头。默认 Host 白名单为 localhost/loopback（另含 TestClient 的 testserver），可通过 `MIDSTREAM_ALLOWED_HOSTS` 设置。这是本机/隧道应用的请求边界，不是多用户登录认证。
 
-批次恢复目前在请求所属服务线程执行；页面显示处理中并定期读取批次状态。若网络中断，应刷新核对实际状态，不盲目重复操作；进程终止后的恢复仍依赖 core 批次状态，不具备独立持久任务队列。发布后查重失败不会回滚已经发布的数据。
+Web 暂存验证与确认发布使用持久任务队列，处理完成后查看暂存预览再确认发布。网络中断后可在任务中心查看状态；CLI batch-resume 仍同步一键处理。发布后查重失败不会回滚已经发布的数据。
 
 ### 新建入库批次
 

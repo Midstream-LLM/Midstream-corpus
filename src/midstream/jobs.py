@@ -71,10 +71,21 @@ def _dataset_verify(conn, params, actor, reason, progress):
     return {'release_id': params['release_id'], 'valid': True}
 
 
+def _backup(conn,params,actor,reason,progress):
+    from . import backup
+    return backup.run(conn,actor,reason,progress=progress)
+
+
+def _backup_verify(conn,params,actor,reason,progress):
+    from . import backup
+    return backup.verify(conn,params['backup_id'],progress=progress)
+
+
 HANDLERS = {'batch_resume': _batch_resume, 'batch_stage': _batch_stage, 'batch_publish': _batch_publish,
             'dedup': _dedup, 'dedup_spans': _dedup_spans,
             'dataset_create': _dataset_create, 'dataset_export': _dataset_export,
-            'token_stats': _token_stats, 'tokenize': _tokenize, 'dataset_verify': _dataset_verify}
+            'token_stats': _token_stats, 'tokenize': _tokenize, 'dataset_verify': _dataset_verify,
+            'backup': _backup, 'backup_verify': _backup_verify}
 
 
 def _event(conn, job_id, message, level='info'):
@@ -107,6 +118,10 @@ def submit(conn, kind, params, actor, reason):
     elif kind == 'dataset_verify':
         valid = (set(params) <= {'release_id', 'hash_files'} and type(params.get('release_id')) is int
                  and params['release_id'] > 0 and type(params.get('hash_files', False)) is bool)
+    elif kind=='backup':
+        valid=set(params)<={'scheduled'} and type(params.get('scheduled',False)) is bool
+    elif kind=='backup_verify':
+        valid=set(params)=={'backup_id'} and type(params['backup_id']) is int and params['backup_id']>0
     else:
         valid = set(params) <= {'full'} and type(params.get('full', False)) is bool
     if not valid:
@@ -250,9 +265,12 @@ def worker(conn):
     with psycopg.connect(conn.info.dsn, autocommit=True) as control:
         if not control.execute('SELECT pg_try_advisory_lock(762032)').fetchone()[0]:
             raise ManagementError('conflict', '已有 worker 正在运行')
+        from . import backup
+        backup.recover(control)
         try:
             while True:
                 _recover(control)
+                backup.schedule(control)
                 if not _run_next(conn, control):
                     sleep(2)
         except KeyboardInterrupt:

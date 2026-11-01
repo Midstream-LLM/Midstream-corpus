@@ -13,6 +13,7 @@ import psycopg
 from . import batches, config, dedup, export, exporters, ingest, jobs, management, query, reprocess, server
 from .adapters import ADAPTERS
 from .rules import RULES
+from .llm.settings import SettingsError
 
 
 def _print(data) -> None:
@@ -100,6 +101,19 @@ def _token_job(conn, args) -> int:
     return 0
 
 
+def _backup(conn,args):
+    from . import backup
+    if args.backup_action=='list':
+        _print(backup.list_backups(conn))
+    elif args.backup_action=='restore':
+        _print(backup.restore(conn,args.backup_id,args.database))
+    else:
+        params={} if args.backup_action=='run' else {'backup_id':args.backup_id}
+        _print(jobs.submit(conn,'backup' if args.backup_action=='run' else 'backup_verify',params,
+                           args.actor,args.reason or 'backup '+args.backup_action))
+    return 0
+
+
 def _release_stats(conn, args) -> int:
     _print(export.release_stats(conn, args.release_id))
     return 0
@@ -178,6 +192,17 @@ def _events(conn, args) -> int:
 def main() -> int:
     parser = argparse.ArgumentParser(prog="midstream")
     commands = parser.add_subparsers(dest="command", required=True)
+    p=commands.add_parser('backup',help='OSS 备份、目录校验与恢复到全新库')
+    actions=p.add_subparsers(dest='backup_action',required=True)
+    for name in ('run','list','verify','restore'):
+        p=actions.add_parser(name)
+        if name in ('verify','restore'):
+            p.add_argument('backup_id',type=int)
+        if name=='restore':
+            p.add_argument('--database',required=True,help='只能使用不存在的新库名')
+        if name in ('run','verify'):
+            p.add_argument('--actor',default=getpass.getuser());p.add_argument('--reason')
+        p.set_defaults(handler=_backup)
 
     commands.add_parser("init", help="构建、初始化私有 PostgreSQL 并迁移到最新版")
     p = commands.add_parser("worker", help="串行执行持久任务；需手动启动")
@@ -362,7 +387,7 @@ def main() -> int:
         except management.ManagementError as exc:
             _print({"status": "error", "code": exc.code, "message": str(exc)})
             return 2
-        except (export.ExportError, ValueError) as exc:
+        except (export.ExportError, ValueError, SettingsError) as exc:
             _print({'status': 'error', 'message': str(exc)})
             return 2
 

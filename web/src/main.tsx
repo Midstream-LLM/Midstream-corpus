@@ -6,6 +6,7 @@ import Batches from "./Batches";
 import Jobs from "./Jobs";
 import Datasets from "./Datasets";
 import Duplicates from "./Duplicates";
+import BackupSettings from "./BackupSettings";
 import LLMSettings from "./LLMSettings";
 import "./style.css";
 function App() {
@@ -26,7 +27,7 @@ function App() {
     jobs: "任务中心",
     datasets: "数据集",
     duplicates: "重复",
-    llm: "LLM 配置",
+    llm: "设置",
   };
   return (
     <div className="app">
@@ -82,7 +83,7 @@ function App() {
           ))}
         </div>
         {page === "llm" ? (
-          <LLMSettings />
+          <><LLMSettings /><BackupSettings onJob={id=>navigate("jobs/"+id)}/></>
         ) : page === "stats" ? (
           <Stats />
         ) : page === "duplicates" ? (

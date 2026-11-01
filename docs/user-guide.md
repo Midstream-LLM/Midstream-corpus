@@ -593,8 +593,6 @@ split/split_manifest.json
 
 新增 3 项测试，隔离库全量 121 项通过、1 性能例跳过，前端构建通过。旧发布 verify 通过；未部署。
 
-## 9. 添加来源适配器
-
 ## 8C. 发布时裁剪段落重复（M8）
 
 配方 selection.dedup="span" 先文档级去重，再对保留文档裁剪；selection.min_cut_chars 默认 64，按实际原文区间的字符长度过滤。需要文档、段落快照都覆盖当前主线，先运行 dedup 和 dedup --spans。最短查重有效片段仍是比较表示的 64 字，调整 min_cut_chars 不会增加更短的重复证明。
@@ -606,6 +604,39 @@ dup_span 的 start_char/end_char 已是原文 Unicode 字符坐标，左闭右�
 发布把区间固定到 dataset_member_cut。字数为裁后实际值；有裁剪时摘要额外包含按成员顺序排序的区间，没有裁剪时保持旧摘要口径。后续查重重算不改变旧发布；导出与 token 统计使用固定裁后文本。原文缓存只用于未裁剪成员，裁剪成员每次直接计数，任务结果提供 computed_cut_documents，不把裁剪数写回 text_token_count。
 
 一万组合成片段（两万成员）的纯区间分配阶段单次测量：0.020 秒，Python 进程峰值 RSS 119.5 MiB；不含数据库、正文解压和比较表示映射，不能当作全库裁剪性能。全量 124 项通过、2 性能例跳过；本项性能另跑通过，构建通过。
+
+## 8D. OSS 备份（M10）
+
+安装 requirements.txt 的 oss2（[上游 MIT 许可证](https://github.com/aliyun/aliyun-oss-python-sdk/blob/master/LICENSE)，兼容 GPL-3.0），升级迁移 0017。生产使用内置 PostgreSQL 的 pg_dump/pg_restore，worker 必须手动启动。配置文件为 MIDSTREAM_HOME/backup.toml，权限必须为 0600；前端“设置”的备份一节和 CLI/worker 共用它。
+
+示例默认配置（endpoint/bucket 由用户填写）：
+
+    [backup]
+    endpoint = ""
+    bucket = ""
+    prefix = "midstream"
+    schedule = "none"
+    keep = 3
+    include_config = false
+
+    [credentials]
+
+凭据依次取 OSS_ACCESS_KEY_ID、OSS_ACCESS_KEY_SECRET、可选 OSS_SECURITY_TOKEN 环境变量；不存在时取 credentials.access_key_id/access_key_secret/security_token 本地值。界面可保存或清除本地值，API 只返回是否配置及来源，不回显。写入采用独占锁、0600 临时文件、原子替换；修订检测用文件身份/mtime_ns/长度，不新增内容哈希。保存冲突时先重新加载。
+
+默认 schedule=none，worker 不提交任何自动备份。用户手动启用 daily/weekly 后，worker 按最近一次备份任务时间（含失败/取消）间隔 24/168 小时检查；没有近期任务时首次检查立即提交一次。执行仍串行，不自动快速重试失败任务。
+
+    midstream backup run --actor operator --reason '手动备份'
+    midstream backup list
+    midstream backup verify 1 --actor operator --reason '检查备份目录'
+    midstream backup restore 1 --database midstream_restore_20261101
+
+run、verify 返回持久任务；在 jobs show 查看结果。pg_dump -Fc 的 stdout 以 8 MiB 分片上传 OSS，不把完整 dump 写入本地临时文件。对象键包含源库名、备份 ID 和 UTC 时间，重试或恢复到另一库后不会复用旧对象键。可选配置文件单独写在同一备份目录下，可能含本地保存的密钥；不上传已导出的数据集。
+
+新备份完成后才按同一 endpoint/bucket 的 keep 策略清理旧备份，仅删除本系统记录的对象；清理中标 deleting，完成标 deleted。失败不会将残片当作完成备份；合作式取消会终止 pg_dump 并中止分片上传，已完成备份不会回滚。强制杀进程可能在 OSS 留下未完成 multipart，需要 OSS 生命周期/人工清理；本轮没有真实云端故障联调。
+
+verify 流式下载给 pg_restore --list，只检查自定义归档目录可读，不等价于实际完整恢复验证。restore 强制先 CREATE DATABASE 新库，禁止 midstream、源库及系统库，也绝不使用覆盖/清空选项；已有目标库直接报错。恢复失败时保留新库供检查，重试须另选新库名。配置文件不会由 restore 覆盖到本地，导出目录需另行同步。
+
+本轮用隔离容器真实 pg_dump/pg_restore 和内存假 OSS 验证恢复后的文档/版本/成员/发布计数一致、默认无调度、凭据不回显、0600/修订冲突、保留策略和上传失败中止。未调用真实 OSS 或连接正式库。
 
 ## 9. 添加来源适配器
 

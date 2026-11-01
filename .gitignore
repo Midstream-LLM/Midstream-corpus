@@ -9,3 +9,5 @@ AGENTS.md
 CLAUDE.md
 web/node_modules/
 web/dist/
+backup.toml
+backup.toml.lock
