@@ -109,7 +109,7 @@ midstream dedup --full   # 忽略缓存，强制完整重算文档级查重
 | `src/midstream/config.py` | 环境变量配置 |
 | `src/midstream/store/` | 正文哈希与 zstd 压缩（`textcodec`），只读第二连接（`reader`） |
 | `src/midstream/corpus/` | 元数据查询与统计（`query`）、人工审核审计（`management`）、追加版本（`versions`）、朝代年份映射（`eras`） |
-| `src/midstream/ingest/` | 批次登记、暂存、验证和发布（`pipeline`），批次恢复/放弃（`batches`），导入识别与登记（`importing`、`detection`、`sampling`），来源适配器（`adapters/`） |
+| `src/midstream/ingest/` | 批次登记、暂存、验证和发布（`pipeline`），批次恢复/放弃（`batches`），导入识别与登记（`importing`、`detection`、`discovery`、`sampling`），来源适配器（`adapters/`） |
 | `src/midstream/curation/` | 技术清洗与质量判定（`clean`）、重新处理流程和规则注册（`reprocess`、`rules`）、繁转简（`variants`） |
 | `src/midstream/dedup/` | 指纹缓存和查重快照（`engine`），重复簇浏览与否决（`duplicates`） |
 | `rust/` | PyO3 查重扩展：归一化、OPH、LSH、Jaccard 验证和 Winnowing 片段匹配 |
@@ -128,7 +128,7 @@ midstream dedup --full   # 忽略缓存，强制完整重算文档级查重
 
 构建脚本使用的 [PostgreSQL](https://www.postgresql.org/about/licence/) 和 [pg_bigm](https://github.com/pgbigm/pg_bigm/tree/v1.2-20250903) 采用 PostgreSQL License，[LZ4 库](https://github.com/lz4/lz4/blob/v1.10.0/lib/LICENSE)采用 BSD-2-Clause，均与 GPL-3.0 兼容。
 
-Web 批次管理支持新建入库：选择来源适配器、预览后端本地文件、确认登记，再继续处理与发布。使用范围与路径要求见 [Web 说明](docs/webapp.md)。
+Web 批次管理支持服务器目录浏览与收藏、递归扫描、格式与字段结构分组、可视化字段映射、元数据预览和草稿恢复；确认导入后自动登记并排队验证，再人工检查发布。使用范围与路径要求见 [Web 说明](docs/webapp.md)。
 
 入库支持已有来源规则识别，以及复用 LLM 服务分析未知格式的字段映射建议；确认后的 TXT、JSON/JSONL、Parquet 和行文本映射随批次保存。需升级迁移 `0008`，覆盖范围和限制见 [Web 说明](docs/webapp.md#格式识别与智能映射)。
 

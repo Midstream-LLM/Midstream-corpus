@@ -1,58 +1,160 @@
-import { useState } from "react";
-import { api, useLoad, State, count, show } from "./shared";
-type Preview = { source: string; parser_version: string; objects: {path: string; size_bytes: number; sha256: string}[];
-  fill_rates: {field: string; filled: number; total: number}[];
-  samples: {file: string; position: string; source_key: string; metadata: Record<string,unknown>; error: string | null; text_preview: string}[] };
-export default function Import({onRegistered}: {onRegistered: (id: number) => void}) {
-  const adapters = useLoad<{name: string; description: string; license_note: string}[]>("import/adapters");
-  const [source, setSource] = useState(""), [paths, setPaths] = useState(""), [actor, setActor] = useState(""), [reason, setReason] = useState("");
-  const [preview, setPreview] = useState<Preview | null>(null), [busy, setBusy] = useState(false), [error, setError] = useState("");
-  const [planText, setPlanText] = useState(""), [detection, setDetection] = useState<{path: string; known: boolean; source: string | null; adapter: string | null; format: string; plan: unknown; note: string; method?: string; model?: string}[]>([]);
-  function plan() { return planText.trim() ? JSON.parse(planText) : null; }
-  async function detect(use_llm: boolean) {
-    setBusy(true); setError(""); setPreview(null); setDetection([]);
-    try {
-      const result = await api<{items: typeof detection}>("import/detect", undefined, {paths: names, use_llm});
-      setDetection(result.items);
-    } catch(e) {setError((e as Error).message);}
-    finally {setBusy(false);}
-  }
-  const names = paths.split("\n").map(p => p.trim()).filter(Boolean);
-  async function submit(register: boolean) {
-    setBusy(true); setError("");
-    try {
-      if (register && preview) {
-        const result = await api<{batch_id: number}>("import/register", undefined, {source, plan: plan(), paths: names, objects: preview.objects, parser_version: preview.parser_version, actor, reason});
-        setPreview(null); setPaths(""); onRegistered(result.batch_id);
-      } else {
-        setPreview(null);
-        setPreview(await api<Preview>("import/preview", undefined, {source, plan: plan(), paths: names}));
+import { useEffect, useRef, useState } from "react";
+import { api, State, count, show, useLoad } from "./shared";
+import ServerBrowser from "./ServerBrowser";
+import ImportGroup from "./ImportGroup";
+import { useImportDraft, savedActor } from "./importDraft";
+import { emptyDraft, groupFiles, type Scan, type Group, type Prepared, type Preview } from "./importTypes";
+const labels: Record<string, string> = {title: "标题", authors: "作者", composed_label: "年代", category: "体裁", language: "语言", license: "许可证"};
+export default function Import({onRegistered, active}: {onRegistered: (id: number) => void; active: boolean}) {
+  const adapters = useLoad<{name: string; description: string}[]>(active ? "import/adapters" : null);
+  const {draft: d, setDraft, ready, storageError} = useImportDraft();
+  const [busy, setBusy] = useState(false), [error, setError] = useState(""), [progress, setProgress] = useState("");
+  const [actor, setActor] = useState(savedActor), [remember, setRemember] = useState(true);
+  const [scanInfo, setScanInfo] = useState<{current: string; errors: string[]}>({current: "", errors: []});
+  const [groupPage, setGroupPage] = useState(0), [previewPage, setPreviewPage] = useState(0);
+  const [resetConfirm, setResetConfirm] = useState(false);
+  const stopPreview = useRef(false);
+  useEffect(() => {
+    const update = () => setActor(savedActor());
+    window.addEventListener("midstream-operator", update);
+    return () => window.removeEventListener("midstream-operator", update);
+  }, []);
+  const activeScan = d.scanStatus === "running";
+  useEffect(() => {
+    if (!ready || !d.scanId || !activeScan) return;
+    let active = true, timer: ReturnType<typeof setTimeout>;
+    const controller = new AbortController();
+    async function poll() {
+      try {
+        const scan = await api<Scan>(`import/scans/${d.scanId}?offset=${d.scanOffset}`, controller.signal);
+        if (!active) return;
+        setScanInfo({current: scan.current, errors: scan.errors});
+        const drained = scan.next_offset >= scan.found && scan.status !== "running";
+        setDraft(prev => {
+          const files = [...prev.files, ...scan.items];
+          return {...prev, files, scanOffset: scan.next_offset, scanStatus: drained ? scan.status : "running", scanErrors: scan.errors,
+            step: drained && files.length ? 2 : prev.step, groups: drained ? groupFiles(files) : prev.groups};
+        });
+        if (!drained && scan.next_offset === d.scanOffset) timer = setTimeout(poll, 800);
+      } catch(e) {
+        if (!active) return;
+        setError((e as Error).message);
+        setDraft(prev => ({...prev, scanStatus: "failed"}));
       }
-    } catch(e) {setError((e as Error).message + (register ? "；请刷新批次列表核实是否已登记，再重试。" : ""));}
-    finally {setBusy(false);}
+    }
+    poll();
+    return () => {active = false; controller.abort(); clearTimeout(timer);};
+  }, [ready, d.scanId, d.scanOffset, activeScan]);
+  async function scan() {
+    setBusy(true); setError(""); setGroupPage(0); setScanInfo({current: "", errors: []});
+    try {
+      const result = await api<Scan>("import/scans", undefined, {paths: d.selected, recursive: d.recursive});
+      setDraft(prev => ({...prev, files: [], groups: [], prepared: [], scanId: result.scan_id, scanOffset: 0, scanStatus: "running", scanErrors: []}));
+    } catch(e) {setError((e as Error).message);} finally {setBusy(false);}
   }
-  return <details className="metadata"><summary>新建入库批次</summary>
-    <p>填写后端机器上的原文件绝对路径，每行一个（最多 20 个）。文件保持原位；登记后请保留原文件。先识别已有来源；未匹配的文件可使用 LLM 建议字段映射。</p>
-    <State loading={adapters.loading} error={adapters.error || error}/>
-    <div className="edit-grid"><label>来源格式<select disabled={busy} value={source} onChange={e => {setSource(e.target.value); setPlanText(""); setPreview(null);}}><option value="">请选择</option>{source && !["custom", ...(adapters.data?.map(a => a.name) || [])].includes(source) && <option value={source}>{source}</option>}<option value="custom">自定义来源（使用映射方案）</option>{adapters.data?.map(a => <option key={a.name} value={a.name}>{a.name} · {a.description}</option>)}</select></label>
-    <label>文件路径<textarea disabled={busy} value={paths} rows={4} onChange={e => {setPaths(e.target.value); setDetection([]); setPlanText(""); setSource(""); setPreview(null);}} placeholder="/data/incoming/corpus.jsonl"/></label></div>
-    <div className="actions"><button disabled={busy || !names.length || names.length > 20} onClick={() => detect(false)}>识别已有格式</button><button disabled={busy || !names.length || names.length > 20} onClick={() => detect(true)}>识别并用 LLM 分析未知格式</button></div>
-    <p>LLM 识别会把未匹配文件的有限内容样本发送至已配置的模型接入点。二进制文件不会发送。</p>
-    {detection.map((d,i) => <article key={i} className="change-preview"><b>{d.path}</b><p>{d.known ? "已知来源规则" : d.method === "llm" ? `LLM 建议 · ${d.model}` : "未匹配"} · {d.format} · {d.source || "请指定来源名称"}</p><p>{d.note}</p>{d.plan != null && <pre>{JSON.stringify(d.plan,null,2)}</pre>}<button disabled={busy || (!d.adapter && !d.plan)} onClick={() => {setSource(d.source || "custom"); setPlanText(d.plan ? JSON.stringify(d.plan,null,2) : ""); setPreview(null);}}>采用此方案并预览（应用于当前全部文件）</button></article>)}
-    {(planText || (source && !adapters.data?.some(a => a.name === source))) && <div className="edit-grid"><label>来源名称<input disabled={busy} value={source} onChange={e => {setSource(e.target.value); setPreview(null);}}/></label><label>导入映射方案（JSON）<textarea disabled={busy} rows={8} value={planText} onChange={e => {setPlanText(e.target.value); setPreview(null);}}/></label><p>同一批次使用同一来源和方案。混合格式请分批导入；字段映射不会猜测作者、年份或许可证。</p></div>}
-    {adapters.data?.filter(a => a.name === source).map(a => <p key={a.name}>来源许可证说明：{a.license_note || "未知"}</p>)}
-    <button disabled={busy || !source || !names.length || names.length > 20} onClick={() => submit(false)}>{busy ? "处理中…" : "检查文件并预览"}</button>
-    {preview && <div className="change-preview"><h3>登记确认</h3><p>解析器：{preview.parser_version}。按首、中、尾窗口抽样，Parquet 按行组抽样；正文最多 500 字。这是抽样填充率，不是全量校验结果。</p>
-      {preview.objects.map(o => <details key={o.path}><summary>{o.path} · {count(o.size_bytes)} 字节</summary><pre>SHA-256: {o.sha256}</pre></details>)}
-      <table><thead><tr><th>映射字段</th><th>已填样本 / 总样本</th><th>填充率</th></tr></thead><tbody>{preview.fill_rates.map(rate => <tr key={rate.field}><td>{rate.field}</td><td>{rate.filled} / {rate.total}</td><td>{rate.total ? (100*rate.filled/rate.total).toFixed(1) : 0}%</td></tr>)}</tbody></table>
-      <div className="table-scroll"><table><thead><tr><th>文件 / 位置 / 来源键</th><th>映射后的元数据</th><th>正文样本 / 问题</th></tr></thead><tbody>{preview.samples.map((s,i) => <tr key={i}>
-        <td>{s.file.split("/").pop()}<small>{s.position} · {s.source_key || "来源键待暂存确定"}</small></td>
-        <td><dl className="fields">{Object.entries(s.metadata).filter(([key]) => key !== "field_basis" && key !== "extra").map(([key,value]) => <div key={key}><dt>{key}</dt><dd>{show(value)}</dd></div>)}</dl></td>
-        <td><p className="text-preview">{s.text_preview}</p>{s.error && <p className="error">{s.error}</p>}</td></tr>)}</tbody></table></div>
-      {!preview.samples.length && <p>没有解析出样本，请检查文件与来源格式。</p>}
-      <div className="edit-grid"><label>操作人<input disabled={busy} value={actor} onChange={e => setActor(e.target.value)}/></label><label>入库依据<input disabled={busy} value={reason} onChange={e => setReason(e.target.value)}/></label></div>
-      <p>确认后仅登记批次。随后先暂存验证，查看第二层预览，再确认发布。</p>
-      <button className="primary" disabled={busy || !actor.trim() || !reason.trim() || !preview.samples.length} onClick={() => submit(true)}>确认登记批次</button>
+  function changeGroup(group: Group) {
+    setDraft(prev => ({...prev, prepared: [], groups: prev.groups.map(g => g.id === group.id ? group : g)}));
+  }
+  function move(path: string, target: string) {
+    setDraft(prev => {
+      const origin = prev.groups.find(g => g.files.some(f => f.path === path))!;
+      const file = origin.files.find(f => f.path === path)!;
+      const selected = origin.selected.includes(path);
+      let groups = prev.groups.map(g => g.id === origin.id ? {...g, files: g.files.filter(f => f.path !== path), selected: g.selected.filter(p => p !== path)} :
+        g.id === target ? {...g, files: [...g.files, file], selected: selected ? [...g.selected, path] : g.selected} : g).filter(g => g.files.length);
+      if(target === "new") groups = [...groups, {...origin, id: crypto.randomUUID(), source: origin.adapter ? origin.source : origin.source + "（分组）", files: [file], selected: selected ? [path] : []}];
+      return {...prev, groups, prepared: []};
+    });
+  }
+  const selectedGroups = d.groups.filter(g => g.selected.length);
+  const invalid = selectedGroups.some(g => !g.source.trim() || g.json !== undefined || (!g.adapter && !["txt", "lines"].includes(g.plan.format) && !g.plan.text_field));
+  async function preview() {
+    setPreviewPage(0); stopPreview.current = false; setBusy(true); setError("");
+    const prepared: Prepared[] = [];
+    try {
+      const total = selectedGroups.reduce((n, g) => n + Math.ceil(g.selected.length / 20), 0);
+      for (const group of selectedGroups) {
+        for(let offset = 0; offset < group.selected.length; offset += 20) {
+          if(stopPreview.current) {setProgress("已停止预览"); return;}
+          const paths = group.selected.slice(offset, offset + 20);
+          setProgress(`正在预览 ${prepared.length + 1} / ${total} 批 · ${group.source}`);
+          const plan = group.adapter ? null : group.plan;
+          const result = await api<Preview>("import/preview", undefined, {source: group.source, paths, plan});
+          prepared.push({groupId: group.id, source: group.source, paths, plan, preview: result,
+            approval: {...group.approval, requested_by: group.approval.requested_by || actor}, actor: actor.trim(),
+            reason: `目录导入；来源：${group.source}；文件数：${paths.length}。${d.note.trim()}`, token: crypto.randomUUID()});
+        }
+      }
+      if(!stopPreview.current) setDraft(prev => ({...prev, prepared, step: 3}));
+    } catch(e) {setError((e as Error).message);} finally {setBusy(false); setProgress("");}
+  }
+  async function register() {
+    setBusy(true); setError("");
+    if (remember) localStorage.setItem("midstream.actor", actor.trim());
+    try {
+      for (const entry of d.prepared) {
+        if(entry.result) continue;
+        setProgress("正在登记并排队验证：" + entry.source);
+        const result = await api<{batch_id: number; job_id: number}>("import/start", undefined, {
+          request_token: entry.token, source: entry.source, plan: entry.plan, paths: entry.paths,
+          objects: entry.preview.objects, parser_version: entry.preview.parser_version,
+          actor: entry.actor, reason: entry.reason,
+          approval: {...entry.approval, requested_by: entry.approval.requested_by || entry.actor},
+        });
+        setDraft(prev => ({...prev, prepared: prev.prepared.map(p => p.token === entry.token ? {...p, result} : p)}));
+      }
+    } catch(e) {setError((e as Error).message + "；已完成的批次保留，重试会继续剩余部分。");}
+    finally {setBusy(false); setProgress("");}
+  }
+  const completed = d.prepared.filter(p => p.result).length;
+  const allDone = d.prepared.length > 0 && completed === d.prepared.length;
+  const locked = busy || activeScan;
+  const hasStarted = completed > 0;
+  if(!ready) return <State loading error=""/>;
+  return <section className="import-wizard" aria-label="新建入库批次">
+    <ol className="import-steps" aria-label="入库步骤">{["选择文件夹", "检查识别结果", "预览并导入"].map((label, i) =>
+      <li key={label} className={d.step === i + 1 ? "current" : d.step > i + 1 ? "complete" : ""} aria-current={d.step === i + 1 ? "step" : undefined}><span>{i + 1}</span>{label}</li>)}</ol>
+    {(error || storageError) && <p className="notice error" role="alert">{error || storageError}</p>}
+    {d.scanErrors?.length > 0 && <div className="notice warning">{d.scanErrors.map((e, i) => <p key={i}>{e}</p>)}</div>}
+    {d.step === 1 && <div className="import-stage">
+      <h2>选择服务器上的语料文件夹</h2><p>可以选择整个文件夹，也可以勾选其中的文件。扫描后自动识别来源与格式。</p>
+      {active && <ServerBrowser path={d.directory} selected={d.selected} disabled={locked} onPath={directory => setDraft(prev => ({...prev, directory}))} onSelect={selected => setDraft(prev => ({...prev, selected}))}/>}
+      <label className="check"><input type="checkbox" disabled={locked} checked={d.recursive} onChange={e => setDraft(prev => ({...prev, recursive: e.target.checked}))}/>包含子文件夹</label>
+      {activeScan && <div className="scan-progress" role="status"><progress/><strong>已检查 {count(d.scanOffset)} 个文件</strong><p>{scanInfo.current || "正在扫描…"}</p><button onClick={async () => {try {await api(`import/scans/${d.scanId}/cancel`, undefined, {});} catch(e) {setError((e as Error).message);}}}>取消扫描</button></div>}
+      {!activeScan && d.scanStatus === "completed" && !d.files.length && <p>所选范围内没有找到文件，请选择其他文件夹。</p>}
+      <div className="import-footer"><span>已选 {d.selected.length} 项</span><button className="primary" disabled={locked || !d.selected.length} onClick={scan}>{busy ? "正在启动…" : "扫描并识别 →"}</button></div>
     </div>}
-  </details>;
+    {d.step === 2 && <div className="import-stage">
+      <h2>确认要导入的来源</h2><p>扫描了 {d.files.length} 个文件，分为 {d.groups.length} 组。已选 {selectedGroups.reduce((n, g) => n + g.selected.length, 0)} 个文件。</p>
+      {d.scanStatus === "cancelled" && <p className="notice warning">扫描已取消。下方保留取消前已检查的文件；可返回重新扫描。</p>}
+      {d.scanStatus === "failed" && <p className="notice warning">扫描未完成，请返回重新扫描。</p>}
+      {d.groups.slice(groupPage * 10, (groupPage + 1) * 10).map(group => <ImportGroup key={group.id} group={group} groups={d.groups} adapters={adapters.data || []} actor={actor} disabled={locked} onChange={changeGroup} onMove={move}/>)}
+      {d.groups.length > 10 && <div className="pagination"><button disabled={locked || !groupPage} onClick={() => setGroupPage(groupPage - 1)}>上一页来源</button><span>第 {groupPage + 1} / {Math.ceil(d.groups.length / 10)} 页</span><button disabled={locked || (groupPage + 1) * 10 >= d.groups.length} onClick={() => setGroupPage(groupPage + 1)}>下一页来源</button></div>}
+      <div className="edit-grid"><label>操作人<input value={actor} disabled={locked} maxLength={200} onChange={e => setActor(e.target.value)} placeholder="用于记录导入和映射确认"/></label><label>补充备注（选填）<input value={d.note} disabled={locked} maxLength={2000} onChange={e => setDraft(prev => ({...prev, note: e.target.value}))}/></label></div>
+      <label className="check"><input type="checkbox" checked={remember} onChange={e => setRemember(e.target.checked)}/>在此浏览器记住操作人</label>
+      {invalid && <p className="error">请补全来源名称与正文字段；编辑过的 JSON 需先点击“应用 JSON”。</p>}
+      {progress && <p role="status">{progress}</p>}
+      <div className="import-footer"><button disabled={locked} onClick={() => setDraft(prev => ({...prev, step: 1}))}>← 调整文件范围</button>{busy && <button onClick={() => {stopPreview.current = true;}}>停止后续预览</button>}<button className="primary" disabled={locked || invalid || !selectedGroups.length || !actor.trim()} onClick={preview}>预览导入结果 →</button></div>
+    </div>}
+    {d.step === 3 && <div className="import-stage">
+      <h2>{allDone ? "已创建批次，正在排队验证" : "检查元数据，确认导入"}</h2><p>共 {d.prepared.length} 个批次。每批最多 20 个文件，大组自动拆分。下方展示抽样结果，暂存后进行全量验证。</p>
+      {d.prepared.slice(previewPage * 5, (previewPage + 1) * 5).map((entry, index) => <details key={entry.token} open={index === 0} className="preview-batch"><summary>{entry.source} · {entry.paths.length} 个文件{entry.result ? ` · 批次 #${entry.result.batch_id} 已登记` : ""}</summary>
+        {entry.result && <p>验证任务 #{entry.result.job_id} 已提交。<button onClick={() => onRegistered(entry.result!.batch_id)}>查看批次</button></p>}
+        <div className="table-scroll"><table><thead><tr><th>字段</th><th>样本填充率</th></tr></thead><tbody>{entry.preview.fill_rates.map(r => <tr key={r.field}><td>{labels[r.field] || r.field}</td><td>{r.filled} / {r.total} · {r.total ? (100*r.filled/r.total).toFixed(0) : 0}%</td></tr>)}</tbody></table></div>
+        <div className="preview-samples">{entry.preview.samples.map((sample, i) => <article key={i}><h3>{show(sample.metadata.title)}</h3><p>{sample.file.split("/").pop()} · {sample.position}</p>
+          <dl className="fields">{Object.entries(sample.metadata).filter(([key]) => key !== "field_basis" && key !== "extra").map(([key, value]) => <div key={key}><dt>{labels[key] || key}</dt><dd>{show(value)}</dd></div>)}</dl>
+          <details><summary>正文节选</summary><p className="text-preview">{sample.text_preview}</p></details>{sample.error && <p className="error">{sample.error}</p>}</article>)}</div>
+        {!entry.preview.samples.length && <p className="error">没有解析出样本，请返回调整映射。</p>}
+      </details>)}
+      {progress && <p role="status">{progress}</p>}
+      {d.prepared.length > 5 && <div className="pagination"><button disabled={!previewPage} onClick={() => setPreviewPage(previewPage - 1)}>上一页预览</button><span>第 {previewPage + 1} / {Math.ceil(d.prepared.length / 5)} 页</span><button disabled={(previewPage + 1) * 5 >= d.prepared.length} onClick={() => setPreviewPage(previewPage + 1)}>下一页预览</button></div>}
+      {!allDone && <p>确认后自动登记并暂存验证，完成后在批次详情检查并发布。</p>}
+      <div className="import-footer">
+        {!hasStarted && <button disabled={busy} onClick={() => setDraft(prev => ({...prev, step: 2, prepared: []}))}>← 调整映射</button>}
+        {allDone ? <><button onClick={() => {setDraft(emptyDraft()); setResetConfirm(false);}}>继续导入</button><button className="primary" onClick={() => onRegistered(d.prepared[0].result!.batch_id)}>查看批次进度</button></> :
+          <button className="primary" disabled={busy || d.prepared.some(p => !p.preview.samples.some(s => !s.error))} onClick={register}>{busy ? "正在登记…" : hasStarted ? "继续剩余批次" : "确认导入并验证"}</button>}
+      </div>
+    </div>}
+    {!locked && !allDone && <div className="draft-footer"><span>草稿保存在当前浏览器，可返回列表或切换页面。</span><button className="subtle" onClick={() => setResetConfirm(true)}>清空草稿</button>{resetConfirm && <span>清空当前选择和扫描结果？<button onClick={() => {setDraft(emptyDraft()); setResetConfirm(false); setError("");}}>确认清空</button><button onClick={() => setResetConfirm(false)}>取消</button></span>}</div>}
+  </section>;
 }

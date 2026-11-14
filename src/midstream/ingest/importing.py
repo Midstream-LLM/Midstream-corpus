@@ -65,7 +65,7 @@ def preview(source, names, plan=None):
             'objects': objects, 'samples': samples, 'fill_rates': filled}
 
 
-def register(conn, source, names, expected, parser_version, actor, reason, plan=None):
+def register(conn, source, names, expected, parser_version, actor, reason, plan=None, *, commit=True):
     _identity(actor, reason)
     adapter, paths, objects = inputs(source, names, plan)
     if objects != expected or adapter.parser_version != parser_version:
@@ -79,5 +79,40 @@ def register(conn, source, names, expected, parser_version, actor, reason, plan=
         conn.execute('UPDATE source_batch SET import_plan = %s WHERE batch_id = %s',
                      (Jsonb(adapter.plan.model_dump()), batch_id))
     _event(conn, 'batch_register', batch_id, actor, reason, 'unregistered', 'received')
-    conn.commit()
+    if commit:
+        conn.commit()
     return {'batch_id': batch_id, 'status': 'received'}
+
+
+def start_import(conn, body):
+    """Atomically register, audit approval and queue validation; retries reuse the same result."""
+    import hashlib
+    import json
+    from psycopg.types.json import Jsonb
+    from .. import jobs
+
+    token = str(body.request_token)
+    payload = body.model_dump(mode='json', exclude={'request_token'})
+    fingerprint = hashlib.sha256(json.dumps(payload, sort_keys=True).encode()).hexdigest()
+    conn.execute('SELECT pg_advisory_xact_lock(hashtextextended(%s, 0))', (token,))
+    previous = conn.execute(
+        "SELECT after_state FROM management_event WHERE action = 'batch_register'"
+        " AND after_state->>'request_token' = %s", (token,)).fetchone()
+    if previous:
+        state = previous[0]
+        if state['fingerprint'] != fingerprint:
+            raise ManagementError('conflict', '此登记请求已完成；修改方案后请重新预览')
+        return {'batch_id': state['batch_id'], 'job_id': state['job_id']}
+    result = register(conn, body.source, body.paths, body.objects, body.parser_version,
+                      body.actor, body.reason, body.plan, commit=False)
+    batch_id = result['batch_id']
+    job_id = jobs._insert(conn, 'batch_stage', {'batch_id': batch_id}, body.actor, body.reason)
+    state = dict(status='received', request_token=token, fingerprint=fingerprint, batch_id=batch_id, job_id=job_id,
+                 approval=body.approval.model_dump() if body.approval else None,
+                 approved_by=body.actor)
+    conn.execute(
+        "UPDATE management_event SET after_state = %s"
+        " WHERE action = 'batch_register' AND batch_id = %s",
+        (Jsonb(state), batch_id))
+    conn.commit()
+    return {'batch_id': batch_id, 'job_id': job_id}

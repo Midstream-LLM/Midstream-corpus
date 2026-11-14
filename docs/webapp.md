@@ -139,17 +139,26 @@ CLI 同样可用 `midstream jobs list/show/cancel/retry`，详见使用指南。
 
 ## 导入与两层预览（M6）
 
-在“批次管理”展开“新建入库批次”，填写后端可读的原文件绝对路径，每行一个，最多 20 个。可以选择已有适配器，或识别格式后采用并编辑字段映射。没有目录递归或浏览器上传。
+批次管理默认展示全宽列表，显示排队/处理中状态与下一步操作；进入详情后检查预览、发布或放弃。页面每 5 秒更新状态。
+
+点击“新建入库批次”进入三步向导：
+- **选择文件夹**：浏览服务器目录，返回上级、收藏常用目录，选择整个文件夹或部分文件。默认包含子文件夹；也可在地址栏输入路径。最多选 200 个入口。
+- **检查识别结果**：后台扫描并识别格式，显示进度、支持取消并保留已检查结果。按已识别来源（未知来源按父目录）、字段结构、编码和解析方案分组。可拆分文件到独立组，或移到相同结构及适配器的组。新文件和变化文件默认选中；已发布、已有待处理批次、本次内容重复的文件分别标记。重复判断使用 SHA-256；变化提示依据相同路径的历史记录。
+- **预览并导入**：可视化选择正文字段、标题、作者、年代标签和分类，支持嵌套字段；JSON 收在高级设置中。优先展示元数据和填充率，正文展开查看。每批最多 20 个文件，大组自动拆批；确认后登记和排队验证在同一事务完成，按请求标识重试复用结果。部分批次已成功时保留其编号，继续提交剩余部分。
+
+操作人可在设置中保存或在向导内记住（当前浏览器）；补充备注选填，常规动作自动生成审计说明。LLM 建议须点击“确认采用此映射”；登记记录保留请求者、模型、人工批准者，以及批准后的映射是否被编辑。
+
+扫描仅浏览、读取服务器文件，不上传 Mac 文件，不移动原文件。隐藏条目和符号链接跳过；每次最多检查 10,000 个文件，达到上限会提示缩小范围。运行中的扫描及结果保存在服务进程内，最多保留 10 次、24 小时；服务重启后未完成扫描需重做。向导草稿及已获取结果、预览保存在当前浏览器 IndexedDB，切换页面后可继续；收藏和操作人保存在 localStorage。清空草稿不删除已登记批次。
 
 1. **登记前预览**：按首、中、尾窗口抽样，用表格查看映射后的元数据、正文片段和抽样字段填充率。抽样不等于全量验证。JSONL/行文本支持 UTF-8、UTF-16、GB18030 字节定位；JSON 数组上限 64 MiB；TXT 展示三个片段；Parquet 取首中尾行组，单行组覆盖有限。未知元数据保留空，不推测记录 ID。
-2. **确认登记**：填写操作人、入库依据；服务核对文件大小、哈希和解析器方案并登记审计。文件哈希/登记仍是同步请求，大文件需要等待。保持原文件位置和内容以便恢复。
-3. **暂存并验证**：在批次详情提交 batch_stage，跳转任务中心。验证通过停在 validated，界面为“已验证 · 待确认发布”；未通过为 needs_review，先查失败记录和方案。
+2. **确认导入**：服务核对文件大小、哈希和解析器方案，登记审计并提交验证任务。预览和登记的文件哈希仍是同步请求，大文件需要等待；“停止后续预览”在当前请求结束后停止。保持原文件位置和内容以便恢复。
+3. **暂存并验证**：确认导入后自动提交 batch_stage；列表和详情提供任务入口，未完成批次可继续处理。验证通过停在 validated，界面为“已验证 · 待确认发布”；未通过为 needs_review，先查失败记录和方案。
 4. **发布前预览**：回到批次预览，检查新增/更新/不变/失败的篇数与字数、质量、字数/年代分布、库内 text_hash 完全相同篇数；分页看暂存元数据、正文和清洗差异。失败字数未知时显示未知。正文最多展示 2000 字，差异每侧最多 10000 字并标截断。
-5. **确认发布或放弃**：填写操作人和依据，确认发布提交 batch_publish；只接受 validated。放弃清理未发布暂存分区并保留审计。预览只读暂存，不写已发布版本。
+5. **确认发布或放弃**：确认操作人，可补充备注，确认发布提交 batch_publish；只接受 validated。放弃清理未发布暂存分区并保留审计。预览只读暂存，不写已发布版本。
 
 近重复与段落重复在发布后作为后续任务计算。查重失败只记在后续任务上，不回滚批次；重试失败的查重任务即可，重试已发布批次不会重复发布，结果提示另做 dedup。CLI `batch-resume` 和 `ingest` 默认就地一键处理到发布，并在同一进程接着跑完查重，不停在确认页；加 `--queue` 则交给 worker。
 
-“识别并用 LLM 分析未知格式”只对规则未匹配文件调用已配置 LLM，需主动选择；仅发送受限内容样本，不发送绝对路径或完整文件。建议必须由人确认。支持 TXT/JSON/JSONL/Parquet/行文本，未知作者、年代、许可证不补猜。Gutenberg 书目关联、Erya 翻译配对、PDF/OCR、SFT 结构仍需后续支持。配置方法见 [LLM 指南](llm.md)。
+“使用 LLM 辅助映射”只对规则未匹配的本组首个文件调用已配置 LLM，需主动选择；仅发送受限内容样本，不发送绝对路径或完整文件。建议必须由人确认。支持 TXT/JSON/JSONL/Parquet/行文本，未知作者、年代、许可证不补猜。Gutenberg 书目关联、Erya 翻译配对、PDF/OCR、SFT 结构仍需后续支持。配置方法见 [LLM 指南](llm.md)。
 
 ## 数据集工作台（M2–M5、M7、M8）
 
@@ -214,7 +223,7 @@ curl -sS http://127.0.0.1:8765/api/v1/jobs/123
 |---|---|---|
 | 操作 | GET /operations | 已注册操作的名称、说明和参数 JSON Schema，与 `midstream operations` 相同 |
 | 任务 | GET/POST /jobs；GET /jobs/{id}；POST /jobs/{id}/cancel、/retry | POST 含 kind、params、actor、reason，kind 可为任一已注册操作；取消/重试含 actor/reason |
-| 入库 | GET /import/adapters；POST /import/detect、/preview、/register | paths 为后端文件路径；detect 的 use_llm 默认 false；register 需 actor/reason |
+| 入库 | GET /import/adapters；POST /import/browse、/scans、/detect、/preview、/register、/start | browse 为目录分页；scans 异步扫描，GET /import/scans/{id}?offset=N 读取结果，POST /import/scans/{id}/cancel 取消；start 原子登记并排队验证，request_token 保证重试复用；保留 register 兼容接口 |
 | 批次 | GET /batches、/batches/{id}；POST /batches/{id}/stage、/publish、/resume、/abandon | stage/publish 返回任务；resume 在请求内就地执行（含查重后续任务）并返回结果；操作需 actor/reason |
 | 暂存预览 | GET /batches/{id}/preview、/records、/records/{record_id}/diff | records 按 status=new/updated/unchanged/failed、after/limit 分页；只读暂存 |
 | 选材 | GET /datasets/facets；POST /datasets/preview | facets 用 filters 或 recipe JSON 查询字符串，含来源/类别/体裁/时代/质量篇数与字数；preview 用 recipe，可选 tokenizer |

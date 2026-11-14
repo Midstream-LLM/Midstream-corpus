@@ -7,6 +7,7 @@ import Jobs from "./Jobs";
 import Datasets from "./Datasets";
 import Duplicates from "./Duplicates";
 import BackupSettings from "./BackupSettings";
+import OperatorSettings from "./OperatorSettings";
 import LLMSettings from "./LLMSettings";
 import "./style.css";
 function App() {
@@ -82,8 +83,9 @@ function App() {
             </button>
           ))}
         </div>
+        <div hidden={page !== "batches"}><Batches active={page === "batches"} onJob={id => navigate(`jobs/${id}`)} /></div>
         {page === "llm" ? (
-          <><LLMSettings /><BackupSettings onJob={id=>navigate("jobs/"+id)}/></>
+          <><OperatorSettings /><LLMSettings /><BackupSettings onJob={id=>navigate("jobs/"+id)}/></>
         ) : page === "stats" ? (
           <Stats />
         ) : page === "duplicates" ? (
@@ -93,7 +95,7 @@ function App() {
         ) : page === "jobs" ? (
           <Jobs id={jobId} onSelect={id => navigate(`jobs/${id}`)} />
         ) : page === "batches" ? (
-          <Batches onJob={id => navigate(`jobs/${id}`)} />
+          null
         ) : (
           <Corpus key={page} review={page === "review"} />
         )}
