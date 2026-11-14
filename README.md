@@ -2,7 +2,7 @@
 
 为击水语言模型（Jishui）预训练建立的语料管理与存储系统。新数据经整理与校验后入库，入库后系统支持按标题、作者、年代、体裁和来源检索，并可按需导出数据集供训练与评测使用。
 
-**项目开发中。** 批次入库、元数据查询、重新处理、查重和数据集导出的主干已打通，API 和前端尚未完成。
+**项目开发中。** M1–M10 已实现：持久任务、数据集试算与多格式导出、token 统计、Web 工作台、两层导入预览、繁转简派生版、段落裁剪、重复浏览和 OSS 备份。正式环境部署与真实 OSS 联调需另行安排。
 
 ## 核心能力
 
@@ -18,7 +18,7 @@
 - 批次管理：每次入库登记为一批，可查看每次入库的进度与失败记录；中途失败的批次支持断点续跑，不需要的批次可以放弃并回收空间。
 - LLM 服务：独立提供质检、自定义 prompt 生成及批量调用，统一管理接入点、凭据引用和模型配置；支持 DeepSeek 的 Chat Completions、Responses、Anthropic Messages 和 Beta FIM 生成接口。见 [LLM 使用说明](docs/llm.md)。
 
-实现中的功能包括全文检索、API 和前端界面等。
+全文检索、SFT 派生样本和 macOS 打包尚未实现。
 
 ## Web app
 
@@ -26,9 +26,16 @@ Web app 支持元数据优先的文档查看、年代筛选与统计、人工审
 
 ## 快速开始
 
+源码：[GitHub](https://github.com/Midstream-LLM/Midstream-corpus) · [OSRed](https://osredm.com/Midstream-AI/Midstream-corpus)。任选一个地址克隆：
+
+```bash
+git clone https://github.com/Midstream-LLM/Midstream-corpus.git
+cd Midstream-corpus
+```
+
 需要 Python 3.12 和 Rust 工具链（含 Cargo）。Python 主包要求 `>=3.12`，当前 Rust 扩展要求 `>=3.12,<3.13`，因此完整安装使用 Python 3.12。以下命令在 Linux 上、仓库根目录执行，无需配置系统 PostgreSQL。
 
-首次 `midstream init` 会从 PostgreSQL 官网下载并编译 PostgreSQL 18.6，同时构建静态 LZ4 1.10.0 和 pg_bigm `v1.2-20250903`，约需几分钟。需要 gcc、GNU make、curl、tar/gzip、常用 GNU 工具（含 `sha256sum`、`nproc`）；[PostgreSQL 18 官方构建要求](https://www.postgresql.org/docs/18/install-requirements.html)还包括 Flex、Bison 和 Perl。维护者需先填写 [构建脚本](scripts/build-postgres.sh) 中 LZ4 和 pg_bigm 的 SHA256 占位值。
+首次 `midstream init` 会下载并编译 PostgreSQL 18.6、静态 LZ4 1.10.0 和 pg_bigm `v1.2-20250903`。需要 Linux 构建环境和网络；构建脚本已固定依赖校验值，并在缺少 m4、Bison、Flex 时从源码构建，详见[安装说明](docs/user-guide.md#安装)。已有外部 PostgreSQL 17 可继续使用。
 
 ```bash
 python3.12 -m venv .venv
@@ -46,7 +53,7 @@ midstream stats
 
 二进制、数据库、socket、日志和导出默认都在 `MIDSTREAM_HOME`（`~/.local/share/midstream`）下的 `pg/`、`pgdata/`、`run/`、`log/`、`exports/`。实例只监听权限为 `0700` 的 Unix socket；普通数据库命令会自动启动已初始化的实例。用 `midstream server start|stop|status` 管理，重复运行 `midstream init` 会启动实例并迁移到最新版。输入文件必须通过 `--path` 或 `MIDSTREAM_JISHUI_RAW` 指定。
 
-备份使用私有安装的 `pg/bin/pg_dump`，示例见[使用指南](docs/user-guide.md#实例管理与备份)。当前没有内置备份命令。
+CLI 常用入口：`midstream --help`、`midstream <命令> --help`。传统入库、查重、试算、导出命令同步执行；token 统计、token 分片和备份命令提交持久任务，需要另开 worker。完整命令流程见[使用指南](docs/user-guide.md#3a-cli任务与常用流程)。OSS 默认不自动备份，见[备份说明](docs/user-guide.md#8d-oss-备份m10)。
 
 也可使用已建好的外部 PostgreSQL（需支持 LZ4）；设置 `MIDSTREAM_DSN` 后 CLI 不会启动私有实例，迁移另设指向同一库的 `MIDSTREAM_ALEMBIC_URL`：
 
@@ -56,6 +63,26 @@ export MIDSTREAM_ALEMBIC_URL="postgresql+psycopg:///midstream?host=/var/run/post
 alembic upgrade head
 midstream stats
 ```
+
+### 启动后端、Web 与 worker
+
+数据库初始化或迁移完成后，在仓库根目录构建前端（需要 Node.js/npm）：
+
+```bash
+source .venv/bin/activate
+npm --prefix web ci
+npm --prefix web run build
+python -m midstream.api --host 127.0.0.1 --port 8765
+```
+
+API 同时托管 `web/dist`，打开 `http://127.0.0.1:8765`；接口文档为 `/api/docs`。另开终端，加载**相同**的虚拟环境、`MIDSTREAM_HOME`、数据库及导出目录配置：
+
+```bash
+source .venv/bin/activate
+midstream worker
+```
+
+worker 必须手动启动，同一时间只执行一个任务。没有 worker 时任务保持排队，关闭网页不影响任务。API/worker 均为前台进程，默认不安装系统服务。远程访问用 SSH 隧道；开发时用 Vite 热更新，完整步骤见 [Web 启动与操作指南](docs/webapp.md#启动后端与-web)。
 
 ## 查重
 

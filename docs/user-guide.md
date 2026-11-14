@@ -4,6 +4,8 @@
 
 独立 LLM 模块的接入配置、质检、自定义生成、批量与流式命令，见 [LLM 服务使用说明](llm.md)。`midstream llm …` 无需启动 PostgreSQL。
 
+首次使用按第 2 节安装和初始化，再按 [CLI 任务与常用流程](#3a-cli任务与常用流程)操作。后端、Web 构建/开发、SSH 隧道及页面操作见 [Web 指南](webapp.md#启动后端与-web)。本文覆盖 M1–M10；文档、批次、发布、任务、导出和备份 ID 是不同对象，示例中请替换为各自返回的实际 ID。
+
 ## 1. 理解数据对象
 
 | 对象 | 含义 |
@@ -27,13 +29,40 @@
 
 ## 2. 安装与建库
 
+### 获取与更新源码
+
+源码仓库：[GitHub](https://github.com/Midstream-LLM/Midstream-corpus)、[OSRed](https://osredm.com/Midstream-AI/Midstream-corpus)。任选其一克隆，克隆的地址会成为 `origin`：
+
+```bash
+git clone https://osredm.com/Midstream-AI/Midstream-corpus.git
+cd Midstream-corpus
+```
+
+使用 GitHub 时，将地址替换为 `https://github.com/Midstream-LLM/Midstream-corpus.git`。已有以 GitHub 为 `origin` 的检出，可保留它并添加 OSRed：
+
+```bash
+git remote add osredm https://osredm.com/Midstream-AI/Midstream-corpus.git
+git remote -v
+```
+
+更新前先用 `git status` 确认并妥善保存本地改动，在 `main` 分支执行以下一条命令，从指定仓库快进更新；不会自动合并分叉历史：
+
+```bash
+git pull --ff-only origin main
+# 已添加 osredm 时，也可选择：git pull --ff-only osredm main
+```
+
+更新后按下文重新安装依赖和 Rust 扩展；Web 构建与启动见 [Web app 说明](webapp.md)。数据库迁移需在实际运行环境中执行，获取源码本身不会迁移数据库或启动服务。
+
+### 安装
+
 需要：
 
 - Python 3.12。主包允许 `>=3.12`，当前 Rust 扩展只允许 `>=3.12,<3.13`。
 - Rust 工具链，含 Cargo；`pip install ./rust` 通过 maturin 构建扩展。
 - Linux 构建环境：gcc、GNU make、curl、tar/gzip 和常用 GNU 工具（含 `sha256sum`、`nproc`）。[PostgreSQL 18 官方要求](https://www.postgresql.org/docs/18/install-requirements.html)还包括 Flex、Bison 和 Perl。
 
-无需配置系统 PostgreSQL。首次 `midstream init` 会从官网下载并编译 PostgreSQL 18.6，从 GitHub 下载并构建静态 LZ4 1.10.0 和 pg_bigm `v1.2-20250903`，约需几分钟。PostgreSQL 使用同目录官方 `.sha256` 文件校验；LZ4 和 pg_bigm 使用脚本内固定的 SHA256，当前占位值需由维护者在发布前填写。脚本是 [scripts/build-postgres.sh](../scripts/build-postgres.sh)，也可用 `bash scripts/build-postgres.sh /path/to/install` 单独构建。
+无需配置系统 PostgreSQL。首次 `midstream init` 会下载并编译 PostgreSQL 18.6、静态 LZ4 1.10.0 和 pg_bigm `v1.2-20250903`，需要网络和构建时间。PostgreSQL 使用同目录官方 `.sha256` 文件校验，其余依赖使用脚本内固定的 SHA256；缺少 m4、Bison、Flex 时也会从源码构建。脚本是 [scripts/build-postgres.sh](../scripts/build-postgres.sh)，也可用 `bash scripts/build-postgres.sh /path/to/install` 单独构建。Web 构建另需 Node.js/npm，版本须满足 `web/package-lock.json` 中 Vite 的 engines 要求。
 
 ```bash
 python3.12 -m venv .venv
@@ -69,13 +98,7 @@ midstream server stop
 
 首次初始化按物理内存设置 `shared_buffers` 为 20%（上限 8 GiB）、`effective_cache_size` 为 50%、`maintenance_work_mem` 为 10%（上限 2 GiB），向下取整到 MiB。`work_mem=64MB`、`max_wal_size=16GB`、`checkpoint_completion_target=0.9`；WAL 和 TOAST 用 LZ4，`io_method=worker`，单次查询和维护最多使用 4 个并行 worker，全局并行 worker 数和进程池按 CPU 数设置。重跑 `init` 保留现有配置。
 
-备份使用私有安装的 `pg/bin/pg_dump`。当前 CLI 没有内置备份和恢复命令：
-
-```bash
-midstream server start
-midstream_home="${MIDSTREAM_HOME:-$HOME/.local/share/midstream}"
-"$midstream_home/pg/bin/pg_dump" -h "$midstream_home/run" -d midstream > midstream.sql
-```
+OSS 备份已提供 `midstream backup run/list/verify/restore`；默认不自动备份，配置与恢复步骤见 [8D](#8d-oss-备份m10)。使用私有安装的 `pg/bin/pg_dump`、`pg_restore`；仅配置外部 DSN 不会安装这些工具，使用备份前需准备好兼容源库版本的内置工具。
 
 ### 使用外部 PostgreSQL
 
@@ -114,7 +137,65 @@ midstream stats
 | `ccc_corpus` | `chinese-classical-corpus/corpus.jsonl` |
 | `wanli` | `wanli-dibao-corpus/wanli_shilu_corpus.jsonl` |
 
-测试命令及构建测试时的 `PYO3_PYTHON`、`LD_LIBRARY_PATH` 设置见 [README](../README.md#测试)。
+Web 可用 `MIDSTREAM_ALLOWED_HOSTS` 设置逗号分隔的 Host 白名单，默认限 localhost/loopback。LLM 和备份配置分别位于 `MIDSTREAM_HOME/llm.toml`、`backup.toml`（LLM 可用 MIDSTREAM_LLM_CONFIG 覆盖路径），凭据环境变量优先；API 和 worker 必须加载相同配置，不要将配置文件加入 Git。
+
+## 3A. CLI、任务与常用流程
+
+在运行数据库/后端的机器上使用 CLI。同步命令返回后即已完成；提交任务的命令只返回任务记录，需查看其最终状态。用 `midstream --help` 查看命令，`midstream export-release --help` 等查看参数；多数读取/操作结果输出 JSON。
+
+| 操作 | CLI / 入口 | 执行方式 |
+|---|---|---|
+| 入库、恢复/放弃批次 | `ingest`、`batch-resume`、`batch-abandon` | 同步；恢复一键推进到发布并查重 |
+| 查重、转换预览/应用 | `dedup`、`dedup --spans`、`reprocess` | 同步 |
+| 数据集试算、发布并默认导出 | `export-preview`、`export` | 同步；export 固定成员后写 Parquet |
+| 已有发布导出、校验、训练登记 | `export-release`、`verify`、`record-training` | 同步 |
+| 精确 token 统计、NPY 分片 | `token-stats`、`tokenize` | 提交任务 |
+| OSS 备份/校验 | `backup run`、`backup verify` | 提交任务；restore 同步恢复到新库 |
+| 分阶段入库、配方草稿、重复人工否决 | Web 或 HTTP API | 无对应专用 CLI 子命令，见 Web 指南 |
+
+### 手动启动与管理任务
+
+终端 A 启动串行 worker，前台持续运行，API 不会自动启动它：
+
+```bash
+source .venv/bin/activate
+midstream worker
+```
+
+终端 B 使用同一环境查看或操作任务：
+
+```bash
+source .venv/bin/activate
+midstream jobs list --limit 30
+midstream jobs show 123
+midstream jobs cancel 123 --actor operator --reason '停止本次处理'
+midstream jobs retry 123 --actor operator --reason '已修复失败原因'
+```
+
+状态为 queued → running → succeeded/failed/cancelled。show 包含阶段进度、结果、错误和最近事件。retry 只接受 failed/cancelled，保留旧记录并以原 kind/params 创建新任务，返回新的 job_id。queued 取消立即生效；running 只在阶段边界协作式取消，已提交阶段不回滚。
+
+数据库锁限制同库只能有一个 worker。心跳每 5 秒更新，取任务前将超过 60 秒无心跳的 running 标为 failed，错误 interrupted；不会自动重试。中断后重启可能需等待心跳过期，再检查并手动 retry。停止 API 和 worker 用各自终端的 Ctrl-C；停止数据库另用 `midstream server stop`（仅私有实例）。
+
+### 从语料到可训练产物
+
+各行按顺序执行；token 任务提交后，等待 succeeded 再使用结果。1 替换为实际 release_id，123 替换为 token-stats 返回的 job_id。
+
+```bash
+midstream ingest wanli --path /path/to/wanli_shilu_corpus.jsonl
+midstream search --source wanli --limit 10
+midstream export-preview recipes/small-sources-v1.json
+midstream export recipes/small-sources-v1.json
+midstream release-stats 1
+midstream verify 1
+midstream token-stats 1 --tokenizer /path/to/tokenizer.json
+midstream jobs show 123
+midstream export-release 1 --format jsonl --compression zst
+midstream tokenize 1 --tokenizer /path/to/tokenizer.json
+# 实际采用该数据集训练时登记；不启动训练
+midstream record-training small-sources-v1 run-name
+```
+
+入库默认计算两类查重；主线修订或重复否决后需重算。简体选用和裁剪见 [8B](#8b-繁转简派生版本m7)、[8C](#8c-发布时裁剪段落重复m8)。发布成员固定，重新导出使用同一 release_id，重新选材使用新名称。
 
 ## 4. 入库新来源
 
@@ -371,11 +452,12 @@ midstream dedup --spans
 | `seed` | 必填，字符串。用于确定组的划分和成员顺序。 |
 | `selection` | 可省略；重复文本的选用规则，见下方。省略时不去重，与旧配方行为相同。 |
 | `include` / `exclude` | 多组 filters；include 组间为或，exclude 命中即排除。没写 include 时使用 filters；空 include 只选择手动 add。 |
-| `documents` | `{"add":[1,2],"remove":[3]}`，使用 doc_id。add 覆盖筛选和 exclude，remove 最后生效。仍只选择当前版本。 |
+| `documents` | `{"add":[1,2],"remove":[3]}`，使用 doc_id。add 覆盖筛选和 exclude，remove 最后生效。具体版本由 variant 决定。 |
 | `split_by` | `chars`（默认）或 `documents`，决定划分目标的计量单位。 |
 | `stratify` | 可选 `source`、`category` 字段列表，如 `["source","category"]`。 |
 | `limits` | 各划分的硬上限，如 `{"val":{"max_chars":20000000,"max_documents":10000}}`，按整个发布计数。 |
 | `reserved` | 将文档或已有发布划分所在的整组固定到 val/test，格式见下方。不会自动增加候选文档。 |
+| `variant` | 省略或 null 选择主线当前版；`"simplified"` 选择以当前主线为输入的有效转换版，缺失或过期报错。 |
 
 `filters` 支持以下全部字段；未知筛选字段会报错。
 
@@ -393,14 +475,15 @@ midstream dedup --spans
 | `quality` | 字符串数组，导出默认 `["ok"]` | 可显式选择 `ok`、`flagged`、`quarantined`；空数组不会选中任何文档。 |
 | `min_chars` | 整数，默认 `null` | 当前版本字符数下限，含端点；是保存正文的字符数，不是归一化后长度。 |
 
-未设置的字符串筛选可省略或用 `null`。筛选之间为“且”；导出只选择当前版本，没有选择历史版本的配方字段。
+未设置的字符串筛选可省略或用 `null`。筛选之间为“且”；以主线当前版本选材，再按 variant 映射实际成员，不支持任意指定历史版本。documents.add/remove 使用 doc_id，版本同样由 variant 决定。
 
 `selection` 支持以下字段；未知字段会报错。
 
 | 字段 | 类型与默认值 | 行为 |
 |---|---|---|
-| `dedup` | `"none"` 或 `"document"`，默认 `"none"` | `document` 时每个文档级重复簇只留一篇。 |
+| `dedup` | `"none"`、`"document"` 或 `"span"`，默认 `"none"` | document 每簇留一篇；span 在此基础上裁掉保留文档之间的重复区间。 |
 | `source_priority` | 字符串数组，默认 `[]` | 来源优先顺序，靠前的优先保留；未列出的来源排在最后。 |
+| `min_cut_chars` | 正整数，默认 `64` | span 模式下最短原文裁剪长度，详见 8C。 |
 
 ```json
 {
@@ -410,7 +493,7 @@ midstream dedup --spans
 
 同一簇内的保留顺序是：来源优先级、质量为 `ok`、字数多、`doc_id` 小。只在通过 `filters` 的文档之间选择。划分仍按去重前的全部文档分组，被舍弃的文档不会让原本相连的文档落到不同划分。
 
-查重结果落后于当前版本时导出会报错，先运行 `midstream dedup`。舍弃的篇数和字数写入发布记录，可用 `release-stats` 的 `selection` 字段查看。段落级重复目前不影响导出。
+需要查重快照而快照落后于当前版本时会报错，先运行 `midstream dedup`；span 还需 `midstream dedup --spans`。舍弃篇数和字数写入发布记录，可用 release-stats 的 selection 字段查看。仅 span 模式裁剪段落重复，固定区间后再导出，不改库内原文。
 
 保留划分示例（片段合并进完整配方）：
 
@@ -431,7 +514,7 @@ midstream dedup --spans
 midstream export-preview recipes/small-sources-v1.json
 ```
 
-使用只读事务和元数据，不解压正文，不写发布或文件。返回候选数、去重舍弃数/字数、各划分篇数/字数与比例，以及来源、类别、世纪分布和 warnings。`ratio` 使用 split_by，另有 `char_ratio`、`document_ratio`。比例偏差超过 1 个百分点或出现超大组时告警；整组无法满足 limits/目标容量时需调整配方。
+使用只读事务，不写发布、缓存或文件。普通模式仅用元数据；span 需读取相关正文映射裁剪偏移。返回候选数、去重舍弃数/字数、各划分篇数/字数与比例，以及来源、类别、世纪分布和 warnings。ratio 使用 split_by，另有 char_ratio、document_ratio。比例偏差超过 1 个百分点或出现超大组时告警；整组无法满足 limits/目标容量时需调整配方。
 
 分布按划分输出；未知类别和没有完整起止年份的世纪保留 `null`。世纪 `value` 是与年代统计一致的整数桶编号：0 为公元 1 世纪，9 为公元 10 世纪，-1 为公元前 1 世纪。跨世纪的文档在每个相交桶计数，因此世纪栏位合计可能超过独立文档数。
 
@@ -525,8 +608,7 @@ midstream record-training small-sources-v1 run-name
 ### 精确统计
 
 ```bash
-# 另一个终端手动启动，和 API/CLI 使用同一数据库配置
-midstream worker
+# 先在另一个终端运行 midstream worker
 midstream token-stats 1 --tokenizer /path/to/tokenizer.json
 midstream jobs show 123
 ```
@@ -543,7 +625,7 @@ token-stats 只提交任务，输出 job_id；worker 完成后可通过 jobs sho
 midstream export-preview recipes/small-sources-v1.json --tokenizer /path/to/tokenizer.json
 ```
 
-只加载分词器指纹、读取元数据和已有缓存，不解压正文、不分词、不写缓存。返回 token_stats 以及各划分、来源、类别的估算：
+token 估算只读取分词器指纹、元数据和缓存，不现场分词或写缓存；span 选材本身仍需正文做偏移映射，裁剪成员不能复用完整正文的精确缓存。返回 token_stats 以及各划分、来源、类别的估算：
 
 - status 为 exact / estimated / unknown。
 - exact 为已命中缓存的 token 小计；estimated 仅为未覆盖部分的估计；total 为两者之和。全部覆盖时 estimated=0、status=exact。
@@ -585,15 +667,33 @@ split/split_manifest.json
 
 ## 8B. 繁转简派生版本（M7）
 
-命令 midstream reprocess t2s-v1 默认预览；加 --apply 才追加 simplified 版本。固定使用已随项目提供的 OpenCC ver.1.1.9 TSCharacters.txt 第一候选，processing_run 保存 t2s-v1、表 SHA-256 和 length_preserving。只按字符映射，保留标点、空白、段落；当前表逐项检验均为一个 Unicode 码点映射到一个码点，所以原文字符偏移可复用，UTF-8 字节数不保证相同。
+先预览，再显式应用；只做繁转简：
+
+```bash
+midstream reprocess t2s-v1
+midstream reprocess t2s-v1 --apply
+```
+
+完整配方增加 `"variant": "simplified"` 后再试算/发布。固定使用随项目提供的 OpenCC ver.1.1.9 TSCharacters.txt 第一候选，processing_run 保存规则、表 SHA-256 和 length_preserving。保留标点、空白、段落；当前表逐项检验均为一个 Unicode 码点映射到一个码点，所以原文字符偏移可复用，UTF-8 字节数不保证相同。
 
 派生版保持 is_current=false，parent_version_id 指向转换输入的当前主线。通过 (doc_id,variant,parent_version_id) 的部分唯一索引保证同一有效输入只有一个同类派生版；旧父版本的派生版保留，主线更新后自动识别为过期。重复 --apply 跳过已有有效派生版；原文已经是简体时仍可建立显式派生身份。
 
 配方增加 variant: "simplified" 显式选用。缺失或过期都会报错并列出前几个 doc_id，不回退主线；先运行转换再发布。去重仍按主线 doc_id 关联簇，实际成员固定派生 version_id，字符数和内容摘要使用选中的正文。文档版本列表、详情与数据集向导显示派生类别和过期提示。
 
-新增 3 项测试，隔离库全量 121 项通过、1 性能例跳过，前端构建通过。旧发布 verify 通过；未部署。
-
 ## 8C. 发布时裁剪段落重复（M8）
+
+完整配方的 selection 可写为：
+
+```json
+{"selection":{"dedup":"span","source_priority":["ccc_corpus","wanli"],"min_cut_chars":64}}
+```
+
+```bash
+midstream dedup
+midstream dedup --spans
+midstream export-preview /path/to/recipe.json
+midstream export /path/to/recipe.json
+```
 
 配方 selection.dedup="span" 先文档级去重，再对保留文档裁剪；selection.min_cut_chars 默认 64，按实际原文区间的字符长度过滤。需要文档、段落快照都覆盖当前主线，先运行 dedup 和 dedup --spans。最短查重有效片段仍是比较表示的 64 字，调整 min_cut_chars 不会增加更短的重复证明。
 
@@ -603,32 +703,42 @@ dup_span 的 start_char/end_char 已是原文 Unicode 字符坐标，左闭右�
 
 发布把区间固定到 dataset_member_cut。字数为裁后实际值；有裁剪时摘要额外包含按成员顺序排序的区间，没有裁剪时保持旧摘要口径。后续查重重算不改变旧发布；导出与 token 统计使用固定裁后文本。原文缓存只用于未裁剪成员，裁剪成员每次直接计数，任务结果提供 computed_cut_documents，不把裁剪数写回 text_token_count。
 
-一万组合成片段（两万成员）的纯区间分配阶段单次测量：0.020 秒，Python 进程峰值 RSS 119.5 MiB；不含数据库、正文解压和比较表示映射，不能当作全库裁剪性能。全量 124 项通过、2 性能例跳过；本项性能另跑通过，构建通过。
+## 8C-1. 浏览重复与人工否决（M9）
+
+Web“重复”页按类型、簇大小和来源筛选，进入簇后比较两篇文档。填写操作人/依据，按文档对否决，或否决某个成员与簇内其他成员的重复关系，再等待界面提交的查重任务完成。文档面板可打开重复片段叠加高亮，不生成版本。无专用 CLI 否决命令；HTTP 示例见 [Web 指南](webapp.md#重复浏览与人工否决m9)。
+
+否决按 doc_id 对持久保存，版本更新、查重重算后仍生效；旧快照在重算前不能用于新发布。负约束优先：A/B 被否决时，即使 A~C~B，也不会重新同簇，C 按确定顺序归到一侧，可能放弃部分允许的合并。作品关联仍要求同划分，否决不豁免泄漏检查。已发布数据集不变。
 
 ## 8D. OSS 备份（M10）
 
 安装 requirements.txt 的 oss2（[上游 MIT 许可证](https://github.com/aliyun/aliyun-oss-python-sdk/blob/master/LICENSE)，兼容 GPL-3.0），升级迁移 0017。生产使用内置 PostgreSQL 的 pg_dump/pg_restore，worker 必须手动启动。配置文件为 MIDSTREAM_HOME/backup.toml，权限必须为 0600；前端“设置”的备份一节和 CLI/worker 共用它。
 
-示例默认配置（endpoint/bucket 由用户填写）：
+可先在 Web“设置”保存配置，也可手动编辑 MIDSTREAM_HOME/backup.toml 后执行 `chmod 600 /path/to/midstream-home/backup.toml`。示例（endpoint/bucket 必须填写实际值）：
 
-    [backup]
-    endpoint = ""
-    bucket = ""
-    prefix = "midstream"
-    schedule = "none"
-    keep = 3
-    include_config = false
+```toml
+[backup]
+endpoint = ""
+bucket = ""
+prefix = "midstream"
+schedule = "none"
+keep = 3
+include_config = false
 
-    [credentials]
+[credentials]
+```
 
 凭据依次取 OSS_ACCESS_KEY_ID、OSS_ACCESS_KEY_SECRET、可选 OSS_SECURITY_TOKEN 环境变量；不存在时取 credentials.access_key_id/access_key_secret/security_token 本地值。界面可保存或清除本地值，API 只返回是否配置及来源，不回显。写入采用独占锁、0600 临时文件、原子替换；修订检测将内容和文件身份/mtime_ns/长度绑定到同一已打开快照，不新增内容哈希。保存冲突时先重新加载。
 
 默认 schedule=none，worker 不提交任何自动备份。用户手动启用 daily/weekly 后，worker 按最近一次备份任务时间（含失败/取消）间隔 24/168 小时检查；没有近期任务时首次检查立即提交一次。执行仍串行，不自动快速重试失败任务。
 
-    midstream backup run --actor operator --reason '手动备份'
-    midstream backup list
-    midstream backup verify 1 --actor operator --reason '检查备份目录'
-    midstream backup restore 1 --database midstream_restore_20261101
+```bash
+midstream backup run --actor operator --reason '手动备份'
+midstream backup list
+midstream backup verify 1 --actor operator --reason '检查备份目录'
+midstream backup restore 1 --database midstream_restore_20261102
+```
+
+这里 1 为 backup list 返回的 backup_id，不是 job_id。run/verify 的 job_id 则用 jobs show 查询。restore 为同步操作，恢复后的新库不会自动替换 API/worker 当前连接的库。
 
 run、verify 返回持久任务；在 jobs show 查看结果。pg_dump -Fc 的 stdout 以 8 MiB 分片上传 OSS，不把完整 dump 写入本地临时文件。对象键包含源库名、备份 ID 和 UTC 时间，重试或恢复到另一库后不会复用旧对象键。可选配置文件单独写在同一备份目录下，可能含本地保存的密钥；不上传已导出的数据集。
 
@@ -636,7 +746,7 @@ run、verify 返回持久任务；在 jobs show 查看结果。pg_dump -Fc 的 s
 
 verify 流式下载给 pg_restore --list，只检查自定义归档目录可读，不等价于实际完整恢复验证。restore 强制先 CREATE DATABASE 新库，禁止 midstream、源库及系统库，也绝不使用覆盖/清空选项；已有目标库直接报错。恢复失败时保留新库供检查，重试须另选新库名。配置文件不会由 restore 覆盖到本地，导出目录需另行同步。
 
-本轮用隔离容器真实 pg_dump/pg_restore 和内存假 OSS 验证恢复后的文档/版本/成员/发布计数一致、默认无调度、凭据不回显、0600/修订冲突、保留策略和上传失败中止。未调用真实 OSS 或连接正式库。
+真实 OSS 联调尚未进行；启用测试连接、手动备份或调度前，应确认配置的 bucket 与凭据权限。
 
 ## 9. 添加来源适配器
 
@@ -727,7 +837,7 @@ CLI 会导入 Rust 查重扩展。安装主包之外，还需在同一 Python 3.
 
 ### 查重后，为什么导出的重复文档还在？
 
-查重只写重复簇或重复片段快照，不删除文档。导出利用簇和作品关联约束划分，不自动从簇内选代表。
+查重只写快照，不删除文档。配方默认 selection.dedup=none；要从簇内选代表用 document，要进一步裁剪用 span。无论是否去重，分组仍防止同组跨划分。
 
 ### 为什么原文件未变，更新解析器后仍然跳过？
 
@@ -735,7 +845,7 @@ CLI 会导入 Rust 查重扩展。安装主包之外，还需在同一 Python 3.
 
 ### 入库命令报查重失败，是否要重新入库？
 
-若已进入发布后的查重阶段，发布已提交。修复查重原因后依次运行 `midstream dedup` 和 `midstream dedup --spans` 即可；重新导入同内容文件会被跳过。其他阶段的异常需按批次状态判断，当前没有自动恢复命令。
+若已进入发布后的查重阶段，发布已提交。修复原因后依次运行 `midstream dedup` 和 `midstream dedup --spans`，不要重复发布。其他阶段先用 batch-show 检查：CLI batch-resume 可同步恢复；Web 暂存任务失败可修复后 retry，validated 状态检查预览后确认发布。
 
 ### verify 通过，是否说明导出的文件也没问题？
 

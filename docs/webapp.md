@@ -1,202 +1,216 @@
-# Web app：元数据、统计与管理
+# Web app：启动与操作指南
 
-## 备份设置（M10）
+前端为 React + TypeScript + Vite，后端为 FastAPI，直接复用 Python core。本文覆盖 M1–M10。数据库、API、worker 和语料文件放在运行后端的机器；浏览器和未来 SwiftUI 客户端通过 HTTP 访问。文件、分词器和导出路径均是**后端机器**的路径。Web 不提供浏览器上传、登录或多用户权限；远程使用 SSH 隧道。
 
-导航“设置”保留 LLM 配置，并增加阿里云 OSS 备份一节：endpoint、bucket、前缀、凭据、周期、保留份数、可选配置文件。留空凭据保留本地值，清除仅影响本地值，环境变量仍优先。默认不自动备份。测试连接针对已保存配置；手动备份和历史校验填写操作人/依据，跳转任务中心。
+安装 Python/Rust、获取源码和初始化数据库见 [使用指南第 2 节](user-guide.md#2-安装与建库)。CLI 全流程见 [CLI、任务与常用流程](user-guide.md#3a-cli任务与常用流程)。
 
-GET/POST /api/v1/backup/settings 共用 backup.toml，POST 为 config、keys、clear_keys、revision；POST /backup/test 测试已保存连接。GET/POST /backups 查看历史/提交 backup 任务；POST /backups/{id}/verify 提交 backup_verify。写操作都要求 browser_write，任务写操作使用 actor/reason。恢复仅提供 CLI，且只允许全新库。详见 [使用指南](user-guide.md#8d-oss-备份m10)。
+## 启动后端与 Web
 
-最终全量 130 项通过、2 个已另验收性能例跳过，构建通过；之后备份键唯一性/调度连接小修，策略测试通过，返回值解包修复后主流程定向通过。OSS 全是假传输，真实 PostgreSQL 工具在指定隔离容器运行；无真实 OSS、正式库或部署，本轮未新增备份浏览器验收。另新增配置并发替换防覆盖用例，单独通过，未重复全量。
+### 1. 初始化或升级数据库
 
-## 重复浏览（M9）
-
-导航“重复”可按完全/近重复、成员数和来源分页查看文档簇，分页读成员元数据、选两篇做服务端限长差异。可提交文档/段落查重任务；文档正文页可叠加最多 200 条重复高亮，不生成版本，补充平面字符按 Unicode 码点坐标显示。
-
-GET /api/v1/duplicates/clusters 支持 before/kind/source/min_size/max_size/limit；/{id} 支持成员 after/limit；/duplicates/compare 接受 left/right/length（最多每侧 20000 字）。GET /documents/{id}/spans 返回两侧映射后的原文坐标，可指定 version；过期派生版不叠加当前坐标。
-
-POST /duplicates/overrides 使用 left_doc_id、right_doc_id 或 cluster_id，加 actor/reason；指定簇时否决该成员与簇内每个其他成员。按文档对保存，写 management_event 审计。界面否决后提交重算任务；否决使快照过期，完成重算前不能继续按旧簇发布选用/划分。
-
-负约束优先：在有已验证正边的前提下，按固定哈希/文档顺序合并；A~C~B 但 A/B 被否决时，C 可确定地归到其中一侧，不能把两侧重新连起来，部分允许的合并会因此放弃。真实作品关联仍强制同一划分，否决重复关系不豁免作品泄漏隔离。段落裁剪也跳过被否决的文档对。重算不修改已经固定的发布。
-
-新增 3 项测试，全量 127 通过、2 个性能例跳过，构建通过。覆盖否决重算/版本更新持久性、传递边、导出、审计和双侧原文 Unicode 坐标；未新增浏览器流程或部署。
-
-## 导入两层预览（M6）
-
-登记前按首、中、尾窗口取样，展示映射字段与抽样填充率表格。JSONL/行文本按字节定位（支持 UTF-8、UTF-16、GB18030）；JSON 数组扫描顶层分隔，仅解析保留的记录，沿用 64 MiB 上限；TXT 为三个正文片段。Parquet 按首、中、尾行组取样，单行组时样本覆盖有限。抽样不等于全量校验；缺显式来源 ID 的行样本不猜测真实记录序号。
-
-登记后点击“暂存并验证”，提交 batch_stage，成功停在 validated（界面“已验证 · 待确认发布”）。查看新增/更新/不变/失败、字符与质量/年代分布、库内完全相同正文，以及分页暂存元数据和正文/清洗差异后，填写操作人、依据，点击“确认发布”，提交 batch_publish。后者只接受 validated；重试已发布批次不会重复发布。近重复和段落重复仍在发布后计算。
-
-GET /api/v1/batches/{id}/preview 只读暂存并关联已发布记录哈希用于分类；失败记录无字符数时返回 null。GET /batches/{id}/records 支持 status、after、limit，正文最多展示 2000 字；GET /batches/{id}/records/{record_id}/diff 最多对比各侧 10000 字并标记截断。POST /batches/{id}/stage、/publish 使用 actor/reason 和 browser_write。CLI batch-resume 保留一键跑完行为；放弃沿用 abandon。
-
-新增 3 项测试。全量运行 117 通过/1 失败/1 性能例跳过；编码抽样失败修复后，原映射恢复和扩展多编码抽样定向 2 项通过。构建通过；本轮未追加浏览器验收，未部署。
-
-前端为 React + TypeScript + Vite，后端为 FastAPI，直接调用现有 Python core。数据库和后端长期留在校园服务器，浏览器与未来 SwiftUI 远程客户端共用 `/api/v1`，经 SSH 隧道访问。目前未实现 macOS 打包或进程托管。
-
-## 已提供
-
-- 文献列表、游标分页；标题前缀、作者、来源、部类、质量与成书年份筛选。
-- 文档详情、历史版本列表和切换；保留原文空白、标点及异体字。
-- 正文每段最多 20,000 字符，UI 每次读取 10,000 字符。当前后端仍需解压整篇后切片，超大单篇的解压优化待做。
-- 加载、空结果、连接失败与重试状态；桌面双栏，窄屏上下排列。
-- 元数据为文档默认视图，正文按需加载；展示字段依据、版本关系和关联来源记录。
-- 人工修正提供变更预览，填写操作人和依据后追加新版本；支持作品关联确认/拒绝与审计查看。
-- 统计概览展示当前文档/字符/质量、来源与部类分布、存储和最近50次数据集发布。
-- 批次支持分页查看、详情、原文件校验信息、失败样本、恢复/放弃和操作记录。
-- 数据集制作与 LLM 操作面板后续接入。
-
-## 运行
-
-在代码仓库根目录、已初始化好数据库的环境中：
+在代码仓库根目录激活虚拟环境。私有实例首次初始化、已有实例升级都用：
 
 ```bash
 source .venv/bin/activate
-pip install -r requirements.txt
-npm --prefix web ci
-npm --prefix web run build
-python -m midstream.api --port 8765
+midstream init
+midstream stats
 ```
 
-打开 `http://127.0.0.1:8765`。默认使用现有私有 PostgreSQL；可用 `MIDSTREAM_DSN` 指向其他实例。构建后由 Python 托管 `web/dist`，运行阶段不需要 Node 服务。安装到其他位置时可用 `--static-dir /path/to/web/dist` 指定前端构建目录。
+外部 PostgreSQL 不运行 init；设置实际的 MIDSTREAM_DSN 和 MIDSTREAM_ALEMBIC_URL 后，执行 `alembic upgrade head`。M1–M10 的迁移需全部升级到 head（当前含 0010–0017）；不能只执行早期任务表迁移。外部库和私有实例是两条配置路径，详见 [外部 PostgreSQL](user-guide.md#使用外部-postgresql)。
 
-Linux 部署时可从客户端建立 SSH 隧道，将本机端口转发到服务器的 `127.0.0.1:8765` 后访问。默认只监听 loopback，当前没有登录或多用户权限系统。此次开发没有部署到正式服务器。
-
-开发时，先运行 API，再运行 `npm --prefix web run dev`；Vite 将 `/api` 代理到 `127.0.0.1:8765`。前端不存数据库地址或 LLM key。
-
-## HTTP 接口
-
-- `GET /api/v1/health`：服务版本和存活状态，不代表数据库可用。
-- `GET /api/v1/sources`：来源名列表。
-- `GET /api/v1/documents`：筛选当前版本，返回 `items` 和 `next_cursor`；下页传 `after`。默认每页 30，最多 100。
-- `GET /api/v1/documents/{doc_id}/versions`：全部历史版本摘要，倒序。
-- `GET /api/v1/documents/{doc_id}?version=2&offset=0&length=10000`：指定版本及正文分段，不传 version 时取当前版。
-- `/api/docs` 和 `/api/openapi.json`：接口文档。
-
-年代筛选沿用 core 的成书年份区间相交规则；未记录年代的文档不会命中指定年份区间。未知元数据显示为未知。正文按 Python Unicode 码点切片；API 会返回 `next_offset`，无后续文本时为 null。长文本调用方宜固定 version，避免多次请求之间当前版本变化。
-
-查询连接使用只读事务，写操作使用独立连接并复用 core；每次请求后释放。数据库不可用返回 503，查不到文档或版本返回 404，参数无效返回 422。当前无全文检索，标题搜索仅为前缀匹配。
-
-## 验证
-
-本地独立 PostgreSQL 17 合成库中 66 个 Python 测试通过，覆盖真实版本与元数据读取、写入和审计、冲突、批次恢复/放弃以及年份分组；前端 TypeScript 检查和生产构建通过。实际浏览器验证了元数据默认视图、变更预览与新版本保存、审计记录、统计页面、批次恢复、世纪范围查询和包含未知年份。尚未在正式库上验证性能。
-
-使用 FastAPI（MIT）、Uvicorn（BSD-3-Clause）、React/Vite（MIT）、TypeScript（Apache-2.0）。构建依赖在 `web/package-lock.json` 中固定。
-
-## 持久任务与 worker
-
-先在运行后端的机器上执行迁移 `0010`（私有实例用 `midstream init`，外部实例用 `alembic upgrade head`）。worker **必须另外手动启动**，API 不会代为启动：
+所有终端使用相同的 MIDSTREAM_HOME、数据库和 MIDSTREAM_EXPORT_ROOT。环境变量不会从 .env 自动加载，修改后要重启进程。例如可在每个终端显式设置：
 
 ```bash
-midstream worker
-midstream jobs list --limit 30
-midstream jobs show 123
-midstream jobs cancel 123 --actor operator --reason '停止本次处理'
-midstream jobs retry 123 --actor operator --reason '原因已修复，按原参数重试'
+export MIDSTREAM_HOME=/path/to/midstream-home
+export MIDSTREAM_EXPORT_ROOT=/path/to/exports
+# 仅外部数据库需要；替换为实际连接信息
+# export MIDSTREAM_DSN='host=/path/to/socket dbname=midstream user=operator'
+# export MIDSTREAM_ALEMBIC_URL='postgresql+psycopg://operator@/midstream?host=/path/to/socket'
 ```
 
-worker 与 API 使用同一 `MIDSTREAM_DSN` 或私有数据库配置。数据库锁限制为一份 worker，同一时间只执行一个任务，按编号取队列；重复启动会退出。任务开始后每 5 秒写一次独立心跳。启动时及后续取任务前，将超过 60 秒没有心跳的 running 任务设为 failed，`error=interrupted`，不会自动重试。刚中断后立即重启，可能需等到旧心跳超过 60 秒。
+MIDSTREAM_HOME 应在首次 init 前确定，迁移 URL 与运行 DSN 必须指向同一库。已有实例使用原配置，不要为更新代码另建空目录。
 
-批次页“继续处理 / 发布”现在提交 `batch_resume` 任务并跳到 `#jobs/{id}`。任务中心显示列表、阶段进度、结果及最近 100 条日志，排队或运行时每 2 秒刷新；关闭页面不会停止任务。取消和重试均需填写操作人、依据，记录在任务事件中。重试只接受 failed/cancelled，保留旧任务，按原 kind/params 新建任务。
+### 2. 构建前端，启动 API
 
-取消排队任务立即生效；运行中仅在下一阶段开始前检查，当前阶段不会强行中断，也不回滚已提交阶段。最后阶段完成前发出的取消请求可能来不及生效。阶段进度表示阶段数，不表示预计剩余时间。批次验证未通过时任务可正常结束，结果为 `needs_review`，需继续检查批次。
+前端构建需要 Node.js/npm，版本须满足锁文件中 Vite 的 engines 要求。在仓库根目录执行：
 
-批次失败沿用同步恢复逻辑：暂存失败为 failed；验证/发布中断保留此前已提交状态；发布后的查重失败仍为 published。重试已发布批次返回 `already_published` 和 `next_action=dedup`，不会重复发布，应另行提交文档与段落查重任务。原有 CLI 及 `/batches/{id}/resume` 仍同步执行。
+```bash
+source .venv/bin/activate
+npm --prefix web ci
+npm --prefix web run build
+python -m midstream.api --host 127.0.0.1 --port 8765
+```
 
-HTTP 接口（写请求继续要求 `X-Midstream-Action: 1`，并检查同源）：
+此进程同时提供 API 和已构建的 Web 页面，无需另开 Node 服务：
 
-- `GET /api/v1/jobs?limit=30&before=123`：返回 `items`、`next_cursor`，按编号倒序。
-- `GET /api/v1/jobs/{id}`：任务字段及 `events`，最近 100 条按发生顺序返回。
-- `POST /api/v1/jobs`：`{"kind":"batch_resume","params":{"batch_id":123},"actor":"operator","reason":"继续处理"}`。白名单为 batch_resume、dedup、dedup_spans、dataset_create、dataset_export、token_stats、tokenize；两类查重 params 为 `{}` 或 `{"full":true}`，数据集/token 任务参数见下方。
-- `POST /api/v1/jobs/{id}/cancel`、`POST /api/v1/jobs/{id}/retry`：请求体为 `{"actor":"operator","reason":"操作依据"}`；retry 返回新任务。
+- Web：`http://127.0.0.1:8765`
+- 接口文档：`http://127.0.0.1:8765/api/docs`
+- OpenAPI：`http://127.0.0.1:8765/api/openapi.json`
+- 存活检查：`http://127.0.0.1:8765/api/v1/health`，仅代表服务存活，不保证数据库可用。
 
-本轮在指定隔离 PostgreSQL 17 容器中全量 103 项 Python 测试通过（新增 5 项），包含真实 worker 被杀后的恢复、独立心跳、单实例限制、阶段取消与事务回滚、不重复发布；前端构建通过。浏览器走过一次合成批次提交、取消、重试至完成与日志显示；未连接正式库、部署或调用真实 LLM API。
+默认静态目录为仓库 web/dist；安装到其他位置时显式使用 `--static-dir /path/to/web/dist`。若 API 可访问而首页 404，先确认已经构建并指定正确目录。更新前端源码后重新构建，再重启 API。
 
-## 数据集后端接口（M2 / M3）
+### 3. 另开终端启动 worker
 
-先执行迁移 0011、0012。配方和导出参数见 [使用指南](user-guide.md#8-配方导出校验与训练登记)。当前提供后端能力，尚无选材/导出表单；任务中心可显示创建和导出任务。
+```bash
+# 在仓库根目录，加载与 API 相同的环境变量
+source .venv/bin/activate
+midstream worker
+```
 
-- `GET /api/v1/datasets/facets`：`filters` 查询参数为 JSON 对象字符串，或传完整配方的 `recipe` JSON 字符串；返回当前选用条件下 sources/categories/genres/eras 各值的 documents/chars，未知值为 null，按去重前候选统计。
-- `POST /api/v1/datasets/preview`：`{"recipe":{...}}`，使用只读数据库连接，返回候选/舍弃数、划分比例和分布、warnings，不写发布或文件。
-- `POST /api/v1/datasets`：`{"recipe":{...},"actor":"operator","reason":"发布依据"}`，返回排队的 dataset_create 任务；完成结果包含 release_id。该任务重试时，同名同配方复用已固定发布，同名异配方报错。
-- `GET /api/v1/datasets?limit=30&before=123`：发布列表及 next_cursor；`GET /api/v1/datasets/{id}` 返回固定配方、content_digest、字符数和各划分篇数/字数。
-- `GET /api/v1/dataset-recipes`、`GET /api/v1/dataset-recipes/{name}`：草稿配方。`POST /api/v1/dataset-recipes` 新增，`PUT /api/v1/dataset-recipes/{name}` 修改（可改名），请求体与创建数据集相同；`DELETE /api/v1/dataset-recipes/{name}` 请求体为 actor/reason。删改草稿不影响已发布配方。
-- `POST /api/v1/datasets/{id}/exports`：`{"actor":"operator","reason":"导出依据","options":{"format":"jsonl","compression":"zst","unit":"sample","max_chars":8192,"overlap_chars":256,"shard_mb":256}}`，返回 dataset_export 任务；`GET /api/v1/datasets/{id}/exports` 返回该发布全部导出状态、manifest 路径和分片记录。
+worker **必须手动启动**，API 不会代为启动。数据库锁限制同库只有一个 worker，同一时间执行一个任务；没有 worker 时任务保持 queued。API 和 worker 均前台运行，没有自动安装进程托管服务，关闭终端会结束对应进程。
 
-创建、导出和配方写操作均使用现有 browser_write 同源保护；API 不接收输出路径，使用后端 MIDSTREAM_EXPORT_ROOT。通用 `/jobs` 的 dataset_create params 为 `{"recipe":{...}}`，dataset_export params 为 `{"release_id":123,"options":{...}}`。worker 仍需手动启动。
+停止时在各自终端 Ctrl-C。任务中断后按任务中心的失败/恢复说明处理；数据库需要停止时，私有实例另用 `midstream server stop`。外部数据库不由该命令管理。
 
-本轮最终隔离库全量 110 项测试通过；百万行试算用例另行验收，常规全量运行跳过。前端构建通过，仅补任务类型名称，未新增数据集前端或重做浏览器验收。
+### 远程浏览器访问
 
-## Token 统计接口（M4）
+在自己的电脑另开终端建立隧道，USER@HOST 替换为实际 SSH 用户和主机或已有 SSH 别名：
 
-先执行迁移 0013，安装新增依赖，另行启动 worker。分词器路径是后端机器上的本地路径，不是浏览器上传或下载地址；可给 JSON 或所在目录。
+```bash
+ssh -N -L 8765:127.0.0.1:8765 USER@HOST
+```
 
-- `POST /api/v1/datasets/{id}/token-stats`：`{"tokenizer":"/path/to/tokenizer.json","actor":"operator","reason":"统计依据"}`，经 browser_write 保护，返回 token_stats 任务。
-- `GET /api/v1/datasets/{id}/token-stats`：返回该固定发布的全部精确统计记录，含 unit、tokenizer_fingerprint/name、total、by_split、by_source、by_category、percentiles、created_at。unit 本轮固定 document；不同 JSON 指纹分别记录。
-- `POST /api/v1/datasets/preview` 增加可选 `tokenizer`：`{"recipe":{...},"tokenizer":"/path/to/tokenizer.json"}`。只读返回 token_stats 的 exact/estimated/coverage 和 status；无缓存时为 unknown、数字为 null。估算不会写入精确表。
-- 通用 `/api/v1/jobs` 的 token_stats/tokenize params 为 `{"release_id":123,"tokenizer":"/path/to/tokenizer.json"}`；tokenize 还可传 shard_tokens（默认 200000000），完成结果包含 export_id、manifest 和 total_tokens。导出记录继续从 `/datasets/{id}/exports` 查询。
+然后打开本机 `http://127.0.0.1:8765`。本机端口已占用可改为 `-L 18765:127.0.0.1:8765`，浏览器访问 18765。服务端仍监听 loopback，无需修改 API Host 白名单或跨域配置。
 
-任务中心增加“Token 统计”和“Token 分片”类型名称；当前没有独立 tokenizer 配置/统计表单。缓存覆盖、统计单位和特殊 token 口径见 [使用指南](user-guide.md#8a-token-统计与分片)。M4 隔离库最终全量 114 项通过、1 项性能例按设计跳过，前端构建通过；新增 4 项合成分词器验收，无真实 tokenizer/训练联调或浏览器验收。
+### 前端开发模式
 
+API、worker 同上分别运行。第三个终端在仓库根目录执行：
 
-## 数据集工作台（M5）
+```bash
+npm --prefix web ci
+npm --prefix web run dev -- --port 5173 --strictPort
+```
 
-导航“数据集”提供发布列表和四步创建向导：多组包含/排除条件、手动文档 ID、年代、去重与来源优先级原生拖放、比例/分层/上限/保留集、只读试算和确认。条件变化后防抖 500 ms，旧请求取消；提交必须有最新试算结果、名称、操作人和依据。无 token 缓存时显示未知，部分覆盖显示“估算”和覆盖率。支持保存/载入草稿和复制已发布配方。
+打开 `http://127.0.0.1:5173`，Vite 提供热更新，并把 /api 代理到同机 127.0.0.1:8765。更换 API 端口需同时调整 web/vite.config.js 中的代理目标。开发模式无需先生成 web/dist，任务仍需要 worker。
 
-详情显示固定成员摘要、配方、精确 token 记录；可提交统计、校验和导出任务，选择字段、单位、分片预算，查看历史与文件清单。rsync 模板的 USER@HOST 是占位符，目录来自实际导出记录。训练登记记录运行名、操作人/依据，立即参与训练泄漏检查。
+远程开发时 Vite 也在后端机器运行，再建立两个端口的隧道：
 
-补充接口：POST /datasets/{id}/verify 请求 actor/reason、可选 hash_files，返回 dataset_verify 任务；GET/POST /datasets/{id}/training 查看/登记训练，POST 含 run_name、actor、reason。facets 增加 quality；列表附已有 token 统计，固定详情仍与动态统计分开。
+```bash
+ssh -N -L 5173:127.0.0.1:5173 -L 8765:127.0.0.1:8765 USER@HOST
+```
 
-本地构建通过；合成库浏览器单次主流程覆盖创建、估算、配方保存、发布、统计和导出。全量运行 114 通过、1 失败、1 性能例跳过；动态统计混入固定详情的失败已修复，该用例单独通过，未重复全量。本轮无新增依赖，无正式库/部署。
+前端不保存数据库地址或 LLM/OSS 凭据；浏览器始终通过 API 操作。
 
-## 年份粒度与统计口径
+## 任务中心（M1）
 
-查询可选不限、朝代/时代标签、世纪、具体年份、自定义区间、仅看年份未知。朝代来自现有 `composed_label` 值，按原标签精确匹配，不替无年份语料推算时间。世纪按 1—100、101—200 等划分；公元前1世纪为 -100 至 -1，没有公元0年。按年份查询继续使用成书区间相交语义，可以显式包含年份未知。
+导航“任务中心”可看列表、阶段进度、结果、错误及最近 100 条日志，queued/running 时每 2 秒刷新。关闭页面不会取消任务。取消、重试填写操作人和依据：
 
-统计页可切换时代标签、世纪、逐年，另有未知年份数和开放边界数。时代标签分组按原记录统计；世纪与逐年按区间相交统计，同一文档可能进入多个栏位，合计不是独立文档数量。默认最多显示最近100栏并标明窗口；可指定窗口，手动请求最多500栏。元数据页将 PostgreSQL 年份区间转换为可读的包含两端年份，同时保留高级字段原始值。
+- queued 可立即取消；running 只在阶段边界检查取消，当前阶段不强行中断，已提交阶段不回滚。最后阶段可能已完成，取消不保证来得及生效。
+- failed/cancelled 可重试，保留旧记录并按原 kind/params 新建 job_id；succeeded 不可重试。
+- 心跳每 5 秒更新，worker 启动及取任务前将超过 60 秒无心跳的 running 标为 failed，error=interrupted。刚中断后可能需等待过期，不会自动重试。
+- 进度是阶段进度，不是剩余时间预测；批次验证结果 needs_review 可能对应任务 succeeded，应同时检查业务结果。
 
-新增接口：`GET /api/v1/years/options`、`GET /api/v1/stats/years?granularity=century`；documents 新增 `era`、`include_unknown_years`、`only_unknown_years`。统计可传 `year_from` / `year_to`；`dynasty` 标签统计不接受年份窗口。
+CLI 同样可用 `midstream jobs list/show/cancel/retry`，详见使用指南。不要在 worker 运行长操作时另开同步重任务争用内存。
 
-## 元数据与写操作
+## 导入与两层预览（M6）
 
-- `GET /api/v1/documents/{id}/metadata?version=2` 独立读取元数据，不访问压缩正文。关联来源记录为文档级最近20条，每条保留批次标识；并不把所有来源记录都当作所选版本的直接输入。
-- `POST /api/v1/documents/{id}/review`：`expected_version_id`、`metadata` 字段覆盖、`actor`、`reason`。历史版本只读，修正以当前版本为基础；冲突返回409，格式错误返回422。
-- `GET /api/v1/documents/{id}/works` 和 `POST /api/v1/documents/{id}/works/review`：复用已有作品关联审核。
-- `GET /api/v1/events?doc_id=…` 或 `batch_id=…`：最近100条操作记录。
-- `GET /api/v1/stats`：语料和发布统计。源没有文档时，版本数为0。
-- `GET /api/v1/batches?include_published=true&before=…`、`GET /api/v1/batches/{id}`：批次分页及详情。
-- `POST /api/v1/batches/{id}/resume` / `abandon`：操作人及原因。恢复核对原文件后继续处理；已发布批次不重发。放弃仅清理未发布的暂存层并留下审计。
+在“批次管理”展开“新建入库批次”，填写后端可读的原文件绝对路径，每行一个，最多 20 个。可以选择已有适配器，或识别格式后采用并编辑字段映射。没有目录递归或浏览器上传。
 
-浏览器写请求带 `X-Midstream-Action: 1`，且只接受同源 Origin；没有配置跨站 CORS。原生客户端也需此请求头。默认 Host 白名单为 localhost/loopback（另含 TestClient 的 testserver），可通过 `MIDSTREAM_ALLOWED_HOSTS` 设置。这是本机/隧道应用的请求边界，不是多用户登录认证。
+1. **登记前预览**：按首、中、尾窗口抽样，用表格查看映射后的元数据、正文片段和抽样字段填充率。抽样不等于全量验证。JSONL/行文本支持 UTF-8、UTF-16、GB18030 字节定位；JSON 数组上限 64 MiB；TXT 展示三个片段；Parquet 取首中尾行组，单行组覆盖有限。未知元数据保留空，不推测记录 ID。
+2. **确认登记**：填写操作人、入库依据；服务核对文件大小、哈希和解析器方案并登记审计。文件哈希/登记仍是同步请求，大文件需要等待。保持原文件位置和内容以便恢复。
+3. **暂存并验证**：在批次详情提交 batch_stage，跳转任务中心。验证通过停在 validated，界面为“已验证 · 待确认发布”；未通过为 needs_review，先查失败记录和方案。
+4. **发布前预览**：回到批次预览，检查新增/更新/不变/失败的篇数与字数、质量、字数/年代分布、库内 text_hash 完全相同篇数；分页看暂存元数据、正文和清洗差异。失败字数未知时显示未知。正文最多展示 2000 字，差异每侧最多 10000 字并标截断。
+5. **确认发布或放弃**：填写操作人和依据，确认发布提交 batch_publish；只接受 validated。放弃清理未发布暂存分区并保留审计。预览只读暂存，不写已发布版本。
 
-Web 暂存验证与确认发布使用持久任务队列，处理完成后查看暂存预览再确认发布。网络中断后可在任务中心查看状态；CLI batch-resume 仍同步一键处理。发布后查重失败不会回滚已经发布的数据。
+近重复与段落重复在发布后计算。发布后的查重失败不回滚批次；重试已发布批次不会重复发布，结果提示另做 dedup。CLI `batch-resume` 保留同步一键处理到发布、查重的行为，`ingest` 也同步执行，不停在确认页。
 
-### 新建入库批次
+“识别并用 LLM 分析未知格式”只对规则未匹配文件调用已配置 LLM，需主动选择；仅发送受限内容样本，不发送绝对路径或完整文件。建议必须由人确认。支持 TXT/JSON/JSONL/Parquet/行文本，未知作者、年代、许可证不补猜。Gutenberg 书目关联、Erya 翻译配对、PDF/OCR、SFT 结构仍需后续支持。配置方法见 [LLM 指南](llm.md)。
 
-在「批次管理」展开「新建入库批次」，选择 CCC 或万历格式，填写**后端机器**上的原文件绝对路径（每行一个，最多 20 个）。目前不包含浏览器上传、目录递归或任意 JSON 字段映射。
+## 数据集工作台（M2–M5、M7、M8）
 
-先检查文件并预览：流式计算 SHA-256，每文件最多抽看 3 条原始解析样本、正文前 500 字及元数据；抽样不等于全量验证。填写操作人和入库依据后确认登记，服务会再次核对文件大小、哈希和解析器版本；登记与审计同一事务提交。原文件保持原位，需要保留以便继续或恢复。
+导航“数据集”列表显示名称、创建时间、总字数、各划分字数；有精确统计才显示 token 数。新建向导四步可来回切换：
 
-登记成功自动打开批次详情，再按「继续处理 / 发布」执行 core 的暂存、验证、发布与查重。原文件已发布过会拒绝重复登记。大文件计算哈希和处理当前仍为同步请求，不提供持久后台任务；请求中断后先刷新批次状态再决定是否重试。
+1. **选语料**：来源、类别、体裁、质量多选并显示篇数/字数，年代沿用时代/世纪/区间控件。可增加 OR 条件组、排除组，按 doc_id 手动增删。版本选“主线”或“simplified”；后者必须先通过 CLI `reprocess t2s-v1` 预览、加 --apply 生成，缺失/过期报错，不回退。
+2. **去重和划分**：none/document/span，来源优先级可原生拖动或按钮排序；设置比例、按字数/篇数、分层、val/test 上限、保留集。span 需要两类查重最新快照，设置最短裁剪字数。整组不拆，超大组可能使比例偏离，保留集也受上限约束。
+3. **只读试算**：看候选、舍弃、实际比例及来源/类别/世纪分布，处理醒目警告。条件变化后防抖刷新，旧请求取消；普通试算只读元数据，span 需相关正文映射偏移。可填写后端 tokenizer.json 路径；无缓存为未知，部分覆盖明确显示“估算”和覆盖率，不会写成精确统计。
+4. **确认发布**：核对名称、填写操作人和依据，有最新试算结果后提交 dataset_create 并跳任务中心。成功结果给出 release_id。该操作只固定成员，不自动导出文件。
 
-新增接口：`GET /api/v1/import/adapters`、`POST /api/v1/import/preview`、`POST /api/v1/import/register`。两个 POST 同样受同源写操作限制。适用于可信单机/SSH 隧道操作环境，不应直接暴露公网。
+可保存/载入/删除草稿配方，或从已有数据集复制配方。草稿修改不改变旧发布。重试同名同配方创建任务可复用已固定发布；新一次选材应换新名称。
 
-### 格式识别与智能映射
+### 数据集详情与导出
 
-「识别已有格式」按结构和已知目录匹配已有来源；「识别并用 LLM 分析未知格式」仅对未匹配文件调用已配置 LLM。每文件最多读取 32 KiB 文件头用于文本识别，发送模型的内容样本最多 6000 字符，不发送完整文件或绝对路径。Parquet 读取一个记录样本；PDF、压缩包、token 二进制需先提取正文，不发送模型。
+详情显示只读配方、固定成员摘要和字符数；后续入库、转换、查重、否决不改变它。
 
-新增 `POST /api/v1/import/detect`：`paths`、`use_llm`（默认 false）、可选 `profile`。LLM 用途服务为 `identify_import`，配置 `[services] import_detection = "profile-name"`，默认沿用 `default` profile。结果包含识别方法、模型名及提示词版本，模型只建议字段映射，不生成或执行代码；可返回无法识别。
+- **Token 统计**：填后端分词器路径、操作人/依据，提交 token_stats，完成后回详情看总量、分划分/来源/类别和分位数。统计按分词器 JSON 指纹区分，完整正文计数缓存可跨发布复用，裁剪正文直接计算。
+- **校验**：提交 dataset_verify；默认核对固定成员摘要/字符数、已完成文件存在/大小/行数，选哈希校验才重读文件核对 SHA-256。
+- **导出**：选择 parquet/jsonl/pkl、字段、document/sample、分片大小；sample 设置 max_chars/overlap_chars，JSONL 可选 zst。提交 dataset_export，成功后历史展示 manifest 和文件清单。PKL 只加载可信文件。多次导出使用相同固定成员，每次独立 export_id。详细参数见 [导出说明](user-guide.md#按已有发布多次导出)。
+- **下载到本地**：按详情实际路径复制 rsync 模板，将 USER@HOST 替换为 SSH 连接信息，在自己的电脑执行；API 不接受输出路径，导出根由后端 MIDSTREAM_EXPORT_ROOT 决定。
+- **登记训练**：填运行名、操作人、依据；仅登记使用，不启动训练。后续发布会据此检查 val/test 是否泄漏。
 
-已知规则覆盖 CCC、万历以及现有目录中的明清文集、诗词 JSON、GreatHan/维基文库 Parquet、殆知阁/第二批 TXT、Gutenberg TXT、Erya 行文本。目录规则还检查结构，不能代替逐来源全量验收；诗词其他 JSON 结构仍可能需要不同映射。Gutenberg 书目清单关联、Erya 翻译配对、SFT 角色结构和 PDF/OCR 提取尚未实现，不把这些数据声明为完整支持。
+Token 二进制分片目前用 CLI `midstream tokenize <release_id> --tokenizer <path>` 或通用 jobs API 提交，结果和文件仍可从导出历史查看。词表不超过 65536 用 u16，否则 u32；只支持 document 单位，不自动加 BOS/EOS，详见 [token 口径](user-guide.md#8a-token-统计与分片)。
 
-采用方案后可编辑来源名称及映射 JSON，再预览、确认登记。同一批次一个方案，混合格式需要分批；映射支持点分隔嵌套字段、字符串数组以换行拼正文，作者字符串变列表。支持 TXT、JSON、JSONL、Parquet、逐行文本，编码支持 UTF-8、UTF-16、GB18030；编码初判需核对预览。JSON 文件上限 64 MiB，较大文件需转换为 JSONL。
+## 重复浏览与人工否决（M9）
 
-迁移 `0008` 为批次增加 `import_plan` 并允许登记审计；方案内容哈希进入解析器版本，恢复从库内方案创建读取器。映射文档 ID 使用绝对文件路径加来源 ID/记录序号，文件移动会改变身份，需保留原路径。模型生成的方案经人确认后才登记；仅映射原字段，未知作者、年代和许可证保留未知，暂不做文件名自动书目解析。模型信息显示于识别结果，批次目前固定最终映射方案，不保存完整模型响应。
+“重复”页按完全/近重复、成员数和来源分页筛选，进入簇看成员、选两篇比较服务端限长差异（每侧最多 20000 字）。填写操作人/依据可提交文档或段落查重任务。
 
-### LLM 配置页面
+可否决两篇文档的重复关系，或某成员与该簇内其他成员的关系；界面保存否决后提交重算，等待完成再新建数据集。按 doc_id 对持久保存、记审计，重算和主线更新后仍生效。A/B 否决优先于 A~C~B 的传递合并，C 确定归入一侧，可能放弃部分正边；真实作品关系仍要求同一划分。已发布数据集不变。
 
-侧栏「LLM 配置」支持新增/编辑/移除凭据、协议接入点和模型 profile，配置用途默认值（生成、质检、入库识别），并调整模型参数、输出上限、超时、并发和请求速率。数据保存在后端机器，与 CLI 共用，无需数据库。
+文档面板正文可叠加最多 200 条重复高亮，不生成新版本。偏移为 Unicode 码点，过期派生版不套用当前主线坐标；当前逐字等长 simplified 可复用有效偏移。
 
-凭据既可引用环境变量，也可从密码框输入后存入后端配置文件（0600）。接口不返回密钥，留空保留已存值，支持清除本地密钥；环境变量优先。页面保存只校验配置格式及引用关系，不代表供应商实际连接或 key 已验证。冲突会拒绝覆盖，请重新加载后编辑。保存会重写 TOML 并移除原注释；具体说明见 [LLM 文档](llm.md)。
+## 备份设置（M10）
 
-DeepSeek 快速配置支持选择协议/模型后一键填入地址、凭据引用、输出预算及参数，再检查并保存。支持用新输入或已保存的 key 从官方刷新模型列表；模型元数据只作显示，不自动扩大输出预算。预设与刷新不会覆盖已有接入点/profile，首次建立配置时会设定用途默认值。详细范围见 [LLM 说明](llm.md#deepseek-快速配置)。
+“设置”保留 LLM 配置，并提供阿里云 OSS 备份：endpoint、bucket、前缀、凭据、周期、保留份数和可选配置文件。先保存配置，再测试连接；测试连接会访问实际 OSS。留空凭据保留本地值，清除仅影响本地值，环境变量仍优先，接口不回显。
 
-Qwen 快速配置接入阿里云百炼 OpenAI 兼容 Chat Completions：选择北京/新加坡/弗吉尼亚及业务空间，自动填写区域地址、凭据引用、模型和输出预算，支持官方模型目录刷新与手工输入模型 ID。区域 key 不通用，尚未加入 Coding Plan 或 DashScope 原生协议。使用范围见 [Qwen 说明](llm.md#qwen-快速配置阿里云百炼)。
+默认 schedule=none，绝不自动备份；手动启用 daily/weekly 后由 worker 检查并排队，没有近期任务时可能立即提交一次。填写操作人/依据可手动备份、查看历史、校验，均跳任务中心。备份流式上传 pg_dump -Fc，不在本地落完整 dump；可选配置文件可能包含本地凭据，不包括数据集导出目录。
+
+校验使用 pg_restore --list，仅证明归档目录可读，不等同于完整恢复验证。恢复只提供 CLI，目标必须是不存在的新库，不能覆盖 midstream、源库或系统库。使用内置 PostgreSQL 工具；真实 OSS 联调尚未进行。配置示例、保留策略和恢复命令见 [备份指南](user-guide.md#8d-oss-备份m10)。
+
+## 文档、统计与人工管理
+
+文献页支持标题前缀、作者、来源、类别、体裁、质量和成书年份筛选，游标分页。默认看元数据，正文按需加载，每次 10000 字；超大单篇目前仍整篇解压再切片。版本列表显示 variant/过期提示，可切历史版查看，历史正文和元数据只读。
+
+时代筛选按已收录标签，世纪/年份用成书区间相交规则；可包括未知年份，不猜测未知值。跨世纪区间在每个相交桶计数，因此分桶篇数合计可超过独立文档数。万历事件年月不等于成书年份。统计页显示当前主线文档/字数/质量、来源/类别、年代、存储和最近发布。
+
+人工修正先预览，填写操作人/依据后追加新版本；可确认/拒绝作品关联、查审计。主线更新后此前 simplified 自动过期，需要重新生成才能在新发布中选用；已有发布的固定版本不受影响。
+
+## HTTP 调用与接口索引
+
+所有地址前缀为 /api/v1。写操作使用 `X-Midstream-Action: 1`，发送 Origin 时必须同源；无跨站 CORS。Host 默认限 localhost/loopback，可用 MIDSTREAM_ALLOWED_HOSTS 调整。此边界不等于登录认证。查询连接只读，写入复用 core；数据库不可用返回 503，不存在返回 404，参数错误返回 422，状态冲突通常为 409。完整模型以运行中的 /api/docs 为准。
+
+例如提交后台查重，再用实际返回的 job_id 查询；这里仅为命令示例：
+
+```bash
+curl -sS http://127.0.0.1:8765/api/v1/jobs   -H 'Content-Type: application/json' -H 'X-Midstream-Action: 1'   -d '{"kind":"dedup","params":{},"actor":"operator","reason":"更新查重快照"}'
+curl -sS http://127.0.0.1:8765/api/v1/jobs/123
+```
+
+| 范围 | 接口（省略 /api/v1） | 参数或行为 |
+|---|---|---|
+| 任务 | GET/POST /jobs；GET /jobs/{id}；POST /jobs/{id}/cancel、/retry | POST 含 kind、params、actor、reason；取消/重试含 actor/reason |
+| 入库 | GET /import/adapters；POST /import/detect、/preview、/register | paths 为后端文件路径；detect 的 use_llm 默认 false；register 需 actor/reason |
+| 批次 | GET /batches、/batches/{id}；POST /batches/{id}/stage、/publish、/resume、/abandon | stage/publish 返回任务；resume 仍同步；操作需 actor/reason |
+| 暂存预览 | GET /batches/{id}/preview、/records、/records/{record_id}/diff | records 按 status=new/updated/unchanged/failed、after/limit 分页；只读暂存 |
+| 选材 | GET /datasets/facets；POST /datasets/preview | facets 用 filters 或 recipe JSON 查询字符串，含来源/类别/体裁/时代/质量篇数与字数；preview 用 recipe，可选 tokenizer |
+| 数据集 | GET/POST /datasets；GET /datasets/{id} | 创建体为 recipe、actor、reason；返回 dataset_create 任务；列表含已有 token 统计 |
+| 配方草稿 | GET/POST /dataset-recipes；GET/PUT/DELETE /dataset-recipes/{name} | POST/PUT 为 recipe、actor、reason；DELETE 含 actor/reason；不改旧发布 |
+| 导出 | GET/POST /datasets/{id}/exports | POST 为 options、actor、reason；返回 dataset_export；GET 含状态/manifest/文件 |
+| Token 统计 | GET/POST /datasets/{id}/token-stats | POST 为 tokenizer、actor、reason；GET 是该发布精确统计 |
+| 校验/训练 | POST /datasets/{id}/verify；GET/POST /datasets/{id}/training | verify 可选 hash_files；training 含 run_name、actor、reason |
+| 重复簇 | GET /duplicates/clusters、/duplicates/clusters/{id}、/duplicates/compare | 列表 before/kind/source/min_size/max_size/limit；成员 after/limit；比较 left/right/length |
+| 人工否决 | GET/POST /duplicates/overrides | POST 含 left_doc_id 和 right_doc_id 或 cluster_id，加 actor/reason |
+| 备份 | GET/POST /backup/settings；POST /backup/test；GET/POST /backups；POST /backups/{id}/verify | settings 含 config/keys/clear_keys/revision；测试已保存连接；提交任务需 actor/reason |
+| 文档 | GET /documents、/documents/{id}/metadata、/versions、/spans | 正文 GET /documents/{id}?version=2&offset=0&length=10000，返回 next_offset；不传 version 取当前版 |
+| 审核/统计 | POST /documents/{id}/review、/works/review；GET /documents/{id}/works、/events、/sources、/stats、/years/options、/stats/years | review 需 expected_version_id、metadata、actor/reason；events 按 doc_id 或 batch_id |
+
+通用 jobs 支持以下 kind；每种均加 actor/reason：
+
+| kind | params |
+|---|---|
+| batch_resume / batch_stage / batch_publish | {"batch_id":123} |
+| dedup / dedup_spans | {} 或 {"full":true} |
+| dataset_create | {"recipe":{...}} |
+| dataset_export | {"release_id":1,"options":{"format":"jsonl","compression":"zst","unit":"sample","max_chars":8192,"overlap_chars":256,"shard_mb":256}} |
+| dataset_verify | {"release_id":1,"hash_files":false} |
+| token_stats / tokenize | {"release_id":1,"tokenizer":"/path/to/tokenizer.json"}；tokenize 可加 shard_tokens |
+| backup / backup_verify | {} / {"backup_id":1} |
+
+## 常见问题与验证范围
+
+- **任务一直排队**：确认 worker 已在同一数据库运行，不要只启动 API 或 Vite。
+- **网页更新后仍旧界面**：重新 build，确认 API 的 static-dir，重启并刷新浏览器。
+- **任务失败但批次已发布**：发布已经提交，只补跑查重，不重新入库。发布前失败则按暂存/验证状态恢复。
+- **分词器或文件不存在**：填写后端机器的路径；浏览器电脑上的路径无法直接使用。
+- **返回 403**：检查写请求头、同源 Origin 和 Host 白名单；经 Vite 代理或 SSH 隧道使用同源地址。
+- **取消后仍短暂运行**：协作式取消要等阶段边界；不自动撤销已提交数据。
+
+M1–M10 曾在隔离 PostgreSQL 合成库验收，最后一次全量为 130 通过、2 个性能用例跳过，随后备份修复和配置并发用例单独通过；前端构建通过。数据集创建、试算/估算、发布、统计、导出的合成库浏览器主流程已走过；M6–M10 未追加完整浏览器验收。尚未做正式库性能验收、真实 OSS 或真实模型 API 联调。本次文档更新不代表重新执行这些验收。
