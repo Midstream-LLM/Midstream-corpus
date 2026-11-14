@@ -30,7 +30,7 @@ export MIDSTREAM_EXPORT_ROOT=/path/to/exports
 
 MIDSTREAM_HOME 应在首次 init 前确定，迁移 URL 与运行 DSN 必须指向同一库。已有实例使用原配置，不要为更新代码另建空目录。
 
-### 2. 构建前端，启动 API
+### 2. 构建前端，启动服务
 
 前端构建需要 Node.js/npm，版本须满足锁文件中 Vite 的 engines 要求。在仓库根目录执行：
 
@@ -38,19 +38,21 @@ MIDSTREAM_HOME 应在首次 init 前确定，迁移 URL 与运行 DSN 必须指�
 source .venv/bin/activate
 npm --prefix web ci
 npm --prefix web run build
-python -m midstream.api --host 127.0.0.1 --port 8765
+midstream serve --host 127.0.0.1 --port 8765
 ```
 
-此进程同时提供 API 和已构建的 Web 页面，无需另开 Node 服务：
+`midstream serve` 先确保内置 PostgreSQL 运行（设置了 MIDSTREAM_DSN 时不启动私有实例），再以子进程启动 worker，前台运行 API；Ctrl-C 退出时一并结束 worker，worker 正在执行的任务记为已取消（已提交阶段保留）。此进程同时提供 API 和已构建的 Web 页面，无需另开 Node 服务：
 
 - Web：`http://127.0.0.1:8765`
 - 接口文档：`http://127.0.0.1:8765/api/docs`
 - OpenAPI：`http://127.0.0.1:8765/api/openapi.json`
 - 存活检查：`http://127.0.0.1:8765/api/v1/health`，仅代表服务存活，不保证数据库可用。
 
-默认静态目录为仓库 web/dist；安装到其他位置时显式使用 `--static-dir /path/to/web/dist`。若 API 可访问而首页 404，先确认已经构建并指定正确目录。更新前端源码后重新构建，再重启 API。
+默认静态目录为仓库 web/dist；安装到其他位置时显式使用 `--static-dir /path/to/web/dist`。若 API 可访问而首页 404，先确认已经构建并指定正确目录。更新前端源码后重新构建，再重启服务。
 
-### 3. 另开终端启动 worker
+### 3. 只运行 API 时另开 worker
+
+`midstream serve --no-worker` 或 `python -m midstream.api --host 127.0.0.1 --port 8765` 只运行 API，不启动 worker。此时需另开终端：
 
 ```bash
 # 在仓库根目录，加载与 API 相同的环境变量
@@ -58,9 +60,40 @@ source .venv/bin/activate
 midstream worker
 ```
 
-worker **必须手动启动**，API 不会代为启动。数据库锁限制同库只有一个 worker，同一时间执行一个任务；没有 worker 时任务保持 queued。API 和 worker 均前台运行，没有自动安装进程托管服务，关闭终端会结束对应进程。
+数据库锁限制同库只有一个 worker，同一时间执行一个任务；已有 worker 时 serve 启动的 worker 会报“已有 worker 正在运行”并退出，API 不受影响。没有 worker 时任务保持 queued。服务前台运行，关闭终端会结束进程。
 
-停止时在各自终端 Ctrl-C。任务中断后按任务中心的失败/恢复说明处理；数据库需要停止时，私有实例另用 `midstream server stop`。外部数据库不由该命令管理。
+停止时在终端 Ctrl-C。任务中断后按任务中心的失败/恢复说明处理；数据库需要停止时，私有实例另用 `midstream server stop`。外部数据库不由该命令管理。
+
+### 常驻运行：systemd 用户服务
+
+需要在服务器上常驻时，可写一个 systemd 用户服务，不需要 root。以下仅为示例，路径换成实际值；仓库不会自动安装它。保存为 `~/.config/systemd/user/midstream.service`：
+
+```ini
+[Unit]
+Description=Midstream corpus API and worker
+
+[Service]
+WorkingDirectory=/path/to/midstream-core
+Environment=MIDSTREAM_HOME=/path/to/midstream-home
+Environment=MIDSTREAM_EXPORT_ROOT=/path/to/exports
+ExecStart=/path/to/midstream-core/.venv/bin/midstream serve --host 127.0.0.1 --port 8765
+KillSignal=SIGINT
+TimeoutStopSec=60
+Restart=on-failure
+
+[Install]
+WantedBy=default.target
+```
+
+```bash
+systemctl --user daemon-reload
+systemctl --user enable --now midstream.service
+systemctl --user status midstream.service
+journalctl --user -u midstream.service -f
+# 退出登录后仍运行需要：loginctl enable-linger "$USER"
+```
+
+`KillSignal=SIGINT` 让停止服务与终端 Ctrl-C 一致：API 退出并结束 worker。私有 PostgreSQL 实例不随服务停止，需要时另用 `midstream server stop`。LLM 和备份配置从 MIDSTREAM_HOME 读取，凭据环境变量需要另写 `Environment=` 或 `EnvironmentFile=`（权限 0600），不要写进仓库。
 
 ### 远程浏览器访问
 
@@ -74,7 +107,7 @@ ssh -N -L 8765:127.0.0.1:8765 USER@HOST
 
 ### 前端开发模式
 
-API、worker 同上分别运行。第三个终端在仓库根目录执行：
+`midstream serve` 同上运行。另一个终端在仓库根目录执行：
 
 ```bash
 npm --prefix web ci
@@ -100,7 +133,9 @@ ssh -N -L 5173:127.0.0.1:5173 -L 8765:127.0.0.1:8765 USER@HOST
 - 心跳每 5 秒更新，worker 启动及取任务前将超过 60 秒无心跳的 running 标为 failed，error=interrupted。刚中断后可能需等待过期，不会自动重试。
 - 进度是阶段进度，不是剩余时间预测；批次验证结果 needs_review 可能对应任务 succeeded，应同时检查业务结果。
 
-CLI 同样可用 `midstream jobs list/show/cancel/retry`，详见使用指南。不要在 worker 运行长操作时另开同步重任务争用内存。
+CLI 同样可用 `midstream jobs list/show/cancel/retry`，详见使用指南。CLI 长操作默认就地执行，也会出现在任务中心；不要在 worker 运行长操作时另开就地重任务争用内存。
+
+批次发布成功后，查重作为后续任务 dedup、dedup_spans 写入队列，任务中心可见；它们的依据注明来自哪个任务。
 
 ## 导入与两层预览（M6）
 
@@ -112,7 +147,7 @@ CLI 同样可用 `midstream jobs list/show/cancel/retry`，详见使用指南。
 4. **发布前预览**：回到批次预览，检查新增/更新/不变/失败的篇数与字数、质量、字数/年代分布、库内 text_hash 完全相同篇数；分页看暂存元数据、正文和清洗差异。失败字数未知时显示未知。正文最多展示 2000 字，差异每侧最多 10000 字并标截断。
 5. **确认发布或放弃**：填写操作人和依据，确认发布提交 batch_publish；只接受 validated。放弃清理未发布暂存分区并保留审计。预览只读暂存，不写已发布版本。
 
-近重复与段落重复在发布后计算。发布后的查重失败不回滚批次；重试已发布批次不会重复发布，结果提示另做 dedup。CLI `batch-resume` 保留同步一键处理到发布、查重的行为，`ingest` 也同步执行，不停在确认页。
+近重复与段落重复在发布后作为后续任务计算。查重失败只记在后续任务上，不回滚批次；重试失败的查重任务即可，重试已发布批次不会重复发布，结果提示另做 dedup。CLI `batch-resume` 和 `ingest` 默认就地一键处理到发布，并在同一进程接着跑完查重，不停在确认页；加 `--queue` 则交给 worker。
 
 “识别并用 LLM 分析未知格式”只对规则未匹配文件调用已配置 LLM，需主动选择；仅发送受限内容样本，不发送绝对路径或完整文件。建议必须由人确认。支持 TXT/JSON/JSONL/Parquet/行文本，未知作者、年代、许可证不补猜。Gutenberg 书目关联、Erya 翻译配对、PDF/OCR、SFT 结构仍需后续支持。配置方法见 [LLM 指南](llm.md)。
 
@@ -167,18 +202,20 @@ Token 二进制分片目前用 CLI `midstream tokenize <release_id> --tokenizer 
 
 所有地址前缀为 /api/v1。写操作使用 `X-Midstream-Action: 1`，发送 Origin 时必须同源；无跨站 CORS。Host 默认限 localhost/loopback，可用 MIDSTREAM_ALLOWED_HOSTS 调整。此边界不等于登录认证。查询连接只读，写入复用 core；数据库不可用返回 503，不存在返回 404，参数错误返回 422，状态冲突通常为 409。完整模型以运行中的 /api/docs 为准。
 
-例如提交后台查重，再用实际返回的 job_id 查询；这里仅为命令示例：
+例如先查看可执行的操作，再提交后台查重，用实际返回的 job_id 查询；这里仅为命令示例：
 
 ```bash
+curl -sS http://127.0.0.1:8765/api/v1/operations
 curl -sS http://127.0.0.1:8765/api/v1/jobs   -H 'Content-Type: application/json' -H 'X-Midstream-Action: 1'   -d '{"kind":"dedup","params":{},"actor":"operator","reason":"更新查重快照"}'
 curl -sS http://127.0.0.1:8765/api/v1/jobs/123
 ```
 
 | 范围 | 接口（省略 /api/v1） | 参数或行为 |
 |---|---|---|
-| 任务 | GET/POST /jobs；GET /jobs/{id}；POST /jobs/{id}/cancel、/retry | POST 含 kind、params、actor、reason；取消/重试含 actor/reason |
+| 操作 | GET /operations | 已注册操作的名称、说明和参数 JSON Schema，与 `midstream operations` 相同 |
+| 任务 | GET/POST /jobs；GET /jobs/{id}；POST /jobs/{id}/cancel、/retry | POST 含 kind、params、actor、reason，kind 可为任一已注册操作；取消/重试含 actor/reason |
 | 入库 | GET /import/adapters；POST /import/detect、/preview、/register | paths 为后端文件路径；detect 的 use_llm 默认 false；register 需 actor/reason |
-| 批次 | GET /batches、/batches/{id}；POST /batches/{id}/stage、/publish、/resume、/abandon | stage/publish 返回任务；resume 仍同步；操作需 actor/reason |
+| 批次 | GET /batches、/batches/{id}；POST /batches/{id}/stage、/publish、/resume、/abandon | stage/publish 返回任务；resume 在请求内就地执行（含查重后续任务）并返回结果；操作需 actor/reason |
 | 暂存预览 | GET /batches/{id}/preview、/records、/records/{record_id}/diff | records 按 status=new/updated/unchanged/failed、after/limit 分页；只读暂存 |
 | 选材 | GET /datasets/facets；POST /datasets/preview | facets 用 filters 或 recipe JSON 查询字符串，含来源/类别/体裁/时代/质量篇数与字数；preview 用 recipe，可选 tokenizer |
 | 数据集 | GET/POST /datasets；GET /datasets/{id} | 创建体为 recipe、actor、reason；返回 dataset_create 任务；列表含已有 token 统计 |
@@ -192,10 +229,12 @@ curl -sS http://127.0.0.1:8765/api/v1/jobs/123
 | 文档 | GET /documents、/documents/{id}/metadata、/versions、/spans | 正文 GET /documents/{id}?version=2&offset=0&length=10000，返回 next_offset；不传 version 取当前版 |
 | 审核/统计 | POST /documents/{id}/review、/works/review；GET /documents/{id}/works、/events、/sources、/stats、/years/options、/stats/years | review 需 expected_version_id、metadata、actor/reason；events 按 doc_id 或 batch_id |
 
-通用 jobs 支持以下 kind；每种均加 actor/reason：
+通用 jobs 接受 GET /operations 列出的任一 kind；每种均加 actor/reason。params 按该操作的 JSON Schema 严格校验：未知字段、类型不符（如 "123" 代替 123）返回 422。当前操作：
 
 | kind | params |
 |---|---|
+| ingest | {"source":"wanli","paths":["/path/to/file.jsonl"]}；paths 省略时用 MIDSTREAM_JISHUI_RAW 下的默认文件 |
+| reprocess | {"rule":"t2s-v1","apply":false}；apply 为 false 只预览 |
 | batch_resume / batch_stage / batch_publish | {"batch_id":123} |
 | dedup / dedup_spans | {} 或 {"full":true} |
 | dataset_create | {"recipe":{...}} |
@@ -206,9 +245,9 @@ curl -sS http://127.0.0.1:8765/api/v1/jobs/123
 
 ## 常见问题与验证范围
 
-- **任务一直排队**：确认 worker 已在同一数据库运行，不要只启动 API 或 Vite。
+- **任务一直排队**：确认用 `midstream serve` 启动（未加 --no-worker），或 worker 已在同一数据库运行，不要只启动 API 或 Vite。
 - **网页更新后仍旧界面**：重新 build，确认 API 的 static-dir，重启并刷新浏览器。
-- **任务失败但批次已发布**：发布已经提交，只补跑查重，不重新入库。发布前失败则按暂存/验证状态恢复。
+- **查重后续任务失败**：批次已发布，只重试失败的 dedup/dedup_spans 任务，不重新入库。发布前失败则按暂存/验证状态恢复，不会产生后续任务。
 - **分词器或文件不存在**：填写后端机器的路径；浏览器电脑上的路径无法直接使用。
 - **返回 403**：检查写请求头、同源 Origin 和 Host 白名单；经 Vite 代理或 SSH 隧道使用同源地址。
 - **取消后仍短暂运行**：协作式取消要等阶段边界；不自动撤销已提交数据。

@@ -1,8 +1,9 @@
 import json
 import pytest
 from fastapi.testclient import TestClient
-from midstream import api, importing, ingest
-from midstream.management import ManagementError
+from midstream import api
+from midstream.ingest import importing, pipeline as ingest
+from midstream.corpus.management import ManagementError
 
 
 def test_preview_and_changed_input(tmp_path):
@@ -55,7 +56,7 @@ def test_import_http_boundary(tmp_path):
 
 
 def test_known_detection_never_calls_llm(tmp_path, monkeypatch):
-    from midstream import import_detection
+    from midstream.ingest import detection as import_detection
     path = tmp_path / 'ccc.jsonl'
     path.write_text(json.dumps({'id': 'a', 'content': '甲乙', 'source': '测试', 'chapter': '一'}) + '\n')
     def forbidden(*args): raise AssertionError('known format must not call LLM')
@@ -68,7 +69,7 @@ def test_known_detection_never_calls_llm(tmp_path, monkeypatch):
 def test_mapped_formats_and_metadata(tmp_path):
     import pyarrow as pa
     import pyarrow.parquet as pq
-    from midstream.adapters.mapped import MappedAdapter
+    from midstream.ingest.adapters.mapped import MappedAdapter
     for fmt in ('json', 'jsonl', 'parquet'):
         path = tmp_path / ('input.' + fmt)
         row = {'body': ['甲', '乙'], 'name': '标题', 'writer': '作者'}
@@ -86,7 +87,7 @@ def test_mapped_formats_and_metadata(tmp_path):
 
 
 def test_unknown_detection_llm_sample_and_null(tmp_path, monkeypatch):
-    from midstream import import_detection
+    from midstream.ingest import detection as import_detection
     path = tmp_path / 'unknown.jsonl'
     path.write_text(json.dumps({'body': '甲' * 10000}) + '\n')
     class Service:

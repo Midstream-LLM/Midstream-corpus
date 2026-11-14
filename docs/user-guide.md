@@ -141,21 +141,46 @@ Web 可用 `MIDSTREAM_ALLOWED_HOSTS` 设置逗号分隔的 Host 白名单，默�
 
 ## 3A. CLI、任务与常用流程
 
-在运行数据库/后端的机器上使用 CLI。同步命令返回后即已完成；提交任务的命令只返回任务记录，需查看其最终状态。用 `midstream --help` 查看命令，`midstream export-release --help` 等查看参数；多数读取/操作结果输出 JSON。
+在运行数据库/后端的机器上使用 CLI。用 `midstream --help` 查看命令，`midstream export-release --help` 等查看参数；多数读取/操作结果输出 JSON。
+
+会改数据的长操作在操作注册表中定义一次，CLI、HTTP API 和 worker 共用同一份参数校验和执行路径。CLI 的长操作命令**默认就地执行**：写入任务表后在当前进程运行，进度打印到 stderr，结束后输出操作结果（JSON），任务记录、事件和审计与 worker 执行完全一样，可用 `midstream jobs show` 查看。加 `--queue` 只提交到任务队列并输出任务记录，由 worker 执行，命令立即返回。`--actor` 默认当前系统用户，`--reason` 默认命令名；`batch-resume` 仍要求显式 `--actor`、`--reason`。失败时任务记为 failed，命令输出错误并以非零状态退出。
 
 | 操作 | CLI / 入口 | 执行方式 |
 |---|---|---|
-| 入库、恢复/放弃批次 | `ingest`、`batch-resume`、`batch-abandon` | 同步；恢复一键推进到发布并查重 |
-| 查重、转换预览/应用 | `dedup`、`dedup --spans`、`reprocess` | 同步 |
-| 数据集试算、发布并默认导出 | `export-preview`、`export` | 同步；export 固定成员后写 Parquet |
-| 已有发布导出、校验、训练登记 | `export-release`、`verify`、`record-training` | 同步 |
-| 精确 token 统计、NPY 分片 | `token-stats`、`tokenize` | 提交任务 |
-| OSS 备份/校验 | `backup run`、`backup verify` | 提交任务；restore 同步恢复到新库 |
+| 入库、恢复批次 | `ingest`、`batch-resume` | 就地执行，可加 `--queue`；成功发布后接着运行查重后续任务 |
+| 放弃批次 | `batch-abandon` | 同步（一次事务完成的短操作） |
+| 查重、转换预览/应用 | `dedup`、`dedup --spans`、`reprocess` | 就地执行，可加 `--queue` |
+| 数据集试算、发布并默认导出 | `export-preview`、`export` | export-preview 只读；export 依次就地执行 dataset_create 和 dataset_export，写 Parquet |
+| 已有发布导出、校验、训练登记 | `export-release`、`verify`、`record-training` | export-release 就地执行，可加 `--queue`；其余同步 |
+| 精确 token 统计、NPY 分片 | `token-stats`、`tokenize` | 就地执行，可加 `--queue` |
+| OSS 备份/校验 | `backup run`、`backup verify` | 就地执行，可加 `--queue`；restore 同步恢复到新库 |
+| 任意已注册操作 | `operations`、`run` | 见下文 |
 | 分阶段入库、配方草稿、重复人工否决 | Web 或 HTTP API | 无对应专用 CLI 子命令，见 Web 指南 |
 
-### 手动启动与管理任务
+### 操作清单与通用执行
 
-终端 A 启动串行 worker，前台持续运行，API 不会自动启动它：
+`midstream operations` 输出全部已注册操作的名称、说明和参数 JSON Schema（不需要数据库）。`midstream run` 按名称执行任一操作，参数必须符合该 Schema：未知字段和类型不符（如把整数写成字符串）都会在写库前被拒绝。
+
+```bash
+midstream operations
+midstream run dedup_spans --params '{"full": true}'
+midstream run batch_publish --params '{"batch_id": 12}' --actor operator --reason '核对后发布' --queue
+```
+
+`run` 就地执行时输出完整任务记录（含 `follow_ups`），加 `--queue` 时输出排队的任务记录。HTTP 的 `GET /api/v1/operations` 返回同一清单，`POST /api/v1/jobs` 接受任何已注册操作。
+
+### 后续任务
+
+批次发布（`ingest`、`batch_resume`、`batch_publish`）成功后，查重不在发布事务里运行，而是登记为后续任务 `dedup` 和 `dedup_spans`：
+
+- 就地执行时，发布成功后在同一进程按顺序接着执行；命令输出在操作结果中附带 `follow_ups`，列出各后续任务的 job_id、状态、结果和错误。
+- worker 执行时，发布成功提交后把后续任务写入队列，由 worker 依次执行。
+
+查重失败只记在对应的后续任务上，不影响已发布的批次；修复后对失败任务 `jobs retry`，或直接运行 `midstream dedup` / `midstream dedup --spans`。导出会拒绝过期的查重快照，不会用到旧结果。
+
+### 启动 worker 与管理任务
+
+`midstream serve` 会同时启动 API 和 worker（见 [Web 指南](webapp.md#启动后端与-web)）。只用 CLI 排队任务时，也可在终端 A 单独启动串行 worker，前台持续运行：
 
 ```bash
 source .venv/bin/activate
@@ -174,11 +199,11 @@ midstream jobs retry 123 --actor operator --reason '已修复失败原因'
 
 状态为 queued → running → succeeded/failed/cancelled。show 包含阶段进度、结果、错误和最近事件。retry 只接受 failed/cancelled，保留旧记录并以原 kind/params 创建新任务，返回新的 job_id。queued 取消立即生效；running 只在阶段边界协作式取消，已提交阶段不回滚。
 
-数据库锁限制同库只能有一个 worker。心跳每 5 秒更新，取任务前将超过 60 秒无心跳的 running 标为 failed，错误 interrupted；不会自动重试。中断后重启可能需等待心跳过期，再检查并手动 retry。停止 API 和 worker 用各自终端的 Ctrl-C；停止数据库另用 `midstream server stop`（仅私有实例）。
+数据库锁限制同库只能有一个 worker；就地执行不受此锁限制，但不要在 worker 运行重任务时另开就地重任务争用内存。心跳每 5 秒更新，取任务前将超过 60 秒无心跳的 running 标为 failed，错误 interrupted；不会自动重试。就地执行时按 Ctrl-C，任务记为 cancelled（已提交阶段保留）。中断后重启可能需等待心跳过期，再检查并手动 retry。停止 `serve`、API 和 worker 用各自终端的 Ctrl-C；停止数据库另用 `midstream server stop`（仅私有实例）。
 
 ### 从语料到可训练产物
 
-各行按顺序执行；token 任务提交后，等待 succeeded 再使用结果。1 替换为实际 release_id，123 替换为 token-stats 返回的 job_id。
+各行按顺序执行，每条命令返回时已完成。1 替换为实际 release_id。
 
 ```bash
 midstream ingest wanli --path /path/to/wanli_shilu_corpus.jsonl
@@ -188,7 +213,6 @@ midstream export recipes/small-sources-v1.json
 midstream release-stats 1
 midstream verify 1
 midstream token-stats 1 --tokenizer /path/to/tokenizer.json
-midstream jobs show 123
 midstream export-release 1 --format jsonl --compression zst
 midstream tokenize 1 --tokenizer /path/to/tokenizer.json
 # 实际采用该数据集训练时登记；不启动训练
@@ -213,7 +237,7 @@ JSONL 按约 8 MiB、完整行边界分块；同一个 spawn 进程池并行解�
 
 ### 查看入库结果和批次状态
 
-成功时命令打印 JSON 报告，包括 `batch_id`、`status`、`records_ok`、`records_failed`、`new_documents`、`new_versions`、`unchanged`、新增正文的 `plain_bytes` / `stored_bytes`、`timings`（登记、暂存、验证、发布及 `publish.*` 各步骤的秒数）和 `dedup`（文档级）、`dedup_spans`（段落级）查重结果。字节统计只计算本批次新增到正文存储的内容，不是所有记录的正文总量。
+成功时命令打印 JSON 报告，包括 `batch_id`、`status`、`records_ok`、`records_failed`、`new_documents`、`new_versions`、`unchanged`、新增正文的 `plain_bytes` / `stored_bytes`、`timings`（登记、暂存、验证、发布及 `publish.*` 各步骤的秒数），以及 `follow_ups`：文档级 `dedup` 和段落级 `dedup_spans` 两个后续任务的 job_id、状态和查重结果。加 `--queue` 时只输出排队的任务记录。字节统计只计算本批次新增到正文存储的内容，不是所有记录的正文总量。
 
 | 状态 | 含义 |
 |---|---|
@@ -238,9 +262,9 @@ midstream batch-abandon 123 --actor operator --reason '源文件不合格'
 midstream events --batch-id 123
 ```
 
-`batch-show` 返回状态、来源、解析器版本、登记文件路径/大小/SHA-256、成功和失败记录数、两步暂存数、是否满足基本验证条件、前 20 条失败记录及分区是否存在。它只检查数据库；恢复时才逐文件核对原路径、大小和哈希，并要求当前适配器的解析器版本与登记值一致。文件丢失或变化时需以新文件登记新批次，不能用旧批次身份继续。调用方可直接使用 `midstream.batches` 中的结构化函数。
+`batch-show` 返回状态、来源、解析器版本、登记文件路径/大小/SHA-256、成功和失败记录数、两步暂存数、是否满足基本验证条件、前 20 条失败记录及分区是否存在。它只检查数据库；恢复时才逐文件核对原路径、大小和哈希，并要求当前适配器的解析器版本与登记值一致。文件丢失或变化时需以新文件登记新批次，不能用旧批次身份继续。调用方可直接使用 `midstream.ingest.batches` 中的结构化函数；直接调用不会运行查重，需要时另行运行 dedup 操作。
 
-`batch-resume` 按现有状态推进：`received`/`failed` 清理该批次残留记录后重新暂存，`staged`/`needs_review` 重新验证，`validated` 发布；验证仍不通过时返回 `needs_review`，不强行发布。发布事务会原子写版本并删除暂存分区，之后再运行两类查重。若发布后查重失败，批次已是 `published`；再次恢复返回 `already_published` 和 `next_action=dedup`，应单独运行 `midstream dedup` 与 `midstream dedup --spans`。不会再次发布同一批次。
+`batch-resume` 按现有状态推进：`received`/`failed` 清理该批次残留记录后重新暂存，`staged`/`needs_review` 重新验证，`validated` 发布；验证仍不通过时返回 `needs_review`，不强行发布。发布事务会原子写版本并删除暂存分区，成功后再运行两类查重后续任务（见 [后续任务](#后续任务)）。查重失败时批次仍是 `published`；再次恢复返回 `already_published` 和 `next_action=dedup`，应重试失败的查重任务或单独运行 `midstream dedup` 与 `midstream dedup --spans`。不会再次发布同一批次。
 
 `batch-abandon` 只接受未发布批次，删除其暂存分区并设为 `abandoned`；登记文件信息、解析记录和人工操作记录保留。重复放弃返回 `already_abandoned`。对已发布或已放弃批次恢复、对已发布批次放弃均返回可识别的错误。两类写操作都要求 `--actor` 与 `--reason`，并在 `management_event` 留痕；不要把未知来源信息猜作处理依据。
 
@@ -259,12 +283,12 @@ ORDER BY record_id;
 
 重复入库分两层处理：
 
-- 同一来源中，只要本次任一文件的 SHA-256 与已发布批次的任一文件相同，就跳过整次入库。CLI 输出“跳过”并以状态码 0 结束；更换文件名或解析器版本不会绕过此检查。
+- 同一来源中，只要本次任一文件的 SHA-256 与已发布批次的任一文件相同，就跳过整次入库。CLI 输出 `{"status": "skipped", ...}` 并以状态码 0 结束，不运行查重；更换文件名或解析器版本不会绕过此检查。
 - 文件内容变化后可登记新批次。对同一 `source_key`，比较 `raw_fields`、原始正文和错误信息组成的记录哈希。与最近已发布批次中的该记录相同则不生成新版本；变化则复用文档身份，追加原始版和清洗版，并切换当前版本。新文件中没有出现的旧文档不会自动删除。
 
 ### 发布后自动查重
 
-版本发布先提交，再依次用两个独立事务运行文档级和段落级查重。即使本批次没有产生新版本，成功发布后也会运行查重。若查重失败，命令抛出异常，但已发布数据保留。修复原因后执行：
+版本发布先提交，再作为后续任务依次运行文档级和段落级查重，各自是独立任务和事务。即使本批次没有产生新版本，成功发布后也会运行查重。查重失败只记在后续任务上（命令输出的 `follow_ups` 中状态为 failed），已发布数据保留。修复原因后重试该任务，或执行：
 
 ```bash
 midstream dedup
@@ -338,7 +362,7 @@ midstream dedup --spans
 
 ### 添加规则
 
-在 `src/midstream/rules.py` 中编写函数，按以下接口返回结果，并注册到 `RULES`：
+在 `src/midstream/curation/rules.py` 中编写函数，按以下接口返回结果，并注册到 `RULES`：
 
 - 函数接收当前版本字典，含版本字段、`source` 和解压后的 `text`。
 - 无变化返回 `None`；有变化返回 `Change(text=新正文, metadata=字段覆盖字典)`。省略 `text` 表示正文不变。
@@ -608,12 +632,11 @@ midstream record-training small-sources-v1 run-name
 ### 精确统计
 
 ```bash
-# 先在另一个终端运行 midstream worker
 midstream token-stats 1 --tokenizer /path/to/tokenizer.json
-midstream jobs show 123
+midstream token-stats 1 --tokenizer /path/to/tokenizer.json --queue   # 只提交，由 worker 执行
 ```
 
-token-stats 只提交任务，输出 job_id；worker 完成后可通过 jobs show 或 HTTP 读取结果。tokenizer 可为 JSON 文件或包含 tokenizer.json 的目录，必须是运行 worker 的机器可读的路径。CLI 默认 actor 为当前系统用户名、reason 为命令名，可用 `--actor`、`--reason` 指定。
+token-stats 默认就地执行并输出统计结果；加 `--queue` 只提交任务、输出 job_id，worker 完成后可通过 jobs show 或 HTTP 读取结果。tokenizer 可为 JSON 文件或包含 tokenizer.json 的目录，CLI 会转为绝对路径；排队时必须是运行 worker 的机器可读的路径。CLI 默认 actor 为当前系统用户名、reason 为命令名，可用 `--actor`、`--reason` 指定。
 
 统计单位本轮固定为 `document`，按发布中固定的 version_id 读取正文；同一正文的计数由 `(text_hash, tokenizer_fingerprint)` 缓存，全库复用。不同成员即使正文相同，汇总时也各计一次。流式读取，每批最多 64 篇且约 1 Mi 字符，单篇超过预算时单独处理；调用 tokenizers.encode_batch 使用库内并行能力。计数每批提交；取消/中断保留已完成缓存，未完成时不保存半份发布统计，重试只补缺失正文。
 
@@ -637,7 +660,7 @@ token 估算只读取分词器指纹、元数据和缓存，不现场分词或�
 
 计数和编码都固定 `add_special_tokens=False`，关闭 tokenizer.json 中的 padding、truncation；保留文件内的分词模型、归一化和预切分设置。不自动添加 BOS/EOS、不在文档之间插入分隔 token；原文里已有的特殊 token 字面量按分词器正常编码计入。这与已只读核对的击水 tokenize 脚本一致。为保持缓存可复现，加载时拒绝随机 BPE dropout 和超出 vocab_size 的 token ID。
 
-fingerprint 是**原始 tokenizer.json 字节**的一次 SHA-256；文件内容变化即使用独立缓存及统计记录。两种路径指向相同 JSON 时共用身份。模块 `midstream.tokenizing.load(path)` 返回 name、fingerprint、vocab_size、count_batch(texts)、encode_batch(texts)，不依赖数据库。
+fingerprint 是**原始 tokenizer.json 字节**的一次 SHA-256；文件内容变化即使用独立缓存及统计记录。两种路径指向相同 JSON 时共用身份。模块 `midstream.delivery.tokenizing.load(path)` 返回 name、fingerprint、vocab_size、count_batch(texts)、encode_batch(texts)，不依赖数据库。
 
 ### Token 分片
 
@@ -646,7 +669,7 @@ midstream tokenize 1 --tokenizer /path/to/tokenizer.json
 midstream tokenize 1 --tokenizer /path/to/tokenizer.json --shard-tokens 200000000
 ```
 
-也是持久任务：先补齐计数并保存精确统计，再编码写出。在 `MIDSTREAM_EXPORT_ROOT/<发布名>/<export_id>/` 下生成：
+与 token-stats 一样默认就地执行、可加 `--queue`，并记录为持久任务：先补齐计数并保存精确统计，再编码写出。在 `MIDSTREAM_EXPORT_ROOT/<发布名>/<export_id>/` 下生成：
 
 ```text
 manifest.json
@@ -711,7 +734,7 @@ Web“重复”页按类型、簇大小和来源筛选，进入簇后比较两�
 
 ## 8D. OSS 备份（M10）
 
-安装 requirements.txt 的 oss2（[上游 MIT 许可证](https://github.com/aliyun/aliyun-oss-python-sdk/blob/master/LICENSE)，兼容 GPL-3.0），升级迁移 0017。生产使用内置 PostgreSQL 的 pg_dump/pg_restore，worker 必须手动启动。配置文件为 MIDSTREAM_HOME/backup.toml，权限必须为 0600；前端“设置”的备份一节和 CLI/worker 共用它。
+安装 requirements.txt 的 oss2（[上游 MIT 许可证](https://github.com/aliyun/aliyun-oss-python-sdk/blob/master/LICENSE)，兼容 GPL-3.0），升级迁移 0017。生产使用内置 PostgreSQL 的 pg_dump/pg_restore；定时备份由 worker 提交和执行（`midstream serve` 会启动 worker）。配置文件为 MIDSTREAM_HOME/backup.toml，权限必须为 0600；前端“设置”的备份一节和 CLI/worker 共用它。
 
 可先在 Web“设置”保存配置，也可手动编辑 MIDSTREAM_HOME/backup.toml 后执行 `chmod 600 /path/to/midstream-home/backup.toml`。示例（endpoint/bucket 必须填写实际值）：
 
@@ -738,9 +761,9 @@ midstream backup verify 1 --actor operator --reason '检查备份目录'
 midstream backup restore 1 --database midstream_restore_20261102
 ```
 
-这里 1 为 backup list 返回的 backup_id，不是 job_id。run/verify 的 job_id 则用 jobs show 查询。restore 为同步操作，恢复后的新库不会自动替换 API/worker 当前连接的库。
+这里 1 为 backup list 返回的 backup_id，不是 job_id。run/verify 的任务记录可用 jobs list/show 查询。restore 为同步操作，恢复后的新库不会自动替换 API/worker 当前连接的库。
 
-run、verify 返回持久任务；在 jobs show 查看结果。pg_dump -Fc 的 stdout 以 8 MiB 分片上传 OSS，不把完整 dump 写入本地临时文件。对象键包含源库名、备份 ID 和 UTC 时间，重试或恢复到另一库后不会复用旧对象键。可选配置文件单独写在同一备份目录下，可能含本地保存的密钥；不上传已导出的数据集。
+run、verify 默认就地执行并输出结果，加 `--queue` 则只提交持久任务，在 jobs show 查看结果。pg_dump -Fc 的 stdout 以 8 MiB 分片上传 OSS，不把完整 dump 写入本地临时文件。对象键包含源库名、备份 ID 和 UTC 时间，重试或恢复到另一库后不会复用旧对象键。可选配置文件单独写在同一备份目录下，可能含本地保存的密钥；不上传已导出的数据集。
 
 新备份完成后才按同一 endpoint/bucket 的 keep 策略清理旧备份，仅删除本系统记录的对象；清理中标 deleting，完成标 deleted。失败不会将残片当作完成备份；合作式取消会终止 pg_dump 并中止分片上传，已完成备份不会回滚。强制杀进程可能在 OSS 留下未完成 multipart，需要 OSS 生命周期/人工清理；本轮没有真实云端故障联调。
 
@@ -750,7 +773,7 @@ verify 流式下载给 pg_restore --list，只检查自定义归档目录可读�
 
 ## 9. 添加来源适配器
 
-适配器需实现 `src/midstream/adapters/base.py` 中的接口：
+适配器需实现 `src/midstream/ingest/adapters/base.py` 中的接口：
 
 | 成员 | 含义 |
 |---|---|
@@ -767,12 +790,12 @@ verify 流式下载给 pg_restore --list，只检查自定义归档目录可读�
 
 `JsonlAdapter` 提供公共 `iter_chunks()` 和 `parse()` 实现：按字节读取约 8 MiB，在完整行边界切开，`JsonlChunk` 包含原始 `data`、起始行号 `line` 和字节偏移 `offset`。`iter_jsonl(chunk)` 保留每行在原文件中的行号与字节偏移，空行照常计数，坏行作为错误产出。其他格式自行实现这三个方法。适配器类及块类型需定义在可导入模块顶层，以便 spawn 进程 pickle；块只携带原始数据，不携带打开的文件或数据库连接。
 
-下面是读取 UTF-8 JSONL 的最小示例。输入使用非空字符串 `id` 和 `text`，可选 `title`。保存为 `src/midstream/adapters/example.py`：
+下面是读取 UTF-8 JSONL 的最小示例。输入使用非空字符串 `id` 和 `text`，可选 `title`。保存为 `src/midstream/ingest/adapters/example.py`：
 
 ```python
 from pathlib import Path
 
-from ..config import JISHUI_RAW
+from ...config import JISHUI_RAW
 from .base import JsonlAdapter, JsonlChunk, ParsedRecord, iter_jsonl
 
 
@@ -811,7 +834,7 @@ class ExampleAdapter(JsonlAdapter):
         return records
 ```
 
-示例中的 `invalid:` 前缀须为错误记录保留，不能与有效 ID 冲突；多文件批次也须保证键不重复。之后在 `src/midstream/adapters/__init__.py` 导入 `ExampleAdapter`，将 `ExampleAdapter()` 加入构建 `ADAPTERS` 的现有实例元组。注册后即可运行：
+示例中的 `invalid:` 前缀须为错误记录保留，不能与有效 ID 冲突；多文件批次也须保证键不重复。之后在 `src/midstream/ingest/adapters/__init__.py` 导入 `ExampleAdapter`，将 `ExampleAdapter()` 加入构建 `ADAPTERS` 的现有实例元组。注册后即可运行：
 
 ```bash
 midstream ingest example --path /path/to/example.jsonl

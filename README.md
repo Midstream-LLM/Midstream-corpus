@@ -53,7 +53,7 @@ midstream stats
 
 二进制、数据库、socket、日志和导出默认都在 `MIDSTREAM_HOME`（`~/.local/share/midstream`）下的 `pg/`、`pgdata/`、`run/`、`log/`、`exports/`。实例只监听权限为 `0700` 的 Unix socket；普通数据库命令会自动启动已初始化的实例。用 `midstream server start|stop|status` 管理，重复运行 `midstream init` 会启动实例并迁移到最新版。输入文件必须通过 `--path` 或 `MIDSTREAM_JISHUI_RAW` 指定。
 
-CLI 常用入口：`midstream --help`、`midstream <命令> --help`。传统入库、查重、试算、导出命令同步执行；token 统计、token 分片和备份命令提交持久任务，需要另开 worker。完整命令流程见[使用指南](docs/user-guide.md#3a-cli任务与常用流程)。OSS 默认不自动备份，见[备份说明](docs/user-guide.md#8d-oss-备份m10)。
+CLI 常用入口：`midstream --help`、`midstream <命令> --help`。入库、批次恢复、重新处理、查重、导出、token 统计/分片和备份等长操作默认在当前进程就地执行，同样写入任务表、留下进度和审计；加 `--queue` 只提交到任务队列、不等待。`midstream operations` 列出所有可执行操作及参数 JSON Schema，`midstream run <操作> --params '<json>' [--queue]` 按名称执行，供脚本和 LLM 使用。完整命令流程见[使用指南](docs/user-guide.md#3a-cli任务与常用流程)。OSS 默认不自动备份，见[备份说明](docs/user-guide.md#8d-oss-备份m10)。
 
 也可使用已建好的外部 PostgreSQL（需支持 LZ4）；设置 `MIDSTREAM_DSN` 后 CLI 不会启动私有实例，迁移另设指向同一库的 `MIDSTREAM_ALEMBIC_URL`：
 
@@ -72,21 +72,16 @@ midstream stats
 source .venv/bin/activate
 npm --prefix web ci
 npm --prefix web run build
-python -m midstream.api --host 127.0.0.1 --port 8765
+midstream serve --host 127.0.0.1 --port 8765
 ```
 
-API 同时托管 `web/dist`，打开 `http://127.0.0.1:8765`；接口文档为 `/api/docs`。另开终端，加载**相同**的虚拟环境、`MIDSTREAM_HOME`、数据库及导出目录配置：
+`midstream serve` 确保内置 PostgreSQL 运行，以子进程启动 worker，并在前台运行 API；Ctrl-C 退出时一并结束 worker。API 同时托管 `web/dist`，打开 `http://127.0.0.1:8765`；接口文档为 `/api/docs`。
 
-```bash
-source .venv/bin/activate
-midstream worker
-```
-
-worker 必须手动启动，同一时间只执行一个任务。没有 worker 时任务保持排队，关闭网页不影响任务。API/worker 均为前台进程，默认不安装系统服务。远程访问用 SSH 隧道；开发时用 Vite 热更新，完整步骤见 [Web 启动与操作指南](docs/webapp.md#启动后端与-web)。
+worker 同一时间只执行一个任务，同库只能有一个 worker。`--no-worker` 只运行 API（与 `python -m midstream.api` 相同），此时需另开终端用相同的虚拟环境和配置运行 `midstream worker`，否则任务保持排队。默认不安装系统服务，需要常驻时可用 systemd 用户服务，示例见 [Web 指南](docs/webapp.md#常驻运行systemd-用户服务)。远程访问用 SSH 隧道；开发时用 Vite 热更新，完整步骤见 [Web 启动与操作指南](docs/webapp.md#启动后端与-web)。
 
 ## 查重
 
-入库发布后自动依次运行文档级和段落级查重，也可以单独运行。两级结果各自保存、互不覆盖：
+入库发布成功后，文档级和段落级查重作为后续任务依次运行（就地执行时在同一进程接着跑完，worker 执行时排入队列），也可以单独运行。两级结果各自保存、互不覆盖：
 
 ```bash
 midstream dedup          # 文档级：整篇相似度，连成重复簇
@@ -109,21 +104,19 @@ midstream dedup --full   # 忽略缓存，强制完整重算文档级查重
 
 | 路径 | 职责 |
 |---|---|
-| `src/midstream/cli.py` | 命令行入口 |
+| `src/midstream/cli.py`、`api/` | 命令行入口；HTTP API（按领域分路由，`python -m midstream.api` 只运行 API） |
+| `src/midstream/operations.py`、`jobs.py` | 长操作注册表；任务队列、worker 与就地执行共用的执行路径 |
 | `src/midstream/config.py` | 环境变量配置 |
-| `src/midstream/server.py` | 私有 PostgreSQL 初始化、调优和实例管理 |
-| `src/midstream/adapters/` | 来源适配器和解析记录接口 |
-| `src/midstream/ingest.py` | 批次登记、暂存、验证和发布 |
-| `src/midstream/batches.py`、`management.py` | 批次恢复、放弃与人工审核审计 |
-| `src/midstream/llm/` | LLM 用途服务、统一接入配置和协议请求执行 |
-| `src/midstream/clean.py`、`eras.py` | 技术清洗、质量判定和朝代年份映射 |
-| `src/midstream/textcodec.py` | 正文哈希与 zstd 压缩 |
-| `src/midstream/query.py` | 元数据查询、正文读取和统计 |
-| `src/midstream/reprocess.py`、`rules.py` | 重新处理流程和规则注册 |
-| `src/midstream/dedup.py` | 指纹缓存和查重快照 |
+| `src/midstream/store/` | 正文哈希与 zstd 压缩（`textcodec`），只读第二连接（`reader`） |
+| `src/midstream/corpus/` | 元数据查询与统计（`query`）、人工审核审计（`management`）、追加版本（`versions`）、朝代年份映射（`eras`） |
+| `src/midstream/ingest/` | 批次登记、暂存、验证和发布（`pipeline`），批次恢复/放弃（`batches`），导入识别与登记（`importing`、`detection`、`sampling`），来源适配器（`adapters/`） |
+| `src/midstream/curation/` | 技术清洗与质量判定（`clean`）、重新处理流程和规则注册（`reprocess`、`rules`）、繁转简（`variants`） |
+| `src/midstream/dedup/` | 指纹缓存和查重快照（`engine`），重复簇浏览与否决（`duplicates`） |
 | `rust/` | PyO3 查重扩展：归一化、OPH、LSH、Jaccard 验证和 Winnowing 片段匹配 |
-| `src/midstream/export.py`、`exporters.py` | 选用试算、固定成员、划分、多格式分片与产物校验 |
-| `src/midstream/tokenizing.py`、`token_stats.py` | 独立分词器接口、正文计数缓存、发布统计与试算估计 |
+| `src/midstream/datasets/` | 配方、候选与选用、分组划分、试算、固定发布、配方草稿和段落裁剪 |
+| `src/midstream/delivery/` | 文本格式（`formats`）、样本切分（`samples`）、分片导出与校验（`export`）、token 分片（`tokens`）、分词器接口与 token 统计（`tokenizing`、`token_stats`） |
+| `src/midstream/ops/` | 私有 PostgreSQL 管理（`server`）、OSS 备份与配置（`backup`、`backup_settings`） |
+| `src/midstream/llm/` | LLM 用途服务、统一接入配置和协议请求执行 |
 | `recipes/` | 导出配方 |
 | `migrations/` | Alembic 迁移，DDL 在 `versions/*.sql` |
 | `tests/` | 单元测试和数据库端到端测试 |

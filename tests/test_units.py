@@ -5,14 +5,16 @@ from itertools import combinations
 
 import midstream_dedup
 
-from midstream import clean, eras, textcodec
-from midstream.adapters import ADAPTERS
-from midstream.adapters.ccc import _title
-from midstream.ingest import _cleaned_metadata, _prepare
-from midstream.adapters.base import ParsedRecord
-from midstream.query import Filters, where_clause
-from midstream.rules import RULES
-from midstream.server import tuned_settings
+from midstream.corpus import clean
+from midstream.corpus import eras
+from midstream.store import textcodec
+from midstream.ingest.adapters import ADAPTERS
+from midstream.ingest.adapters.ccc import _title
+from midstream.ingest.pipeline import _cleaned_metadata, _prepare
+from midstream.ingest.adapters.base import ParsedRecord
+from midstream.corpus.query import Filters, where_clause
+from midstream.curation.rules import RULES
+from midstream.ops.server import tuned_settings
 
 
 def test_tuned_settings():
@@ -366,3 +368,20 @@ def test_dedup_reuses_positive_and_negative_scores():
     # 换版本 ID 后仍可按比较正文哈希复用；阈值变化重新判定，不继承旧簇。
     assert run(0.8, cold[4], 100)[:4] == (1, 2, 3, 0)
     assert run(1.0, cold[4], 200)[:4] == (0, 0, 3, 0)
+
+
+def test_operation_registry_validates_params():
+    import pytest
+    from midstream import jobs, operations
+    from midstream.corpus.management import ManagementError
+
+    listed = {item['name']: item for item in operations.describe()}
+    assert {'ingest', 'reprocess', 'batch_publish', 'dataset_export', 'backup'} <= set(listed)
+    assert listed['ingest']['params']['required'] == ['source']
+    # 校验发生在写库之前，非法参数不需要数据库。
+    for kind, params in (('arbitrary', {}), ('batch_resume', {'batch_id': '3'}),
+                         ('batch_resume', {'batch_id': 3, 'extra': 1}), ('dedup', {'full': 1}),
+                         ('ingest', {'source': 'missing'}), ('tokenize', {'release_id': 1, 'tokenizer': ' '})):
+        with pytest.raises(ManagementError) as error:
+            jobs.submit(None, kind, params, 'tester', '校验')
+        assert error.value.code == 'invalid_input'

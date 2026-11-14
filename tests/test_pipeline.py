@@ -1,5 +1,6 @@
 """端到端测试，需要 MIDSTREAM_TEST_DSN 指向一个专用空库。"""
 
+import dataclasses
 import json
 import multiprocessing
 import os
@@ -15,9 +16,21 @@ from alembic.migration import MigrationContext
 from alembic.operations import Operations
 from sqlalchemy import create_engine
 
-from midstream import batches, dedup, export, ingest, jobs, management, query, reprocess
-from midstream.adapters import ADAPTERS
-from midstream.rules import RULES
+from midstream.ingest import batches, pipeline as ingest
+from midstream.dedup import engine as dedup
+from midstream import jobs, operations
+from midstream.corpus import management, query
+from midstream.curation import reprocess
+from midstream.ingest.adapters import ADAPTERS
+from midstream.curation.rules import RULES
+from midstream.datasets import plan as dataset_plan
+from midstream.datasets.plan import _digest, plan_release
+from midstream.datasets.recipe import ExportError, Recipe, TrainingLeak
+from midstream.datasets.release import create_release, get_release, record_training, release_stats, write_release
+from midstream.delivery.export import verify_release, write_parquet
+from midstream.datasets.selection import Candidate, _select
+from midstream.datasets.split import _group_keys
+from midstream.delivery.tokens import write_tokens
 
 DSN = os.environ.get("MIDSTREAM_TEST_DSN")
 pytestmark = pytest.mark.skipif(not DSN, reason="未设置 MIDSTREAM_TEST_DSN")
@@ -64,13 +77,21 @@ def conn():
         yield connection
 
 
+def ingest_inline(conn, source, paths):
+    """与 CLI 默认一致的就地入库；查重后续任务在同一进程跑完，结果按任务类型并入。"""
+    from types import SimpleNamespace
+    job = jobs.run_inline(conn, 'ingest', {'source': source, 'paths': [str(path) for path in paths]}, 'test', '入库')
+    return SimpleNamespace(**job['result'], **{child['kind']: child['result'] for child in job['follow_ups']})
+
+
 def write(path, lines):
     path.write_text("\n".join(lines) + "\n", encoding="utf-8")
     return path
 
 
 def test_backup_config_snapshot_revision_prevents_lost_update(tmp_path,monkeypatch):
-    from midstream import backup_settings,config
+    from midstream.ops import backup_settings
+    from midstream import config
     from midstream.llm.settings import SettingsError
     monkeypatch.setattr(config,'HOME',tmp_path/'snapshot-home')
     for env in backup_settings.ENV.values():
@@ -127,7 +148,8 @@ class MemoryOss:
 
 
 def backup_fixture(monkeypatch,tmp_path,**changes):
-    from midstream import backup,backup_settings,config
+    from midstream.ops import backup, backup_settings
+    from midstream import config
     from psycopg.conninfo import conninfo_to_dict,make_conninfo
     monkeypatch.setattr(config,'HOME',tmp_path/'backup-home')
     for env in backup_settings.ENV.values():
@@ -137,7 +159,10 @@ def backup_fixture(monkeypatch,tmp_path,**changes):
     backup_settings.save(values,{'access_key_id':'test-id','access_key_secret':'test-secret'},[],'missing')
     store=MemoryOss()
     monkeypatch.setattr(backup,'_bucket',lambda *args,**kwargs:store)
+    pg_bin=os.environ.get('MIDSTREAM_TEST_PG_BIN')  # 设了就用本机的 pg_dump/pg_restore，否则用测试容器里的
     def command(tool,dsn=None,*options):
+        if pg_bin:
+            return [os.path.join(pg_bin,tool)]+(['--dbname',dsn] if dsn else [])+list(options),dict(os.environ)
         result=['docker','exec','-i','midstream-test-pg',tool]
         if dsn:
             db=conninfo_to_dict(dsn)['dbname']
@@ -150,11 +175,12 @@ def backup_fixture(monkeypatch,tmp_path,**changes):
 def test_backup_settings_redaction_revision_and_default_schedule(conn,tmp_path,monkeypatch):
     import stat
     from fastapi.testclient import TestClient
-    from midstream import api,backup,backup_settings,config
+    from midstream import api, config
+    from midstream.ops import backup, backup_settings
     monkeypatch.setattr(config,'HOME',tmp_path/'settings')
     for env in backup_settings.ENV.values():
         monkeypatch.delenv(env,raising=False)
-    backup.schedule(conn)
+    backup.schedule(conn,jobs.submit)
     assert conn.execute('SELECT count(*) FROM job').fetchone()[0]==0
     app=api.create_app()
     with TestClient(app) as client:
@@ -171,12 +197,12 @@ def test_backup_settings_redaction_revision_and_default_schedule(conn,tmp_path,m
         assert all(key not in visible.text for key in ('local-id','local-secret','environment-secret'))
         assert backup_settings.credentials(backup_settings.read()[1])['access_key_secret']=='environment-secret'
         assert client.post('/api/v1/backup/settings',json=payload,headers=headers).status_code==409
-        backup.schedule(conn)
+        backup.schedule(conn,jobs.submit)
         assert conn.execute('SELECT count(*) FROM job').fetchone()[0]==0
         current=visible.json()
         daily={**payload,'config':{**current['config'],'schedule':'daily'},'keys':{},'revision':current['revision']}
         assert client.post('/api/v1/backup/settings',json=daily,headers=headers).status_code==200
-        backup.schedule(conn);backup.schedule(conn)
+        backup.schedule(conn,jobs.submit);backup.schedule(conn,jobs.submit)
         assert conn.execute("SELECT count(*) FROM job WHERE kind='backup'").fetchone()[0]==1
 
 
@@ -184,15 +210,17 @@ def test_backup_stream_verify_restore_new_database_and_retention(conn,tmp_path,m
     import uuid
     from fastapi.testclient import TestClient
     from psycopg.conninfo import make_conninfo
-    from midstream import api,backup,backup_settings
+    from midstream import api
+    from midstream.api import deps
+    from midstream.ops import backup, backup_settings
     from midstream.llm import config as llm_config
     store=backup_fixture(monkeypatch,tmp_path,keep=1,include_config=True)
     fake_config=tmp_path/'llm.toml';fake_config.write_text('[services]\ndefault = "synthetic"\n')
     monkeypatch.setattr(llm_config,'config_path',lambda:fake_config)
     seed_metadata(conn,20)
-    release=export.create_release(conn,export.Recipe.load({'name':'backup-source','seed':'s','splits':{'train':1}}))
-    app=api.create_app();app.dependency_overrides[api.connection]=lambda:conn
-    app.dependency_overrides[api.write_connection]=lambda:conn
+    release=create_release(conn,Recipe.load({'name':'backup-source','seed':'s','splits':{'train':1}}))
+    app=api.create_app();app.dependency_overrides[deps.connection]=lambda:conn
+    app.dependency_overrides[deps.write_connection]=lambda:conn
     headers={'X-Midstream-Action':'1'};operation={'actor':'test','reason':'隔离备份'}
     with TestClient(app) as client,psycopg.connect(DSN,autocommit=True) as control:
         assert client.post('/api/v1/backup/test',json={},headers=headers).json()['connected']
@@ -215,7 +243,9 @@ def test_backup_stream_verify_restore_new_database_and_retention(conn,tmp_path,m
             backup.restore(conn,backup_id,'midstream')
         with pytest.raises(psycopg.errors.DuplicateDatabase):
             backup.restore(conn,backup_id,new)
-        assert export.verify_release(conn,release)
+        with psycopg.connect(make_conninfo(DSN,dbname='postgres'),autocommit=True) as admin:
+            admin.execute(f'DROP DATABASE "{new}"')
+        assert verify_release(conn,release)
         old_key=result['result']['object_key']
         second=backup.run(conn,'test','保留策略')
         assert old_key not in store.objects
@@ -224,7 +254,7 @@ def test_backup_stream_verify_restore_new_database_and_retention(conn,tmp_path,m
 
 
 def test_backup_failure_aborts_multipart_and_recovery(conn,tmp_path,monkeypatch):
-    from midstream import backup
+    from midstream.ops import backup
     store=backup_fixture(monkeypatch,tmp_path)
     seed_metadata(conn,5)
     store.fail=True
@@ -245,37 +275,39 @@ def test_backup_failure_aborts_multipart_and_recovery(conn,tmp_path,monkeypatch)
 
 
 def test_dedup_override_survives_recompute_and_export_groups(conn,tmp_path):
-    from midstream import duplicates
+    from midstream.dedup import duplicates
     text='天地玄黄宇宙洪荒日月盈昃。'*20
     path=write(tmp_path/'overrides.jsonl',[row(str(i),text,book=f'独立书{i}') for i in range(3)])
-    ingest.ingest(conn,ADAPTERS['ccc_corpus'],[path])
-    old=export.create_release(conn,export.Recipe.load({'name':'before-denial','seed':'s','splits':{'train':1},'selection':{'dedup':'document'}}))
+    ingest_inline(conn, 'ccc_corpus', [path])
+    old=create_release(conn,Recipe.load({'name':'before-denial','seed':'s','splits':{'train':1},'selection':{'dedup':'document'}}))
     duplicates.override(conn,1,2,None,'test','不是同一文献')
     assert not dedup.document_snapshot_current(conn)
-    with pytest.raises(export.ExportError,match='查重结果'):
-        export.plan_release(conn,export.Recipe.load({'name':'stale','seed':'s','splits':{'train':1}}))
+    with pytest.raises(ExportError,match='查重结果'):
+        plan_release(conn,Recipe.load({'name':'stale','seed':'s','splits':{'train':1}}))
     for full in (False,True):
         dedup.dedup(conn,full=full)
-        groups=export._group_keys(conn,[1,2,3])
+        groups=_group_keys(conn,[1,2,3])
         assert groups[1]!=groups[2] and groups[3]==groups[1]
-    plan=export.plan_release(conn,export.Recipe.load({'name':'after-denial','seed':'s','splits':{'train':.8,'val':.1,'test':.1},
+    plan=plan_release(conn,Recipe.load({'name':'after-denial','seed':'s','splits':{'train':.8,'val':.1,'test':.1},
         'selection':{'dedup':'document'},'reserved':{'val':{'doc_ids':[1]},'test':{'doc_ids':[2]}}}))
     assert plan.report['documents']==2
-    frozen=export.write_release(conn,plan)
+    frozen=write_release(conn,plan)
     reprocess.reprocess(conn,reprocess.Rule('override-main-update',None,lambda d:reprocess.Change(text=d['text']+'新')))
     dedup.dedup(conn)
-    assert export._group_keys(conn,[1,2,3])[1]!=export._group_keys(conn,[1,2,3])[2]
+    assert _group_keys(conn,[1,2,3])[1]!=_group_keys(conn,[1,2,3])[2]
     assert len(duplicates.overrides(conn))==1
-    assert export.verify_release(conn,old) and export.verify_release(conn,frozen)
+    assert verify_release(conn,old) and verify_release(conn,frozen)
 
 
 def test_dedup_member_override_api_and_audit(conn,tmp_path):
     from fastapi.testclient import TestClient
-    from midstream import api,duplicates
+    from midstream import api
+    from midstream.api import deps
+    from midstream.dedup import duplicates
     path=write(tmp_path/'member-override.jsonl',[row(str(i),'甲乙丙丁天地玄黄。'*20,book=f'书{i}') for i in range(3)])
-    ingest.ingest(conn,ADAPTERS['ccc_corpus'],[path])
-    app=api.create_app();app.dependency_overrides[api.connection]=lambda:conn
-    app.dependency_overrides[api.write_connection]=lambda:conn
+    ingest_inline(conn, 'ccc_corpus', [path])
+    app=api.create_app();app.dependency_overrides[deps.connection]=lambda:conn
+    app.dependency_overrides[deps.write_connection]=lambda:conn
     with TestClient(app) as client:
         groups=client.get('/api/v1/duplicates/clusters?kind=exact&min_size=2&max_size=3&source=ccc_corpus').json()
         cluster=groups['items'][0]['cluster_id']
@@ -290,18 +322,18 @@ def test_dedup_member_override_api_and_audit(conn,tmp_path):
         audit=management.events(conn,doc_id=1)
         assert audit[0]['action']=='dedup_override' and audit[0]['actor']=='reviewer'
         dedup.dedup(conn)
-        groups=export._group_keys(conn,[1,2,3])
+        groups=_group_keys(conn,[1,2,3])
         assert groups[1]!=groups[2]==groups[3]
 
 
 def test_duplicate_highlights_use_raw_unicode_offsets(conn,tmp_path):
     import midstream_dedup
-    from midstream import duplicates
+    from midstream.dedup import duplicates
     rng=random.Random(903)
     shared=''.join(rng.choices('天地玄黄宇宙洪荒日月盈昃辰宿列张',k=120))
     texts=['😀'+'甲'*150+'，'.join(shared)+'丙'*150,'𠀋'+'乙'*150+shared+'丁'*150]
     path=write(tmp_path/'raw-offsets.jsonl',[row(str(i),text,book=f'原文书{i}') for i,text in enumerate(texts)])
-    ingest.ingest(conn,ADAPTERS['ccc_corpus'],[path])
+    ingest_inline(conn, 'ccc_corpus', [path])
     before=conn.execute('SELECT count(*) FROM document_version').fetchone()[0]
     ranges=[duplicates.document_spans(conn,i+1)['items'] for i in range(2)]
     assert all(ranges)
@@ -312,25 +344,28 @@ def test_duplicate_highlights_use_raw_unicode_offsets(conn,tmp_path):
 
 def test_span_cut_release_exports_tokens_and_frozen_proofs(conn,tmp_path,monkeypatch):
     import midstream_dedup
-    from midstream import config,exporters,token_stats,tokenizing,span_cuts
+    from midstream import config
+    from midstream.delivery import token_stats, tokenizing
+    from midstream.delivery import export as exporters
+    from midstream.datasets import cuts as span_cuts
     monkeypatch.setattr(config,'EXPORT_ROOT',tmp_path/'outputs')
     rng=random.Random(809)
     shared=''.join(rng.choices('天地玄黄宇宙洪荒日月盈昃辰宿列张寒来暑往秋收冬藏',k=120))
     left='甲'*150+'，'.join(shared)+'丙'*150
     right='乙'*150+shared+'丁'*150
     path=write(tmp_path/'cuts.jsonl',[row('left',left,book='甲书'),row('right',right,book='乙书')])
-    ingest.ingest(conn,ADAPTERS['ccc_corpus'],[path])
+    ingest_inline(conn, 'ccc_corpus', [path])
     preferred=conn.execute("INSERT INTO source(name) VALUES('preferred') RETURNING source_id").fetchone()[0]
     conn.execute("UPDATE document SET source_id=%s WHERE source_key='right'",(preferred,));conn.commit()
     raw={'name':'uncut','seed':'s','splits':{'train':1}}
-    old=export.create_release(conn,export.Recipe.load(raw))
+    old=create_release(conn,Recipe.load(raw))
     tokenizer=tokenizing.load(synthetic_tokenizer(tmp_path,chars=True))
     token_stats.compute(conn,old,tokenizer)
     cached=conn.execute('SELECT count(*) FROM text_token_count').fetchone()[0]
-    recipe=export.Recipe.load({**raw,'name':'cut','selection':{'dedup':'span','source_priority':['preferred'],'min_cut_chars':64}})
-    plan=export.plan_release(conn,recipe)
+    recipe=Recipe.load({**raw,'name':'cut','selection':{'dedup':'span','source_priority':['preferred'],'min_cut_chars':64}})
+    plan=plan_release(conn,recipe)
     assert plan.cuts and plan.report['documents']==2
-    release=export.write_release(conn,plan)
+    release=write_release(conn,plan)
     output=exporters.export_release(conn,release,exporters.Options(format='jsonl'))
     rows=read_export(output)
     normalized=[midstream_dedup.span_normalize(item['text'])[0] for item in rows]
@@ -340,18 +375,18 @@ def test_span_cut_release_exports_tokens_and_frozen_proofs(conn,tmp_path,monkeyp
     assert exact['total']==sum(tokenizer.count_batch([item['text'] for item in rows]))
     assert exact['cache']['computed_cut_documents']==1
     assert conn.execute('SELECT count(*) FROM text_token_count').fetchone()[0]==cached
-    token_output=exporters.write_tokens(conn,release,tokenizer,shard_tokens=100)
+    token_output=write_tokens(conn,release,tokenizer,shard_tokens=100)
     assert token_output['total_tokens']==exact['total']
     conn.execute('TRUNCATE dup_span');conn.commit()
     repeated=read_export(exporters.export_release(conn,release,exporters.Options(format='pkl')))
     assert repeated==rows
-    assert export.verify_release(conn,release,hash_files=True) and export.verify_release(conn,old)
+    assert verify_release(conn,release,hash_files=True) and verify_release(conn,old)
     assert span_cuts.load(conn,release)==plan.cuts
 
 
 def test_span_cut_transitive_witness_survives_short_document_drop():
-    from midstream import span_cuts
-    items=[export.Candidate(i,i,bytes(32),250,'s','ok',None,None,None) for i in (1,2,3)]
+    from midstream.datasets import cuts as span_cuts
+    items=[Candidate(i,i,bytes(32),250,'s','ok',None,None,None) for i in (1,2,3)]
     links={2:[(1,0,0,200)],3:[(2,0,0,200)]}
     kept,cuts=span_cuts.assign(items,links,lambda vid:range(250),64,{2:100})
     assert [item.version_id for item in kept]==[1,3]
@@ -362,21 +397,21 @@ def test_span_cut_transitive_witness_survives_short_document_drop():
 
 
 def test_span_cuts_simplified_offsets_and_missing_snapshot(conn,tmp_path):
-    from midstream import span_cuts
+    from midstream.datasets import cuts as span_cuts
     rng=random.Random(810)
     shared=''.join(rng.choices('齊歡體國學書雲風龍門馬',k=120))
     path=write(tmp_path/'variant-cuts.jsonl',[row('a','甲'*150+'，'.join(shared)+'丙'*150,book='甲书'),
                                           row('b','乙'*150+shared+'丁'*150,book='乙书')])
-    ingest.ingest(conn,ADAPTERS['ccc_corpus'],[path])
+    ingest_inline(conn, 'ccc_corpus', [path])
     reprocess.reprocess(conn,RULES['t2s-v1'],dry_run=False)
-    recipe=export.Recipe.load({'name':'variant-cuts','seed':'s','splits':{'train':1},'variant':'simplified','selection':{'dedup':'span'}})
-    plan=export.plan_release(conn,recipe)
+    recipe=Recipe.load({'name':'variant-cuts','seed':'s','splits':{'train':1},'variant':'simplified','selection':{'dedup':'span'}})
+    plan=plan_release(conn,recipe)
     assert plan.cuts and plan.report['documents']==2
-    release=export.write_release(conn,plan)
-    assert export.verify_release(conn,release)
+    release=write_release(conn,plan)
+    assert verify_release(conn,release)
     conn.execute("DELETE FROM dedup_snapshot WHERE level='paragraph'");conn.commit()
-    with pytest.raises(export.ExportError,match='段落查重'):
-        export.plan_release(conn,recipe)
+    with pytest.raises(ExportError,match='段落查重'):
+        plan_release(conn,recipe)
     assert span_cuts.load(conn,release)==plan.cuts
 
 
@@ -384,8 +419,8 @@ def test_span_cuts_simplified_offsets_and_missing_snapshot(conn,tmp_path):
 def test_cut_ten_thousand_groups():
     import resource,sys
     from time import perf_counter
-    from midstream import span_cuts
-    items=[export.Candidate(i,i,bytes(32),256,'s','ok',None,None,None) for i in range(1,20001)]
+    from midstream.datasets import cuts as span_cuts
+    items=[Candidate(i,i,bytes(32),256,'s','ok',None,None,None) for i in range(1,20001)]
     links={i:[(i-1,0,0,128)] for i in range(2,20001,2)}
     started=perf_counter()
     kept,cuts=span_cuts.assign(items,links,lambda vid:range(256),64,{})
@@ -396,14 +431,14 @@ def test_cut_ten_thousand_groups():
 
 
 def test_simplified_variant_preserves_main_and_freezes_release(conn,tmp_path):
-    from midstream import variants
+    from midstream.corpus import variants
     mapping,_,equal_length=variants.table()
     assert equal_length and all(len(chr(key))==len(value)==1 for key,value in mapping.items())
     text='齊高祖　歡喜。\n乾坤𠀋😀'
     path=write(tmp_path/'t2s.jsonl',[row('t2s',text)])
     ingest.ingest(conn,ADAPTERS['ccc_corpus'],[path])
     before=conn.execute('SELECT version_id FROM document_version WHERE is_current').fetchone()[0]
-    old=export.create_release(conn,export.Recipe.load({'name':'main-old','seed':'s','splits':{'train':1}}))
+    old=create_release(conn,Recipe.load({'name':'main-old','seed':'s','splits':{'train':1}}))
     assert reprocess.reprocess(conn,RULES['t2s-v1'])['changed']==1
     assert conn.execute('SELECT count(*) FROM document_version WHERE variant IS NOT NULL').fetchone()[0]==0
     reprocess.reprocess(conn,RULES['t2s-v1'],dry_run=False)
@@ -413,10 +448,10 @@ def test_simplified_variant_preserves_main_and_freezes_release(conn,tmp_path):
     converted=query.get_text(conn,1,derived[1])['text']
     assert converted=='齐高祖　欢喜。\n干坤𠀋😀'
     assert reprocess.reprocess(conn,RULES['t2s-v1'],dry_run=False)['changed']==0
-    recipe=export.Recipe.load({'name':'simplified','seed':'s','splits':{'train':1},'variant':'simplified'})
-    release=export.create_release(conn,recipe)
+    recipe=Recipe.load({'name':'simplified','seed':'s','splits':{'train':1},'variant':'simplified'})
+    release=create_release(conn,recipe)
     assert conn.execute('SELECT version_id FROM dataset_member WHERE release_id=%s',(release,)).fetchone()[0]==derived[0]
-    assert export.verify_release(conn,release) and export.verify_release(conn,old)
+    assert verify_release(conn,release) and verify_release(conn,old)
     info=conn.execute("SELECT config FROM processing_run WHERE rule_version='t2s-v1' AND config->>'changed'='1'").fetchone()[0]
     assert info['table_sha256']==variants.info()['table_sha256'] and info['length_preserving']
 
@@ -425,28 +460,28 @@ def test_variant_missing_stale_and_old_release_unchanged(conn,tmp_path):
     path=write(tmp_path/'stale-variant.jsonl',[row('v','繁體字')])
     ingest.ingest(conn,ADAPTERS['ccc_corpus'],[path])
     raw={'name':'variant-stale','seed':'s','splits':{'train':1},'variant':'simplified'}
-    with pytest.raises(export.ExportError,match='缺少'):
-        export.plan_release(conn,export.Recipe.load(raw))
+    with pytest.raises(ExportError,match='缺少'):
+        plan_release(conn,Recipe.load(raw))
     reprocess.reprocess(conn,RULES['t2s-v1'],dry_run=False)
-    release=export.create_release(conn,export.Recipe.load(raw))
+    release=create_release(conn,Recipe.load(raw))
     old=conn.execute('SELECT version_id FROM dataset_member WHERE release_id=%s',(release,)).fetchone()[0]
     reprocess.reprocess(conn,reprocess.Rule('main-edit',None,lambda d:reprocess.Change(text=d['text']+'新')))
-    with pytest.raises(export.ExportError,match='已过期'):
-        export.plan_release(conn,export.Recipe.load({**raw,'name':'new'}))
+    with pytest.raises(ExportError,match='已过期'):
+        plan_release(conn,Recipe.load({**raw,'name':'new'}))
     assert query.metadata(conn,1,3)['variant_stale']
     reprocess.reprocess(conn,RULES['t2s-v1'],dry_run=False)
-    assert export.plan_release(conn,export.Recipe.load({**raw,'name':'new'})).members[0][1]!=old
-    assert export.verify_release(conn,release)
+    assert plan_release(conn,Recipe.load({**raw,'name':'new'})).members[0][1]!=old
+    assert verify_release(conn,release)
     assert conn.execute('SELECT version_id FROM dataset_member WHERE release_id=%s',(release,)).fetchone()[0]==old
 
 
 def test_variant_document_dedup_maps_main_clusters(conn,tmp_path):
     text='齊高祖，歡喜天地。'*30
     path=write(tmp_path/'variant-dedup.jsonl',[row('a',text,book='甲书'),row('b',text,book='乙书')])
-    ingest.ingest(conn,ADAPTERS['ccc_corpus'],[path])
+    ingest_inline(conn, 'ccc_corpus', [path])
     reprocess.reprocess(conn,RULES['t2s-v1'],dry_run=False)
     assert dedup.document_snapshot_current(conn)
-    plan=export.plan_release(conn,export.Recipe.load({'name':'dedup-simplified','seed':'s','splits':{'train':1},
+    plan=plan_release(conn,Recipe.load({'name':'dedup-simplified','seed':'s','splits':{'train':1},
         'variant':'simplified','selection':{'dedup':'document'}}))
     assert plan.report['documents']==1 and plan.report['dropped_documents']==1
     version=conn.execute('SELECT variant FROM document_version WHERE version_id=%s',(plan.members[0][1],)).fetchone()[0]
@@ -454,7 +489,7 @@ def test_variant_document_dedup_maps_main_clusters(conn,tmp_path):
 
 
 def test_import_uniform_samples(tmp_path):
-    from midstream import importing
+    from midstream.ingest import importing
     path=write(tmp_path/'uniform.jsonl',[row(str(i),'甲'+str(i),chapter='样本'+str(i)) for i in range(200)])
     result=importing.preview('ccc_corpus',[str(path)])
     keys={int(item['source_key']) for item in result['samples']}
@@ -474,7 +509,7 @@ def test_import_uniform_samples(tmp_path):
 
 def test_batch_two_layer_preview_matches_direct_publish(conn,tmp_path,monkeypatch):
     from copy import copy
-    from midstream import importing
+    from midstream.ingest import importing
     first=write(tmp_path/'baseline.jsonl',[row('same','甲文'),row('changed','乙文')])
     ingest.ingest(conn,ADAPTERS['ccc_corpus'],[first])
     incoming=write(tmp_path/'incoming.jsonl',[row('same','甲文'),row('changed','乙文改'),row('new','甲\r\n新文'),'{坏行'])
@@ -531,15 +566,17 @@ def test_staged_interruption_resume_and_abandon(conn,tmp_path,monkeypatch):
 
 def test_dataset_workbench_actions(conn, tmp_path, monkeypatch):
     from fastapi.testclient import TestClient
-    from midstream import api, config, exporters
+    from midstream import api, config
+    from midstream.api import deps
+    from midstream.delivery import export as exporters
     seed_metadata(conn, 20)
     monkeypatch.setattr(config, 'EXPORT_ROOT', tmp_path)
-    release = export.create_release(conn, export.Recipe.load({'name': 'workbench', 'seed': 's', 'splits': {'train': 1}}))
+    release = create_release(conn, Recipe.load({'name': 'workbench', 'seed': 's', 'splits': {'train': 1}}))
     result = exporters.export_release(conn, release)
-    before = export.get_release(conn, release)
+    before = get_release(conn, release)
     app = api.create_app()
-    app.dependency_overrides[api.connection] = lambda: conn
-    app.dependency_overrides[api.write_connection] = lambda: conn
+    app.dependency_overrides[deps.connection] = lambda: conn
+    app.dependency_overrides[deps.write_connection] = lambda: conn
     with TestClient(app) as client, psycopg.connect(DSN, autocommit=True) as control:
         payload = {'actor': 'tester', 'reason': '工作台验收', 'hash_files': True}
         assert client.post(f'/api/v1/datasets/{release}/verify', json=payload).status_code == 403
@@ -552,9 +589,9 @@ def test_dataset_workbench_actions(conn, tmp_path, monkeypatch):
         assert saved.status_code == 200
         registered = client.get(f'/api/v1/datasets/{release}/training').json()
         assert json.loads(registered[0]['note']) == {'actor': 'tester', 'reason': '训练依据'}
-        with pytest.raises(export.TrainingLeak):
-            export.plan_release(conn, export.Recipe.load({'name': 'leak', 'seed': 's', 'splits': {'val': 1}}))
-        assert export.get_release(conn, release) == before
+        with pytest.raises(TrainingLeak):
+            plan_release(conn, Recipe.load({'name': 'leak', 'seed': 's', 'splits': {'val': 1}}))
+        assert get_release(conn, release) == before
 
 
 def synthetic_tokenizer(tmp_path, *, chars=False, wide=False):
@@ -586,14 +623,16 @@ def token_release(conn, tmp_path, texts):
     other = conn.execute("INSERT INTO source (name) VALUES ('tokens-other') RETURNING source_id").fetchone()[0]
     conn.execute('UPDATE document SET source_id=%s WHERE source_key=%s', (other, str(len(texts)-1)))
     conn.commit()
-    recipe = export.Recipe.load({'name': 'token-release', 'seed': 's', 'splits': {'train': .8, 'val': .1, 'test': .1}})
-    return export.create_release(conn, recipe), recipe
+    recipe = Recipe.load({'name': 'token-release', 'seed': 's', 'splits': {'train': .8, 'val': .1, 'test': .1}})
+    return create_release(conn, recipe), recipe
 
 
 def test_token_stats_job_exact_cache_and_frozen_release(conn, tmp_path, monkeypatch):
     from fastapi.testclient import TestClient
     from tokenizers import Tokenizer as Backend
-    from midstream import api, token_stats, tokenizing
+    from midstream import api
+    from midstream.api import deps
+    from midstream.delivery import token_stats, tokenizing
     texts = ['甲 乙 甲', '乙', '甲 乙 甲']
     release, _ = token_release(conn, tmp_path, texts)
     path = synthetic_tokenizer(tmp_path)
@@ -603,8 +642,8 @@ def test_token_stats_job_exact_cache_and_frozen_release(conn, tmp_path, monkeypa
     direct = [len(backend.encode(text, add_special_tokens=False).ids) for text in texts]
     assert direct == [3, 1, 3]
     app = api.create_app()
-    app.dependency_overrides[api.connection] = lambda: conn
-    app.dependency_overrides[api.write_connection] = lambda: conn
+    app.dependency_overrides[deps.connection] = lambda: conn
+    app.dependency_overrides[deps.write_connection] = lambda: conn
     payload = {'tokenizer': str(path), 'actor': 'tester', 'reason': '合成统计'}
     with TestClient(app) as client, psycopg.connect(DSN, autocommit=True) as control:
         assert client.post(f'/api/v1/datasets/{release}/token-stats', json=payload).status_code == 403
@@ -637,13 +676,15 @@ def test_token_stats_job_exact_cache_and_frozen_release(conn, tmp_path, monkeypa
 
 def test_token_estimates_and_independent_tokenizer_records(conn, tmp_path, monkeypatch):
     from fastapi.testclient import TestClient
-    from midstream import api, token_stats, tokenizing
+    from midstream import api
+    from midstream.api import deps
+    from midstream.delivery import token_stats, tokenizing
     release, recipe = token_release(conn, tmp_path, ['甲乙', '甲乙丙', '甲乙'])
     path = synthetic_tokenizer(tmp_path)
     tokenizer = tokenizing.load(path)
     conn.commit()
     app = api.create_app()
-    app.dependency_overrides[api.connection] = lambda: conn
+    app.dependency_overrides[deps.connection] = lambda: conn
 
     def preview():
         with monkeypatch.context() as patch:
@@ -656,7 +697,7 @@ def test_token_estimates_and_independent_tokenizer_records(conn, tmp_path, monke
     unknown = preview()
     assert unknown['status'] == 'unknown' and unknown['coverage'] == 0
     assert unknown['exact'] is None and unknown['estimated'] is None and unknown['total'] is None
-    partial = export.create_release(conn, export.Recipe.load({
+    partial = create_release(conn, Recipe.load({
         **recipe.raw, 'name': 'partial-tokens', 'include': [], 'documents': {'add': [1]}}))
     token_stats.compute(conn, partial, tokenizer)
     estimated = preview()
@@ -674,11 +715,12 @@ def test_token_estimates_and_independent_tokenizer_records(conn, tmp_path, monke
 
 def test_token_shards_match_statistics_and_dtype(conn, tmp_path, monkeypatch):
     import numpy as np
-    from midstream import config, token_stats, tokenizing
+    from midstream import config
+    from midstream.delivery import token_stats, tokenizing
     monkeypatch.setattr(config, 'EXPORT_ROOT', tmp_path / 'outputs')
     texts = ['甲 乙 甲', '乙', '甲 乙 甲']
     release, _ = token_release(conn, tmp_path, texts)
-    before = export.get_release(conn, release)
+    before = get_release(conn, release)
     with psycopg.connect(DSN, autocommit=True) as control:
         for wide in (False, True):
             path = synthetic_tokenizer(tmp_path, wide=wide)
@@ -707,60 +749,67 @@ def test_token_shards_match_statistics_and_dtype(conn, tmp_path, monkeypatch):
             assert sum(map(len, arrays.values())) == sum(item['tokens'] for item in records) == stats['total'] == manifest['total_tokens'] == 7
             assert manifest['add_special_tokens'] is False and manifest['truncation'] is False
             assert manifest['content_digest'] == before['content_digest']
-            assert export.verify_release(conn, release, hash_files=True)
-    assert export.get_release(conn, release) == before
+            assert verify_release(conn, release, hash_files=True)
+    assert get_release(conn, release) == before
 
 
 def test_token_cancel_keeps_cache_and_no_completed_shards(conn, tmp_path, monkeypatch):
-    from midstream import config, token_stats
+    from midstream import config
+    from midstream.delivery import token_stats
     monkeypatch.setattr(config, 'EXPORT_ROOT', tmp_path / 'outputs')
     release, _ = token_release(conn, tmp_path, [f'甲 {i}' for i in range(100)])
     path = synthetic_tokenizer(tmp_path)
     with psycopg.connect(DSN, autocommit=True) as control:
         job = jobs.submit(conn, 'token_stats', {'release_id': release, 'tokenizer': str(path)}, 'test', '分批取消')
-        original = jobs.HANDLERS['token_stats']
+        original = operations.REGISTRY['token_stats']
 
-        def cancelled(conn, params, actor, reason, progress):
+        def cancelled(conn, params, ctx):
+            progress = ctx.progress
+
             def boundary(current, total, message):
                 if current and '统计缺失' in message:
                     jobs.cancel(control, job['job_id'], 'test', '保留首批缓存')
                 progress(current, total, message)
-            return original(conn, params, actor, reason, boundary)
+            ctx.progress = boundary
+            return original.run(conn, params, ctx)
 
-        monkeypatch.setitem(jobs.HANDLERS, 'token_stats', cancelled)
+        monkeypatch.setitem(operations.REGISTRY, 'token_stats', dataclasses.replace(original, run=cancelled))
         jobs._run_next(conn, control)
         assert jobs.show(control, job['job_id'])['status'] == 'cancelled'
         assert conn.execute('SELECT count(*) FROM text_token_count').fetchone()[0] == 64
         assert token_stats.list_stats(conn, release) == []
-        monkeypatch.setitem(jobs.HANDLERS, 'token_stats', original)
+        monkeypatch.setitem(operations.REGISTRY, 'token_stats', original)
         retried = jobs.retry(conn, job['job_id'], 'test', '补齐计数')
         jobs._run_next(conn, control)
         assert jobs.show(control, retried['job_id'])['result']['cache'] == {'computed_texts': 36, 'cached_texts': 64}
         token_job = jobs.submit(conn, 'tokenize', {'release_id': release, 'tokenizer': str(path), 'shard_tokens': 20},
                                 'test', '分片取消')
-        encoder = jobs.HANDLERS['tokenize']
+        encoder = operations.REGISTRY['tokenize']
 
-        def cancelled_export(conn, params, actor, reason, progress):
+        def cancelled_export(conn, params, ctx):
+            progress = ctx.progress
+
             def boundary(current, total, message):
                 if current and '编码并写出' in message:
                     jobs.cancel(control, token_job['job_id'], 'test', '清理未完成分片')
                 progress(current, total, message)
-            return encoder(conn, params, actor, reason, boundary)
+            ctx.progress = boundary
+            return encoder.run(conn, params, ctx)
 
-        monkeypatch.setitem(jobs.HANDLERS, 'tokenize', cancelled_export)
+        monkeypatch.setitem(operations.REGISTRY, 'tokenize', dataclasses.replace(encoder, run=cancelled_export))
         jobs._run_next(conn, control)
         assert jobs.show(control, token_job['job_id'])['status'] == 'cancelled'
         assert conn.execute('SELECT count(*) FROM export_artifact').fetchone()[0] == 0
         assert not list((config.EXPORT_ROOT / 'token-release').iterdir())
         assert token_stats.list_stats(conn, release)[0]['total'] == 200
-        monkeypatch.setitem(jobs.HANDLERS, 'tokenize', encoder)
+        monkeypatch.setitem(operations.REGISTRY, 'tokenize', encoder)
         retried = jobs.retry(conn, token_job['job_id'], 'test', '重新写分片')
         jobs._run_next(conn, control)
         assert jobs.show(control, retried['job_id'])['result']['total_tokens'] == 200
 
 
 def seed_metadata(conn, count, group_size=1):
-    from midstream import textcodec
+    from midstream.store import textcodec
     sources = [conn.execute('INSERT INTO source (name) VALUES (%s) RETURNING source_id',
                             (name,)).fetchone()[0] for name in ('meta-a', 'meta-b')]
     hashes = []
@@ -797,15 +846,17 @@ def seed_metadata(conn, count, group_size=1):
 
 def test_dataset_selection_preview_api(conn, monkeypatch):
     from fastapi.testclient import TestClient
-    from midstream import api, textcodec
+    from midstream import api
+    from midstream.api import deps
+    from midstream.store import textcodec
     seed_metadata(conn, 100)
     body = {'name': 'selection-api', 'seed': 'm2', 'splits': {'train': 1},
             'include': [{'authors': ['甲作者'], 'genres': ['文'], 'categories': ['史']},
                         {'author': '乙作者', 'genre': '诗', 'category': '集'}],
             'exclude': [{'title_prefix': '1'}], 'documents': {'add': [1], 'remove': [2]}}
-    expected = [item.doc_id for item in export._select(conn, export.Recipe.load(body))]
+    expected = [item.doc_id for item in _select(conn, Recipe.load(body))]
     assert 1 in expected and 2 not in expected and 10 not in expected and 11 not in expected
-    assert export._select(conn, export.Recipe.load({**body, 'include': [{'sources': ['meta-a', 'meta-b']}],
+    assert _select(conn, Recipe.load({**body, 'include': [{'sources': ['meta-a', 'meta-b']}],
                                                   'exclude': [], 'documents': {}}))
     conn.commit()
     with psycopg.connect(DSN) as readonly:
@@ -813,12 +864,12 @@ def test_dataset_selection_preview_api(conn, monkeypatch):
         def no_body(*args):
             raise AssertionError('试算不能解压正文')
         monkeypatch.setattr(textcodec, 'decompress', no_body)
-        report = export.plan_release(readonly, export.Recipe.load(body)).report
+        report = plan_release(readonly, Recipe.load(body)).report
         assert report['candidates'] == len(expected)
         assert readonly.execute('SELECT count(*) FROM dataset_release').fetchone()[0] == 0
     app = api.create_app()
-    app.dependency_overrides[api.connection] = lambda: conn
-    app.dependency_overrides[api.write_connection] = lambda: conn
+    app.dependency_overrides[deps.connection] = lambda: conn
+    app.dependency_overrides[deps.write_connection] = lambda: conn
     headers = {'X-Midstream-Action': '1'}
     operation = {'recipe': body, 'actor': 'test', 'reason': '合成选用'}
     with TestClient(app) as client, psycopg.connect(DSN, autocommit=True) as control:
@@ -844,14 +895,14 @@ def test_dataset_selection_preview_api(conn, monkeypatch):
 def test_dataset_balanced_reserved_and_deterministic(conn, monkeypatch):
     seed_metadata(conn, 2000, group_size=5)
     body = {'name': 'balanced', 'seed': 'm2', 'splits': {'train': .9, 'val': .05, 'test': .05}}
-    first = export.plan_release(conn, export.Recipe.load(body))
+    first = plan_release(conn, Recipe.load(body))
     for split, expected in body['splits'].items():
         assert abs(first.report['splits'][split]['ratio'] - expected) <= .01
-    release = export.write_release(conn, first)
-    selected = export._select
-    monkeypatch.setattr(export, '_select', lambda conn, recipe: list(reversed(selected(conn, recipe))))
-    assert export.plan_release(conn, export.Recipe.load(body)).members == first.members
-    groups = export._group_keys(conn, list(range(1, 2001)))
+    release = write_release(conn, first)
+    selected = _select
+    monkeypatch.setattr(dataset_plan, '_select', lambda conn, recipe: list(reversed(selected(conn, recipe))))
+    assert plan_release(conn, Recipe.load(body)).members == first.members
+    groups = _group_keys(conn, list(range(1, 2001)))
     splits = {version: split for _, version, split, _ in first.members}
     for doc_id, group in groups.items():
         assert splits[doc_id] == splits[group]
@@ -861,7 +912,7 @@ def test_dataset_balanced_reserved_and_deterministic(conn, monkeypatch):
                 'limits': {'val': {'max_chars': first.report['splits']['val']['chars']}},
                 'reserved': {'val': {'releases': [{'release_id': release, 'split': 'val'}]},
                              'test': {'doc_ids': [test_doc]}}}
-    plan = export.plan_release(conn, export.Recipe.load(reserved))
+    plan = plan_release(conn, Recipe.load(reserved))
     next_splits = {version: split for _, version, split, _ in plan.members}
     assert all(next_splits[doc] == 'val' for doc, split in splits.items() if split == 'val')
     assert next_splits[test_doc] == 'test'
@@ -872,29 +923,29 @@ def test_dataset_balanced_reserved_and_deterministic(conn, monkeypatch):
 def test_dataset_reserved_training_leak_and_group_conflict(conn):
     seed_metadata(conn, 100, group_size=5)
     body = {'name': 'reserved-safety', 'seed': 's', 'splits': {'train': .9, 'val': .05, 'test': .05}}
-    with pytest.raises(export.ExportError, match='同一作品'):
-        export.plan_release(conn, export.Recipe.load({**body, 'reserved': {
+    with pytest.raises(ExportError, match='同一作品'):
+        plan_release(conn, Recipe.load({**body, 'reserved': {
             'val': {'doc_ids': [1]}, 'test': {'doc_ids': [2]}}}))
-    used = export.create_release(conn, export.Recipe.load({**body, 'name': 'trained', 'splits': {'train': 1},
+    used = create_release(conn, Recipe.load({**body, 'name': 'trained', 'splits': {'train': 1},
                                                           'include': [], 'documents': {'add': [1]}}))
-    export.record_training(conn, 'trained', 'fixture-training')
-    with pytest.raises(export.TrainingLeak):
-        export.plan_release(conn, export.Recipe.load({**body,
+    record_training(conn, 'trained', 'fixture-training')
+    with pytest.raises(TrainingLeak):
+        plan_release(conn, Recipe.load({**body,
             'documents': {'remove': [1]}, 'reserved': {'val': {'doc_ids': [1]}}}))
     run = conn.execute("INSERT INTO processing_run (kind, rule_version) VALUES ('dedup', 'synthetic') RETURNING run_id").fetchone()[0]
     cluster = conn.execute("INSERT INTO dup_cluster (run_id, level) VALUES (%s, 'document') RETURNING cluster_id", (run,)).fetchone()[0]
     conn.execute("INSERT INTO dup_cluster_member (cluster_id, version_id, kind) VALUES (%s,1,'exact'),(%s,6,'exact')",
                  (cluster, cluster))
     conn.commit()
-    with pytest.raises(export.TrainingLeak):
-        export.plan_release(conn, export.Recipe.load({**body, 'splits': {'val': 1},
+    with pytest.raises(TrainingLeak):
+        plan_release(conn, Recipe.load({**body, 'splits': {'val': 1},
             'include': [], 'documents': {'add': [6]}}))
-    assert export.verify_release(conn, used)
+    assert verify_release(conn, used)
 
 
 def test_dataset_large_groups_warn_without_splitting(conn):
     seed_metadata(conn, 100, group_size=80)
-    plan = export.plan_release(conn, export.Recipe.load({
+    plan = plan_release(conn, Recipe.load({
         'name': 'huge-groups', 'seed': 's', 'splits': {'train': .9, 'val': .05, 'test': .05}}))
     assert {split for _, _, split, _ in plan.members} == {'train'}
     assert any('超大组' in message for message in plan.report['warnings'])
@@ -924,15 +975,17 @@ def read_export(result):
 
 def test_multiformat_export_job_roundtrip(conn, tmp_path, monkeypatch):
     from fastapi.testclient import TestClient
-    from midstream import api, config, exporters
+    from midstream import api, config
+    from midstream.api import deps
+    from midstream.delivery import export as exporters
     seed_metadata(conn, 20)
     monkeypatch.setattr(config, 'EXPORT_ROOT', tmp_path)
-    recipe = export.Recipe.load({'name': 'formats', 'seed': 's', 'splits': {'train': .8, 'val': .2}})
-    release = export.create_release(conn, recipe)
-    before = export.get_release(conn, release)
+    recipe = Recipe.load({'name': 'formats', 'seed': 's', 'splits': {'train': .8, 'val': .2}})
+    release = create_release(conn, recipe)
+    before = get_release(conn, release)
     app = api.create_app()
-    app.dependency_overrides[api.connection] = lambda: conn
-    app.dependency_overrides[api.write_connection] = lambda: conn
+    app.dependency_overrides[deps.connection] = lambda: conn
+    app.dependency_overrides[deps.write_connection] = lambda: conn
     headers = {'X-Midstream-Action': '1'}
     outputs = []
     fields = exporters.DEFAULT_FIELDS + ['authors', 'era', 'category', 'genre', 'source']
@@ -954,26 +1007,27 @@ def test_multiformat_export_job_roundtrip(conn, tmp_path, monkeypatch):
         repeated = exporters.export_release(conn, release, exporters.Options(fields=fields, shard_mb=.003))
         assert read_export(repeated) == outputs[0]
         assert len(client.get(f'/api/v1/datasets/{release}/exports').json()) == 5
-        assert export.get_release(conn, release) == before
-        assert export.verify_release(conn, release, hash_files=True)
+        assert get_release(conn, release) == before
+        assert verify_release(conn, release, hash_files=True)
         # 同字节数的文本变化：默认检查结构，--hash 才检测内容哈希变化。
         json_export = next(item for item in exporters.list_exports(conn, release)
                            if item['format'] == 'jsonl' and item['options']['compression'] is None)
         path = Path(json_export['files'][0]['path'])
         path.write_bytes(path.read_bytes().replace('测'.encode(), '改'.encode(), 1))
-        assert export.verify_release(conn, release)
-        assert not export.verify_release(conn, release, hash_files=True)
+        assert verify_release(conn, release)
+        assert not verify_release(conn, release, hash_files=True)
         path.unlink()
-        assert not export.verify_release(conn, release)
+        assert not verify_release(conn, release)
 
 
 def test_sample_exports_reconstruct_text(conn, tmp_path, monkeypatch):
-    from midstream import config, exporters
+    from midstream import config
+    from midstream.delivery import export as exporters
     monkeypatch.setattr(config, 'EXPORT_ROOT', tmp_path / 'outputs')
     texts = ['甲段落。乙句！\n\n第三段\n末段。' * 8 + '𠀋😀　尾', '无标点长文' * 30]
     path = write(tmp_path / 'samples.jsonl', [row(str(i), text, book=f'书{i}') for i, text in enumerate(texts)])
     ingest.ingest(conn, ADAPTERS['ccc_corpus'], [path])
-    release = export.create_release(conn, export.Recipe.load({'name': 'samples', 'seed': 's', 'splits': {'train': 1}}))
+    release = create_release(conn, Recipe.load({'name': 'samples', 'seed': 's', 'splits': {'train': 1}}))
     originals = {item['ordinal']: item['text'] for item in read_export(exporters.export_release(conn, release))}
     for overlap in (0, 7):
         options = exporters.Options(format='jsonl', unit='sample', max_chars=31, overlap_chars=overlap, shard_mb=.001)
@@ -997,10 +1051,11 @@ def test_sample_exports_reconstruct_text(conn, tmp_path, monkeypatch):
 
 
 def test_export_interruption_keeps_no_completed_artifacts(conn, tmp_path, monkeypatch):
-    from midstream import config, exporters
+    from midstream import config
+    from midstream.delivery import export as exporters
     seed_metadata(conn, 20)
     monkeypatch.setattr(config, 'EXPORT_ROOT', tmp_path)
-    release = export.create_release(conn, export.Recipe.load({'name': 'interrupted', 'seed': 's', 'splits': {'train': 1}}))
+    release = create_release(conn, Recipe.load({'name': 'interrupted', 'seed': 's', 'splits': {'train': 1}}))
     write_shard = exporters._write_shard
 
     def interrupted(*args):
@@ -1016,18 +1071,19 @@ def test_export_interruption_keeps_no_completed_artifacts(conn, tmp_path, monkey
     monkeypatch.setattr(exporters, '_write_shard', write_shard)
     result = exporters.export_release(conn, release)
     assert len(read_export(result)) == 20
-    assert export.verify_release(conn, release, hash_files=True)
+    assert verify_release(conn, release, hash_files=True)
 
 
 def test_export_memory_stays_bounded(conn, tmp_path, monkeypatch):
     import tracemalloc
-    from midstream import config, exporters
+    from midstream import config
+    from midstream.delivery import export as exporters
     seed_metadata(conn, 10000)
     monkeypatch.setattr(config, 'EXPORT_ROOT', tmp_path)
-    small = export.create_release(conn, export.Recipe.load({
+    small = create_release(conn, Recipe.load({
         'name': 'small-memory', 'seed': 's', 'splits': {'train': 1}, 'include': [],
         'documents': {'add': list(range(1, 1001))}}))
-    large = export.create_release(conn, export.Recipe.load({
+    large = create_release(conn, Recipe.load({
         'name': 'large-memory', 'seed': 's', 'splits': {'train': 1}}))
     peaks = []
     for release in (small, large):
@@ -1047,7 +1103,7 @@ def test_dataset_plan_million_metadata(conn):
     seed_metadata(conn, 1_000_000, group_size=10)
     conn.execute('SET TRANSACTION READ ONLY')
     started = perf_counter()
-    plan = export.plan_release(conn, export.Recipe.load({
+    plan = plan_release(conn, Recipe.load({
         'name': 'million', 'seed': 'scale', 'splits': {'train': .9, 'val': .05, 'test': .05},
         'stratify': ['source', 'category']}))
     elapsed = perf_counter() - started
@@ -1060,7 +1116,8 @@ def test_dataset_plan_million_metadata(conn):
 
 def test_jobs_submit_complete(conn, tmp_path, monkeypatch):
     from fastapi.testclient import TestClient
-    from midstream.api import create_app, connection, write_connection
+    from midstream.api import create_app
+    from midstream.api.deps import connection, write_connection
 
     path = write(tmp_path / 'job.jsonl', [row('job#1', '任务正文。')])
     batch_id = ingest.register_batch(conn, ADAPTERS['ccc_corpus'], [path])
@@ -1081,14 +1138,14 @@ def test_jobs_submit_complete(conn, tmp_path, monkeypatch):
         for action in ('cancel', 'retry'):
             assert client.post(f'/api/v1/jobs/{job_id}/{action}', json=operation).status_code == 403
         assert client.post('/api/v1/jobs', json={**payload, 'kind': 'arbitrary'}, headers=headers).status_code == 422
-        handler = jobs.HANDLERS['batch_resume']
+        op = operations.REGISTRY['batch_resume']
 
-        def observed(conn, params, actor, reason, progress):
+        def observed(conn, params, ctx):
             running = jobs.show(control, job_id)
             assert running['status'] == 'running' and running['heartbeat_at']
-            return handler(conn, params, actor, reason, progress)
+            return op.run(conn, params, ctx)
 
-        monkeypatch.setitem(jobs.HANDLERS, 'batch_resume', observed)
+        monkeypatch.setitem(operations.REGISTRY, 'batch_resume', dataclasses.replace(op, run=observed))
         assert jobs._run_next(conn, control)
         completed = client.get(f'/api/v1/jobs/{job_id}').json()
         assert completed['status'] == 'succeeded'
@@ -1096,7 +1153,11 @@ def test_jobs_submit_complete(conn, tmp_path, monkeypatch):
         assert completed['progress']['current'] == completed['progress']['total']
         assert completed['events'][-1]['message'] == '执行完成'
         assert any('验证暂存' in e['message'] for e in completed['events'])
-        assert client.get('/api/v1/jobs').json()['items'][0]['job_id'] == job_id
+        # 发布后的查重作为后续任务排在队列里。
+        listed = client.get('/api/v1/jobs').json()['items']
+        assert [(j['kind'], j['status']) for j in listed] == [
+            ('dedup_spans', 'queued'), ('dedup', 'queued'), ('batch_resume', 'succeeded')]
+        assert listed[2]['job_id'] == job_id
         assert conn.execute('SELECT count(*) FROM document_version').fetchone()[0] == 2
 
 
@@ -1148,7 +1209,8 @@ def test_jobs_worker_interrupted_retry(conn,tmp_path):
 
 def test_jobs_cancel_between_stages(conn, tmp_path, monkeypatch):
     from fastapi.testclient import TestClient
-    from midstream.api import create_app, connection, write_connection
+    from midstream.api import create_app
+    from midstream.api.deps import connection, write_connection
 
     app = create_app()
     app.dependency_overrides[connection] = lambda: conn
@@ -1188,6 +1250,8 @@ def test_jobs_batch_failure_no_republish(conn, tmp_path, monkeypatch):
         jobs._run_next(conn, control)
         assert jobs.show(control, job['job_id'])['status'] == 'failed'
         assert batches.inspect(conn, batch_id)['status'] == 'failed'
+        # 发布失败不产生后续任务。
+        assert [j['kind'] for j in jobs.list_jobs(conn)] == ['batch_resume']
         assert conn.execute('SELECT count(*) FROM source_record WHERE batch_id = %s', (batch_id,)).fetchone()[0] == 0
         path = write(tmp_path / 'publish-job.jsonl', [row('published', '发布后查重失败。')])
         batch_id = ingest.register_batch(conn, ADAPTERS['ccc_corpus'], [path])
@@ -1196,14 +1260,23 @@ def test_jobs_batch_failure_no_republish(conn, tmp_path, monkeypatch):
         def fail(conn, **kwargs):
             raise RuntimeError('dedup failed')
 
+        real_dedup = dedup.dedup
         monkeypatch.setattr(dedup, 'dedup', fail)
         jobs._run_next(conn, control)
-        assert jobs.show(control, job['job_id'])['error'] == 'dedup failed'
+        # 发布成功提交后，worker 把查重写入队列；查重失败不影响已发布的批次。
+        assert jobs.show(control, job['job_id'])['result']['status'] == 'published'
+        dedup_job, spans_job = sorted(jobs.list_jobs(conn, limit=2), key=lambda j: j['job_id'])
+        assert (dedup_job['kind'], spans_job['kind'], dedup_job['status']) == ('dedup', 'dedup_spans', 'queued')
+        jobs._run_next(conn, control)
+        assert jobs.show(control, dedup_job['job_id'])['error'] == 'dedup failed'
         assert batches.inspect(conn, batch_id)['status'] == 'published'
         versions = conn.execute('SELECT version_id FROM document_version ORDER BY version_id').fetchall()
-        retried = jobs.retry(conn, job['job_id'], 'tester', '不重复发布')
+        monkeypatch.setattr(dedup, 'dedup', real_dedup)
+        retried = jobs.retry(conn, dedup_job['job_id'], 'tester', '只重跑查重')
         jobs._run_next(conn, control)
-        assert jobs.show(control, retried['job_id'])['result']['status'] == 'already_published'
+        jobs._run_next(conn, control)
+        assert jobs.show(control, spans_job['job_id'])['status'] == 'succeeded'
+        assert jobs.show(control, retried['job_id'])['status'] == 'succeeded'
         assert conn.execute('SELECT version_id FROM document_version ORDER BY version_id').fetchall() == versions
 
 
@@ -1213,16 +1286,19 @@ def test_jobs_dedup_cancel_rolls_back(conn, tmp_path, monkeypatch):
     conn.execute('DELETE FROM text_fingerprint')
     conn.commit()
     job_id = jobs.submit(conn, 'dedup', {'full': True}, 'tester', '查重取消')['job_id']
-    handler = jobs.HANDLERS['dedup']
+    op = operations.REGISTRY['dedup']
     with psycopg.connect(DSN, autocommit=True) as control:
-        def cancelled(conn, params, actor, reason, progress):
+        def cancelled(conn, params, ctx):
+            progress = ctx.progress
+
             def boundary(current, total, message):
                 if current == 4:
                     jobs.cancel(control, job_id, 'tester', '结果写入前取消')
                 progress(current, total, message)
-            return handler(conn, params, actor, reason, boundary)
+            ctx.progress = boundary
+            return op.run(conn, params, ctx)
 
-        monkeypatch.setitem(jobs.HANDLERS, 'dedup', cancelled)
+        monkeypatch.setitem(operations.REGISTRY, 'dedup', dataclasses.replace(op, run=cancelled))
         jobs._run_next(conn, control)
         assert jobs.show(control, job_id)['status'] == 'cancelled'
         assert conn.execute('SELECT count(*) FROM text_fingerprint').fetchone()[0] == 0
@@ -1254,17 +1330,17 @@ def test_ingest_query_update_export(conn, tmp_path):
     assert document["text"] == "黄帝者，少典之子\n姓公孙"
     assert query.get_text(conn, hits[0]["doc_id"], 1)["text"] == "黄帝者，少典之子\r\n姓公孙"
 
-    recipe = export.Recipe.load({
+    recipe = Recipe.load({
         "name": "t1", "seed": "s", "splits": {"train": 1.0},
         "filters": {"sources": ["ccc_corpus"]},
     })
-    release = export.create_release(conn, recipe)
-    assert export.verify_release(conn, release)
-    files = export.write_parquet(conn, release, tmp_path / "t1")
+    release = create_release(conn, recipe)
+    assert verify_release(conn, release)
+    files = write_parquet(conn, release, tmp_path / "t1")
     table = pq.read_table(files[0])
     assert table.num_rows == 3
     assert sorted(table.column("ordinal").to_pylist()) == [0, 1, 2]
-    stats = export.release_stats(conn, release)
+    stats = release_stats(conn, release)
     assert stats["char_count"] == sum(len(text) for text in table.column("text").to_pylist())
     assert stats["split_char_counts"] == {"train": stats["char_count"], "val": 0, "test": 0}
 
@@ -1280,8 +1356,8 @@ def test_ingest_query_update_export(conn, tmp_path):
     assert conn.execute(
         "SELECT count(*) FROM document_version WHERE is_current"
     ).fetchone()[0] == 3
-    assert export.verify_release(conn, release)
-    assert export.release_stats(conn, release) == stats
+    assert verify_release(conn, release)
+    assert release_stats(conn, release) == stats
 
     # 同一作品的文档必须落在同一侧
     splits = conn.execute(
@@ -1306,11 +1382,11 @@ def test_release_char_counts(conn, tmp_path, splits):
         row(f"chars#{i}", text, book=f"书{i}") for i, text in enumerate(texts)
     ])
     ingest.ingest(conn, ADAPTERS["ccc_corpus"], [path])
-    release = export.create_release(conn, export.Recipe.load({
+    release = create_release(conn, Recipe.load({
         "name": "chars", "seed": "chars", "splits": splits,
         "filters": {"quality": ["ok", "flagged"]},
     }))
-    files = export.write_parquet(conn, release, tmp_path / "export")
+    files = write_parquet(conn, release, tmp_path / "export")
     exported = []
     expected = {"train": 0, "val": 0, "test": 0}
     for path in files:
@@ -1319,30 +1395,30 @@ def test_release_char_counts(conn, tmp_path, splits):
         expected[path.stem.split('-')[0]] += sum(map(len, values))
     assert sorted(exported) == sorted(texts)
     assert all(expected[split] > 0 for split in splits)
-    assert export.release_stats(conn, release) == {
+    assert release_stats(conn, release) == {
         "release_id": release, "name": "chars",
         "char_count": sum(map(len, texts)), "split_char_counts": expected,
         "selection": {"candidates": len(texts), "dropped_documents": 0, "dropped_chars": 0},
     }
-    assert export.verify_release(conn, release)
-    with pytest.raises(export.ExportError, match="不存在"):
-        export.release_stats(conn, release + 1)
+    assert verify_release(conn, release)
+    with pytest.raises(ExportError, match="不存在"):
+        release_stats(conn, release + 1)
 
     # 总数及划分和仍一致的统计错误也必须被 verify 发现。
     conn.execute(
         "UPDATE dataset_release SET char_count = char_count + 1,"
         " train_char_count = train_char_count + 1 WHERE release_id = %s", (release,),
     )
-    assert not export.verify_release(conn, release)
+    assert not verify_release(conn, release)
 
 
 def test_release_char_count_migration(conn, tmp_path):
     path = write(tmp_path / "old.jsonl", [row("old#1", "古文，\n𠀋"), row("old#2", "古文，\n𠀋")])
     ingest.ingest(conn, ADAPTERS["ccc_corpus"], [path])
-    releases = [export.create_release(conn, export.Recipe.load({
+    releases = [create_release(conn, Recipe.load({
         "name": split, "seed": "old", "splits": {split: 1.0},
     })) for split in ("train", "val", "test")]
-    before = [export.release_stats(conn, release) for release in releases]
+    before = [release_stats(conn, release) for release in releases]
     conn.commit()
     # 当前正文长度变化后，迁移仍须按旧数据集的固定版本回填。
     reprocess.reprocess(conn, reprocess.Rule(
@@ -1356,17 +1432,17 @@ def test_release_char_count_migration(conn, tmp_path):
                 revision["downgrade"]()
                 connection.exec_driver_sql(
                     "INSERT INTO dataset_release (name, recipe, content_digest)"
-                    " VALUES ('empty', '{}', %s)", (export._digest([]),),
+                    " VALUES ('empty', '{}', %s)", (_digest([]),),
                 )
                 revision["upgrade"]()
     finally:
         engine.dispose()
-    assert [export.release_stats(conn, release) for release in releases] == before
-    assert all(export.verify_release(conn, release) for release in releases)
+    assert [release_stats(conn, release) for release in releases] == before
+    assert all(verify_release(conn, release) for release in releases)
     empty = conn.execute("SELECT release_id FROM dataset_release WHERE name = 'empty'").fetchone()[0]
-    assert export.release_stats(conn, empty)["split_char_counts"] == {"train": 0, "val": 0, "test": 0}
-    assert export.release_stats(conn, empty)["char_count"] == 0
-    assert export.verify_release(conn, empty)
+    assert release_stats(conn, empty)["split_char_counts"] == {"train": 0, "val": 0, "test": 0}
+    assert release_stats(conn, empty)["char_count"] == 0
+    assert verify_release(conn, empty)
     for update in ("char_count = -1", "char_count = char_count + 1",
                    "char_count = 0, train_char_count = -1, val_char_count = 1, test_char_count = 0"):
         with pytest.raises(psycopg.errors.CheckViolation), conn.transaction():
@@ -1377,13 +1453,13 @@ def test_training_history_blocks_held_out_work(conn, tmp_path):
     adapter = ADAPTERS["ccc_corpus"]
     path = write(tmp_path / "a.jsonl", [row("a#1", "甲文"), row("a#2", "乙文")])
     ingest.ingest(conn, adapter, [path])
-    used = export.create_release(conn, export.Recipe.load({
+    used = create_release(conn, Recipe.load({
         "name": "used", "seed": "s", "splits": {"train": 1.0},
     }))
-    export.record_training(conn, "used", "run-1")
+    record_training(conn, "used", "run-1")
     assert used
-    with pytest.raises(export.TrainingLeak):
-        export.create_release(conn, export.Recipe.load({
+    with pytest.raises(TrainingLeak):
+        create_release(conn, Recipe.load({
             "name": "held", "seed": "s", "splits": {"val": 1.0},
         }))
     conn.rollback()
@@ -1530,12 +1606,14 @@ def test_batch_resume_and_abandon(conn, tmp_path, monkeypatch):
         (adapter.parser_version, batch_id),
     )
     conn.commit()
-    # 发布后查重失败不会让恢复操作再次发布。
-    real_dedup = batches.dedup.dedup
-    monkeypatch.setattr(batches.dedup, "dedup", lambda _conn: (_ for _ in ()).throw(RuntimeError("dedup failed")))
-    with pytest.raises(RuntimeError, match="dedup failed"):
-        batches.resume(conn, batch_id, actor="test", reason="恢复")
-    monkeypatch.setattr(batches.dedup, "dedup", real_dedup)
+    # 发布后查重是后续任务：失败只记在后续任务上，不影响发布，也不会让恢复操作再次发布。
+    real_dedup = dedup.dedup
+    monkeypatch.setattr(dedup, "dedup", lambda _conn, **_: (_ for _ in ()).throw(RuntimeError("dedup failed")))
+    job = jobs.run_inline(conn, "batch_resume", {"batch_id": batch_id}, "test", "恢复")
+    assert job["status"] == "succeeded" and job["result"]["status"] == "published"
+    assert [(child["kind"], child["status"], child["error"]) for child in job["follow_ups"]] == [
+        ("dedup", "failed", "dedup failed"), ("dedup_spans", "succeeded", None)]
+    monkeypatch.setattr(dedup, "dedup", real_dedup)
     assert batches.inspect(conn, batch_id)["status"] == "published"
     count = conn.execute("SELECT count(*) FROM document_version").fetchone()[0]
     assert batches.resume(conn, batch_id, actor="test", reason="重试")["status"] == "already_published"
@@ -1661,7 +1739,7 @@ def test_document_dedup(conn, tmp_path):
     texts = [base, "齊，" + base[1:] + "！", base[:500] + "山川" + base[502:],
              "".join(rng.choices(alphabet, k=1000)), "齊，國！", "齐国"]
     path = write(tmp_path / "dedup.jsonl", [row(f"d#{i}", text) for i, text in enumerate(texts)])
-    first = ingest.ingest(conn, ADAPTERS["ccc_corpus"], [path]).dedup
+    first = ingest_inline(conn, "ccc_corpus", [path]).dedup
     # 本例只检查重复簇对导出的影响。
     conn.execute("DELETE FROM document_work")
     conn.commit()
@@ -1681,7 +1759,7 @@ def test_document_dedup(conn, tmp_path):
     assert second["reused_snapshot"] and second["run_id"] == first["run_id"]
     assert second["clusters"] == first["clusters"]
     docs = dict(conn.execute("SELECT source_key, doc_id FROM document"))
-    before = export._group_keys(conn, list(docs.values()))
+    before = _group_keys(conn, list(docs.values()))
     assert before[docs["d#0"]] == before[docs["d#1"]] == before[docs["d#2"]]
     assert before[docs["d#4"]] == before[docs["d#5"]]
     replacements = {doc_id: "".join(rng.choices(alphabet, k=1000)) for doc_id in docs.values()}
@@ -1690,11 +1768,11 @@ def test_document_dedup(conn, tmp_path):
     ))
     third = dedup.dedup(conn)
     assert third["clusters"] == 0 and third["fingerprinted"] == 6
-    assert export._group_keys(conn, list(docs.values())) == {doc_id: doc_id for doc_id in docs.values()}
-    release = export.create_release(conn, export.Recipe.load({
+    assert _group_keys(conn, list(docs.values())) == {doc_id: doc_id for doc_id in docs.values()}
+    release = create_release(conn, Recipe.load({
         "name": "dedup-latest", "seed": "s", "splits": {"train": 0.5, "val": 0.5},
     }))
-    assert export.verify_release(conn, release)
+    assert verify_release(conn, release)
     assert conn.execute(
         "SELECT count(*) FROM dup_cluster WHERE run_id = %s", (first["run_id"],)
     ).fetchone()[0] == 0
@@ -1711,7 +1789,7 @@ def test_export_selection_keeps_one_per_cluster(conn, tmp_path):
         row("long", base + "！", chapter="乙书‧卷一", book="乙书"),
         row("solo", text(), chapter="丙书‧卷一", book="丙书"),
     ])
-    ingest.ingest(conn, ADAPTERS["ccc_corpus"], [path])
+    ingest_inline(conn, "ccc_corpus", [path])
     conn.execute("INSERT INTO source (name) VALUES ('second')")
     second = conn.execute("SELECT source_id FROM source WHERE name = 'second'").fetchone()[0]
     docs = dict(conn.execute("SELECT source_key, doc_id FROM document"))
@@ -1720,7 +1798,7 @@ def test_export_selection_keeps_one_per_cluster(conn, tmp_path):
 
     def release(name, selection):
         recipe = {"name": name, "seed": "s", "splits": {"train": 1.0}, "selection": selection}
-        release_id = export.create_release(conn, export.Recipe.load(recipe))
+        release_id = create_release(conn, Recipe.load(recipe))
         members = {doc for doc, in conn.execute(
             "SELECT v.doc_id FROM dataset_member m JOIN document_version v USING (version_id)"
             " WHERE m.release_id = %s", (release_id,))}
@@ -1730,17 +1808,17 @@ def test_export_selection_keeps_one_per_cluster(conn, tmp_path):
     assert everything == set(docs.values())
     longest, members = release("longest", {"dedup": "document"})
     assert members == {docs["long"], docs["solo"]}
-    assert export.release_stats(conn, longest)["selection"] == {
+    assert release_stats(conn, longest)["selection"] == {
         "candidates": 3, "dropped_documents": 1, "dropped_chars": 1000}
-    assert export.verify_release(conn, longest)
+    assert verify_release(conn, longest)
     _, members = release("preferred", {"dedup": "document", "source_priority": ["second"]})
     assert members == {docs["short"], docs["solo"]}
-    with pytest.raises(export.ExportError):
-        export.Recipe.load({"name": "bad", "seed": "s", "splits": {"train": 1.0},
+    with pytest.raises(ExportError):
+        Recipe.load({"name": "bad", "seed": "s", "splits": {"train": 1.0},
                             "selection": {"dedup": "not-a-mode"}})
     reprocess.reprocess(conn, reprocess.Rule(
         "selection-test-v1", None, lambda doc: reprocess.Change(text=text())))
-    with pytest.raises(export.ExportError, match="已过期"):
+    with pytest.raises(ExportError, match="已过期"):
         release("stale", {"dedup": "document"})
 
 
@@ -1755,11 +1833,11 @@ def test_export_selection_splits_with_dropped_bridge(conn, tmp_path):
         row("bridge", base, chapter="乙书‧卷一", book="乙书"),
         row("work", other, chapter="乙书‧卷二", book="乙书"),
     ])
-    ingest.ingest(conn, ADAPTERS["ccc_corpus"], [path])
+    ingest_inline(conn, "ccc_corpus", [path])
     docs = dict(conn.execute("SELECT source_key, doc_id FROM document"))
-    groups = export._group_keys(conn, list(docs.values()))
+    groups = _group_keys(conn, list(docs.values()))
     assert groups[docs["kept"]] == groups[docs["work"]]
-    release = export.create_release(conn, export.Recipe.load({
+    release = create_release(conn, Recipe.load({
         "name": "bridge", "seed": "s", "splits": {"train": 0.5, "val": 0.5},
         "selection": {"dedup": "document"}}))
     splits = conn.execute(
@@ -1777,7 +1855,7 @@ def test_span_dedup_pipeline(conn, tmp_path):
              "乙" * 37 + shared + "乙" * 43,
              "丙" * 150]
     path = write(tmp_path / "spans.jsonl", [row(f"s#{i}", text) for i, text in enumerate(texts)])
-    report = ingest.ingest(conn, ADAPTERS["ccc_corpus"], [path])
+    report = ingest_inline(conn, "ccc_corpus", [path])
     assert report.dedup_spans["rule_version"] == "span-v1"
     assert report.dedup_spans["representatives"] == 3
     assert report.dedup_spans["spans"] == 1
@@ -1825,7 +1903,7 @@ def test_incremental_dedup_matches_full_and_preserves_unchanged_clusters(conn, t
     texts = [a, b, c, "甲乙", "甲乙", unrelated]
 
     def ingest_rows(name, rows):
-        return ingest.ingest(conn, ADAPTERS["ccc_corpus"], [write(tmp_path / name, rows)])
+        return ingest_inline(conn, "ccc_corpus", [write(tmp_path / name, rows)])
 
     def snapshot():
         return conn.execute(
@@ -1854,7 +1932,7 @@ def test_incremental_dedup_matches_full_and_preserves_unchanged_clusters(conn, t
     conn.commit()
     # 最近一次运行是段落查重，导出仍须采用文档簇。
     assert first.dedup_spans["run_id"] > first.dedup["run_id"]
-    groups = export._group_keys(conn, list(docs.values()))
+    groups = _group_keys(conn, list(docs.values()))
     assert groups[docs["i#0"]] == groups[docs["i#1"]] == groups[docs["i#2"]]
     old_rows = snapshot()
     second = ingest_rows("increment.jsonl", [row("new", unrelated)]).dedup
@@ -1934,7 +2012,7 @@ def test_dedup_migration_and_parameter_changes(conn, tmp_path, monkeypatch):
     rng = random.Random(762)
     base = "".join(rng.choices("abcdefghijklmnopqrstuvwxyz", k=1000))
     path = write(tmp_path / "versions.jsonl", [row("a", base), row("b", base[:-1] + "甲")])
-    ingest.ingest(conn, ADAPTERS["ccc_corpus"], [path])
+    ingest_inline(conn, "ccc_corpus", [path])
     before = conn.execute("SELECT cluster_id, run_id FROM dup_cluster").fetchall()
     conn.commit()
     revision = runpy.run_path(str(SCHEMA.with_name("0006_incremental_dedup.py")))
@@ -1965,7 +2043,8 @@ def test_dedup_migration_and_parameter_changes(conn, tmp_path, monkeypatch):
 
 def test_web_api_real_versions(conn, tmp_path):
     from fastapi.testclient import TestClient
-    from midstream.api import create_app, connection
+    from midstream.api import create_app
+    from midstream.api.deps import connection
     path = write(tmp_path / 'web.jsonl', [row('web#1', '甲篇正文\r\n　第二段，保留标点。', chapter='测试文献·甲篇'), row('web#2', '乙篇正文。', chapter='测试文献·乙篇')])
     ingest.ingest(conn, ADAPTERS['ccc_corpus'], [path])
     app = create_app()
@@ -1985,13 +2064,14 @@ def test_web_api_real_versions(conn, tmp_path):
 
 def test_web_metadata_stats_review_and_batches(conn, tmp_path, monkeypatch):
     from fastapi.testclient import TestClient
-    from midstream.api import create_app, connection, write_connection
-    from midstream import textcodec
+    from midstream.api import create_app
+    from midstream.api.deps import connection, write_connection
+    from midstream.store import textcodec
     path = write(tmp_path / 'meta-web.jsonl', [row('web-review', '甲篇正文。')])
     ingest.ingest(conn, ADAPTERS['ccc_corpus'], [path])
     conn.execute("INSERT INTO source (name) VALUES ('empty_fixture')")
     conn.commit()
-    release = export.create_release(conn, export.Recipe.load({
+    release = create_release(conn, Recipe.load({
         'name':'web-stats-fixture','seed':'s','splits':{'train':1.0}}))
     app = create_app()
     app.dependency_overrides[connection] = lambda: conn
@@ -2021,7 +2101,7 @@ def test_web_metadata_stats_review_and_batches(conn, tmp_path, monkeypatch):
     current = client.get(f'/api/v1/documents/{doc}/metadata').json()
     assert old['title'] == metadata['title'] and current['title'] == '已核对标题'
     assert current['field_basis']['title'] == 'human'
-    assert export.release_stats(conn,release)['char_count'] == stats['releases'][0]['char_count']
+    assert release_stats(conn,release)['char_count'] == stats['releases'][0]['char_count']
     invalid = {**payload,'expected_version_id':current['version_id'],'metadata':{'composed_years':'bad range'}}
     assert client.post(f'/api/v1/documents/{doc}/review',json=invalid,headers=headers).status_code == 422
     assert client.get(f'/api/v1/documents/{doc}/metadata').json()['version_id'] == current['version_id']
@@ -2051,8 +2131,9 @@ def test_web_metadata_stats_review_and_batches(conn, tmp_path, monkeypatch):
 
 def test_web_year_granularities_and_unknowns(conn, tmp_path):
     from fastapi.testclient import TestClient
-    from midstream.api import create_app, connection
-    from midstream import management
+    from midstream.api import create_app
+    from midstream.api.deps import connection
+    from midstream.corpus import management
     path=write(tmp_path/'year-web.jsonl',[row(f'year-{i}', f'合成文献第{i}篇。') for i in range(5)])
     ingest.ingest(conn, ADAPTERS['ccc_corpus'], [path])
     current=conn.execute('SELECT doc_id,version_id FROM document_version WHERE is_current ORDER BY doc_id').fetchall()
@@ -2088,7 +2169,7 @@ def test_web_year_granularities_and_unknowns(conn, tmp_path):
 
 
 def test_mapped_import_plan_resume(conn, tmp_path):
-    from midstream import importing
+    from midstream.ingest import importing
     path = write(tmp_path / 'mapped.jsonl', [json.dumps({'id': '1', 'body': '天地玄黄', 'name': '测试'})])
     plan = {'format': 'jsonl', 'text_field': 'body', 'id_field': 'id', 'fields': {'title': 'name'}}
     preview = importing.preview('mapped_fixture', [str(path)], plan)
@@ -2101,3 +2182,21 @@ def test_mapped_import_plan_resume(conn, tmp_path):
     hits = query.search(conn, query.Filters(sources=['mapped_fixture']))
     assert hits[0]['title'] == '测试'
     assert query.get_text(conn, hits[0]['doc_id'])['text'] == '天地玄黄'
+
+
+def test_run_inline_uses_worker_path(conn, tmp_path):
+    ingest.ingest(conn, ADAPTERS['ccc_corpus'], [write(tmp_path / 'inline.jsonl', [row('inline#1', '就地执行。')])])
+    inline = jobs.run_inline(conn, 'dedup_spans', {'full': True}, 'tester', '就地')
+    queued = jobs.submit(conn, 'dedup_spans', {'full': True}, 'tester', '排队')
+    assert queued['status'] == 'queued'
+    with psycopg.connect(DSN, autocommit=True) as control:
+        assert jobs._run_next(conn, control)
+        worker = jobs.show(control, queued['job_id'])
+    messages = lambda job: [e['message'] for e in job['events'] if e['message'] not in ('就地执行', '开始执行')][1:]
+    assert inline['status'] == worker['status'] == 'succeeded'
+    assert messages(inline) == messages(worker) and messages(inline)[-1] == '执行完成'
+    assert set(inline['result']) == set(worker['result'])
+    with pytest.raises(management.ManagementError):
+        jobs.run_inline(conn, 'batch_resume', {'batch_id': 999}, 'tester', '不存在')
+    failed = jobs.list_jobs(conn, limit=1)[0]
+    assert failed['kind'] == 'batch_resume' and failed['status'] == 'failed'

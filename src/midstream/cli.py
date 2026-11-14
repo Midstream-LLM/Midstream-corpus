@@ -1,7 +1,6 @@
 """命令行入口。"""
 
 import argparse
-import dataclasses
 import getpass
 import json
 import os
@@ -10,26 +9,62 @@ from pathlib import Path
 
 import psycopg
 
-from . import batches, config, dedup, export, exporters, ingest, jobs, management, query, reprocess, server
-from .adapters import ADAPTERS
-from .rules import RULES
+from .ingest import batches
+from . import config, jobs, operations
+from .corpus import management, query
+from .ops import server
+from .ingest.adapters import ADAPTERS
+from .curation.rules import RULES
 from .llm.settings import SettingsError
+from .datasets.recipe import ExportError, Recipe
+from .datasets.release import record_training, release_stats
+from .delivery.export import DEFAULT_FIELDS, FieldName, Options, verify_release
 
 
 def _print(data) -> None:
     print(json.dumps(data, ensure_ascii=False, indent=2, default=str))
 
 
-def _ingest(conn, args) -> int:
-    adapter = ADAPTERS[args.source]
-    paths = [Path(p) for p in args.path] or adapter.default_paths()
-    try:
-        report = ingest.ingest(conn, adapter, paths)
-    except ingest.AlreadyImported as exc:
-        print(f"跳过：{exc}", file=sys.stderr)
-        return 0
-    _print(dataclasses.asdict(report))
+def _finish(job) -> int:
+    """就地执行的结果：成功时输出操作结果，附带后续任务。"""
+    if job["status"] != "succeeded":
+        _print({"status": job["status"], "job_id": job["job_id"], "message": job["error"]})
+        return 1
+    result = job["result"]
+    if job["follow_ups"]:
+        result = {**(result or {}), "follow_ups": [
+            {key: child[key] for key in ("job_id", "kind", "status", "result", "error")}
+            for child in job["follow_ups"]]}
+    _print(result)
     return 0
+
+
+def _operate(conn, args, kind, params, reason=None) -> int:
+    reason = args.reason or reason or args.command
+    if args.queue:
+        _print(jobs.submit(conn, kind, params, args.actor, reason))
+        return 0
+    return _finish(jobs.run_inline(conn, kind, params, args.actor, reason))
+
+
+def _run(conn, args) -> int:
+    try:
+        params = json.loads(args.params)
+    except json.JSONDecodeError as exc:
+        raise management.ManagementError("invalid_input", f"params 不是有效 JSON：{exc}") from exc
+    reason = args.reason or f"run {args.operation}"
+    if args.queue:
+        _print(jobs.submit(conn, args.operation, params, args.actor, reason))
+    else:
+        job = jobs.run_inline(conn, args.operation, params, args.actor, reason)
+        _print(job)
+        return 0 if job["status"] == "succeeded" else 1
+    return 0
+
+
+def _ingest(conn, args) -> int:
+    paths = [str(Path(p).expanduser().resolve()) for p in args.path]
+    return _operate(conn, args, "ingest", {"source": args.source, "paths": paths})
 
 
 def _search(conn, args) -> int:
@@ -49,13 +84,11 @@ def _search(conn, args) -> int:
 
 
 def _reprocess(conn, args) -> int:
-    _print(reprocess.reprocess(conn, RULES[args.rule], dry_run=not args.apply))
-    return 0
+    return _operate(conn, args, "reprocess", {"rule": args.rule, "apply": args.apply})
 
 
 def _dedup(conn, args) -> int:
-    _print(dedup.dedup_spans(conn, full=args.full) if args.spans else dedup.dedup(conn, full=args.full))
-    return 0
+    return _operate(conn, args, "dedup_spans" if args.spans else "dedup", {"full": args.full})
 
 
 def _show(conn, args) -> int:
@@ -69,64 +102,63 @@ def _show(conn, args) -> int:
 
 def _export(conn, args) -> int:
     data = json.loads(Path(args.recipe).read_text(encoding="utf-8"))
-    recipe = export.Recipe.load(data)
-    release_id = export.create_release(conn, recipe)
-    result = exporters.export_release(conn, release_id)
-    _print({**export.release_stats(conn, release_id), **result})
+    reason = args.reason or args.command
+    release_id = jobs.run_inline(conn, "dataset_create", {"recipe": data}, args.actor, reason)["result"]["release_id"]
+    result = jobs.run_inline(conn, "dataset_export", {"release_id": release_id}, args.actor, reason)["result"]
+    _print({**release_stats(conn, release_id), **result})
     return 0
 
 
 def _export_preview(conn, args) -> int:
-    from . import tokenizing
-    recipe = export.Recipe.load(json.loads(Path(args.recipe).read_text(encoding='utf-8')))
+    from .delivery import token_stats, tokenizing
+    recipe = Recipe.load(json.loads(Path(args.recipe).read_text(encoding='utf-8')))
     tokenizer = tokenizing.load(args.tokenizer) if args.tokenizer else None
     conn.execute('SET TRANSACTION READ ONLY')
-    _print(export.plan_release(conn, recipe, tokenizer=tokenizer).report)
+    _print(token_stats.plan_with_estimate(conn, recipe, tokenizer).report)
     return 0
 
 
 def _export_release(conn, args) -> int:
-    options = exporters.Options(format=args.format, fields=args.fields, unit=args.unit,
+    options = Options(format=args.format, fields=args.fields, unit=args.unit,
                                 shard_mb=args.shard_mb, max_chars=args.max_chars,
                                 overlap_chars=args.overlap_chars, compression=args.compression)
-    _print(exporters.export_release(conn, args.release_id, options))
-    return 0
+    return _operate(conn, args, "dataset_export",
+                    {"release_id": args.release_id, "options": options.model_dump(mode="json")})
 
 
 def _token_job(conn, args) -> int:
     params = {'release_id': args.release_id, 'tokenizer': str(Path(args.tokenizer).expanduser().resolve())}
     if args.command == 'tokenize':
         params['shard_tokens'] = args.shard_tokens
-    _print(jobs.submit(conn, args.command.replace('-', '_'), params, args.actor, args.reason or args.command))
-    return 0
+    return _operate(conn, args, args.command.replace('-', '_'), params)
 
 
 def _backup(conn,args):
-    from . import backup
+    from .ops import backup
     if args.backup_action=='list':
         _print(backup.list_backups(conn))
     elif args.backup_action=='restore':
         _print(backup.restore(conn,args.backup_id,args.database))
     else:
         params={} if args.backup_action=='run' else {'backup_id':args.backup_id}
-        _print(jobs.submit(conn,'backup' if args.backup_action=='run' else 'backup_verify',params,
-                           args.actor,args.reason or 'backup '+args.backup_action))
+        return _operate(conn,args,'backup' if args.backup_action=='run' else 'backup_verify',params,
+                        'backup '+args.backup_action)
     return 0
 
 
 def _release_stats(conn, args) -> int:
-    _print(export.release_stats(conn, args.release_id))
+    _print(release_stats(conn, args.release_id))
     return 0
 
 
 def _verify(conn, args) -> int:
-    ok = export.verify_release(conn, args.release_id, hash_files=args.hash)
+    ok = verify_release(conn, args.release_id, hash_files=args.hash)
     print("通过" if ok else "未通过")
     return 0 if ok else 1
 
 
 def _record_training(conn, args) -> int:
-    export.record_training(conn, args.release, args.run)
+    record_training(conn, args.release, args.run)
     return 0
 
 
@@ -173,8 +205,7 @@ def _batch_show(conn, args) -> int:
 
 
 def _batch_resume(conn, args) -> int:
-    _print(batches.resume(conn, args.batch_id, actor=args.actor, reason=args.reason))
-    return 0
+    return _operate(conn, args, "batch_resume", {"batch_id": args.batch_id})
 
 
 def _batch_abandon(conn, args) -> int:
@@ -189,6 +220,12 @@ def _events(conn, args) -> int:
     return 0
 
 
+def _job_options(parser) -> None:
+    parser.add_argument("--actor", default=getpass.getuser())
+    parser.add_argument("--reason", help="默认使用命令名")
+    parser.add_argument("--queue", action="store_true", help="只提交到任务队列，不等待")
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(prog="midstream")
     commands = parser.add_subparsers(dest="command", required=True)
@@ -201,10 +238,21 @@ def main() -> int:
         if name=='restore':
             p.add_argument('--database',required=True,help='只能使用不存在的新库名')
         if name in ('run','verify'):
-            p.add_argument('--actor',default=getpass.getuser());p.add_argument('--reason')
+            _job_options(p)
         p.set_defaults(handler=_backup)
 
     commands.add_parser("init", help="构建、初始化私有 PostgreSQL 并迁移到最新版")
+    commands.add_parser("operations", help="列出可执行的长操作及参数 JSON Schema")
+    p = commands.add_parser("serve", help="启动内置 PostgreSQL、worker 和 Web/API 服务")
+    p.add_argument("--host", default="127.0.0.1")
+    p.add_argument("--port", type=int, default=8765)
+    p.add_argument("--static-dir", type=Path, help="前端构建目录；默认 web/dist")
+    p.add_argument("--no-worker", action="store_true", help="不启动 worker，只运行 API")
+    p = commands.add_parser("run", help="按名称执行一个已注册操作；默认就地执行")
+    p.add_argument("operation")
+    p.add_argument("--params", default="{}", help="参数 JSON 对象")
+    _job_options(p)
+    p.set_defaults(handler=_run)
     p = commands.add_parser("worker", help="串行执行持久任务；需手动启动")
     p.set_defaults(handler=lambda conn, args: jobs.worker(conn))
 
@@ -231,16 +279,19 @@ def main() -> int:
     p = commands.add_parser("ingest", help="入库一个来源")
     p.add_argument("source", choices=sorted(ADAPTERS))
     p.add_argument("--path", action="append", default=[])
+    _job_options(p)
     p.set_defaults(handler=_ingest)
 
     p = commands.add_parser("reprocess", help="按规则生成新版本，默认只预览")
     p.add_argument("rule", choices=sorted(RULES))
     p.add_argument("--apply", action="store_true")
+    _job_options(p)
     p.set_defaults(handler=_reprocess)
 
     p = commands.add_parser("dedup", help="当前版本的文档级或段落级查重")
     p.add_argument("--spans", action="store_true", help="只运行段落级查重")
     p.add_argument("--full", action="store_true", help="忽略输入快照及候选分数缓存，完整重算")
+    _job_options(p)
     p.set_defaults(handler=_dedup)
 
     p = commands.add_parser("search", help="按元数据查询当前版本")
@@ -262,8 +313,10 @@ def main() -> int:
     p.add_argument("--version", type=int)
     p.set_defaults(handler=_show)
 
-    p = commands.add_parser("export", help="按配方生成数据集")
+    p = commands.add_parser("export", help="按配方生成数据集并导出 Parquet")
     p.add_argument("recipe")
+    p.add_argument("--actor", default=getpass.getuser())
+    p.add_argument("--reason")
     p.set_defaults(handler=_export)
 
     p = commands.add_parser('export-preview', help='只读试算选用、划分和分布')
@@ -272,11 +325,10 @@ def main() -> int:
     p.set_defaults(handler=_export_preview)
 
     for name in ('token-stats', 'tokenize'):
-        p = commands.add_parser(name, help='提交 token 统计任务' if name == 'token-stats' else '提交 token 分片任务')
+        p = commands.add_parser(name, help='统计数据集 token 数' if name == 'token-stats' else '统计 token 并写出 token 分片')
         p.add_argument('release_id', type=int)
         p.add_argument('--tokenizer', required=True)
-        p.add_argument('--actor', default=getpass.getuser())
-        p.add_argument('--reason')
+        _job_options(p)
         if name == 'tokenize':
             p.add_argument('--shard-tokens', type=int, default=200_000_000)
         p.set_defaults(handler=_token_job)
@@ -284,13 +336,14 @@ def main() -> int:
     p = commands.add_parser('export-release', help='按固定发布导出 Parquet、JSONL 或 PKL')
     p.add_argument('release_id', type=int)
     p.add_argument('--format', choices=('parquet', 'jsonl', 'pkl'), default='parquet')
-    p.add_argument('--fields', nargs='+', default=exporters.DEFAULT_FIELDS,
-                   choices=exporters.FieldName.__args__)
+    p.add_argument('--fields', nargs='+', default=DEFAULT_FIELDS,
+                   choices=FieldName.__args__)
     p.add_argument('--unit', choices=('document', 'sample'), default='document')
     p.add_argument('--shard-mb', type=float, default=256)
     p.add_argument('--max-chars', type=int, default=8192)
     p.add_argument('--overlap-chars', type=int, default=0)
     p.add_argument('--compression', choices=('zst',))
+    _job_options(p)
     p.set_defaults(handler=_export_release)
 
     p = commands.add_parser("release-stats", help="查看数据集发布的总字符数及各划分字符数")
@@ -350,6 +403,8 @@ def main() -> int:
         p.add_argument("batch_id", type=int)
         p.add_argument("--actor", required=True)
         p.add_argument("--reason", required=True)
+        if name == "batch-resume":
+            p.add_argument("--queue", action="store_true", help="只提交到任务队列，不等待")
         p.set_defaults(handler=handler)
 
     p = commands.add_parser("events", help="查看人工审核及批次操作记录")
@@ -366,6 +421,13 @@ def main() -> int:
         return run_llm(args)
     if args.command == "init":
         server.init()
+        return 0
+    if args.command == "serve":
+        from . import api
+        api.serve(args.host, args.port, args.static_dir or api.STATIC_DIR, worker=not args.no_worker)
+        return 0
+    if args.command == "operations":
+        _print(operations.describe())
         return 0
     if args.command == "server":
         if args.action == "status":
@@ -387,7 +449,7 @@ def main() -> int:
         except management.ManagementError as exc:
             _print({"status": "error", "code": exc.code, "message": str(exc)})
             return 2
-        except (export.ExportError, ValueError, SettingsError) as exc:
+        except (ExportError, ValueError, SettingsError) as exc:
             _print({'status': 'error', 'message': str(exc)})
             return 2
 

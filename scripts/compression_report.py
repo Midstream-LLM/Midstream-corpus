@@ -12,7 +12,8 @@ import psycopg
 import zstandard
 
 sys.path.insert(0, str(Path(__file__).parents[1] / "src"))
-from midstream import config, textcodec  # noqa: E402
+from midstream import config
+from midstream.store import textcodec  # noqa: E402
 
 BUCKETS = [(0, 50), (50, 500), (500, 5000), (5000, 10**9)]
 DICT_SIZES = [32 * 1024, 112 * 1024, 512 * 1024]

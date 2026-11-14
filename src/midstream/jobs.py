@@ -1,91 +1,17 @@
-"""PostgreSQL 持久队列；worker 串行执行，阶段边界协作取消。"""
+"""PostgreSQL 持久队列；worker 和就地执行共用 _execute，阶段边界协作取消。"""
 
+import signal
+import sys
 from threading import Event, Thread
 from time import sleep
 
 import psycopg
 from psycopg.types.json import Jsonb
 
-from . import batches, dedup, export
-from .management import ManagementError, _identity
+from pydantic import ValidationError
 
-
-def _batch_resume(conn, params, actor, reason, progress):
-    return batches.resume(conn, params['batch_id'], actor=actor, reason=reason,
-                          progress=progress)
-
-
-def _batch_stage(conn, params, actor, reason, progress):
-    return batches.stage(conn, params['batch_id'], actor=actor, reason=reason, progress=progress)
-
-
-def _batch_publish(conn, params, actor, reason, progress):
-    return batches.publish(conn, params['batch_id'], actor=actor, reason=reason, progress=progress)
-
-
-def _dedup(conn, params, actor, reason, progress):
-    return dedup.dedup(conn, **params, progress=progress)
-
-
-def _dedup_spans(conn, params, actor, reason, progress):
-    return dedup.dedup_spans(conn, **params, progress=progress)
-
-
-def _dataset_create(conn, params, actor, reason, progress):
-    recipe = export.Recipe.load(params['recipe'])
-    existing = conn.execute('SELECT release_id, recipe FROM dataset_release WHERE name = %s',
-                            (recipe.name,)).fetchone()
-    if existing:
-        if existing[1] != recipe.raw:
-            raise export.ExportError('已有同名数据集，配方不同')
-        return {'release_id': existing[0]}
-    progress(0, 2, '试算选用与划分')
-    plan = export.plan_release(conn, recipe)
-    progress(1, 2, '固定数据集成员')
-    return {'release_id': export.write_release(conn, plan), 'plan': plan.report}
-
-
-def _dataset_export(conn, params, actor, reason, progress):
-    from . import exporters
-    return exporters.export_release(conn, params['release_id'],
-                                    exporters.Options.model_validate(params.get('options', {})), progress=progress)
-
-
-def _token_stats(conn, params, actor, reason, progress):
-    from . import token_stats, tokenizing
-    return token_stats.compute(conn, params['release_id'], tokenizing.load(params['tokenizer']), progress=progress)
-
-
-def _tokenize(conn, params, actor, reason, progress):
-    from . import exporters, token_stats, tokenizing
-    tokenizer = tokenizing.load(params['tokenizer'])
-    token_stats.compute(conn, params['release_id'], tokenizer, progress=progress)
-    return exporters.write_tokens(conn, params['release_id'], tokenizer,
-                                  shard_tokens=params.get('shard_tokens', 200_000_000), progress=progress)
-
-
-def _dataset_verify(conn, params, actor, reason, progress):
-    progress(0, 1, '校验固定发布与导出文件')
-    if not export.verify_release(conn, params['release_id'], hash_files=params.get('hash_files', False)):
-        raise export.ExportError('校验未通过')
-    return {'release_id': params['release_id'], 'valid': True}
-
-
-def _backup(conn,params,actor,reason,progress):
-    from . import backup
-    return backup.run(conn,actor,reason,progress=progress)
-
-
-def _backup_verify(conn,params,actor,reason,progress):
-    from . import backup
-    return backup.verify(conn,params['backup_id'],progress=progress)
-
-
-HANDLERS = {'batch_resume': _batch_resume, 'batch_stage': _batch_stage, 'batch_publish': _batch_publish,
-            'dedup': _dedup, 'dedup_spans': _dedup_spans,
-            'dataset_create': _dataset_create, 'dataset_export': _dataset_export,
-            'token_stats': _token_stats, 'tokenize': _tokenize, 'dataset_verify': _dataset_verify,
-            'backup': _backup, 'backup_verify': _backup_verify}
+from . import operations
+from .corpus.management import ManagementError, _identity
 
 
 def _event(conn, job_id, message, level='info'):
@@ -93,46 +19,60 @@ def _event(conn, job_id, message, level='info'):
                  (job_id, level, message))
 
 
-def submit(conn, kind, params, actor, reason):
+def _insert(conn, kind, params, actor, reason, *, running=False):
+    """按注册表校验参数并写入任务表；不提交。"""
     _identity(actor, reason)
-    if kind not in HANDLERS or not isinstance(params, dict):
+    operations.load()
+    if kind not in operations.REGISTRY or not isinstance(params, dict):
         raise ManagementError('invalid_input', '任务类型或参数无效')
-    if kind in ('batch_resume', 'batch_stage', 'batch_publish'):
-        valid = (set(params) == {'batch_id'} and type(params['batch_id']) is int
-                 and params['batch_id'] > 0)
-    elif kind == 'dataset_create':
-        valid = set(params) == {'recipe'}
-        if valid:
-            export.Recipe.load(params['recipe'])
-    elif kind == 'dataset_export':
-        from . import exporters
-        valid = (set(params) <= {'release_id', 'options'} and type(params.get('release_id')) is int
-                 and params['release_id'] > 0)
-        if valid:
-            exporters.Options.model_validate(params.get('options', {}))
-    elif kind in ('token_stats', 'tokenize'):
-        allowed = {'release_id', 'tokenizer'} | ({'shard_tokens'} if kind == 'tokenize' else set())
-        valid = (set(params) <= allowed and type(params.get('release_id')) is int and params['release_id'] > 0
-                 and isinstance(params.get('tokenizer'), str) and bool(params['tokenizer'].strip())
-                 and type(params.get('shard_tokens', 1)) is int and params.get('shard_tokens', 1) > 0)
-    elif kind == 'dataset_verify':
-        valid = (set(params) <= {'release_id', 'hash_files'} and type(params.get('release_id')) is int
-                 and params['release_id'] > 0 and type(params.get('hash_files', False)) is bool)
-    elif kind=='backup':
-        valid=set(params)<={'scheduled'} and type(params.get('scheduled',False)) is bool
-    elif kind=='backup_verify':
-        valid=set(params)=={'backup_id'} and type(params['backup_id']) is int and params['backup_id']>0
-    else:
-        valid = set(params) <= {'full'} and type(params.get('full', False)) is bool
-    if not valid:
-        raise ManagementError('invalid_input', '任务参数与类型不匹配')
+    try:
+        model = operations.REGISTRY[kind].params.model_validate(params)
+    except ValidationError as exc:
+        raise ManagementError('invalid_input', f'任务参数与类型不匹配：{exc.errors()[0]["msg"]}') from exc
+    params = model.model_dump(mode='json', exclude_unset=True)
     job_id = conn.execute(
-        'INSERT INTO job (kind, params, actor, reason) VALUES (%s, %s, %s, %s) RETURNING job_id',
-        (kind, Jsonb(params), actor, reason),
+        'INSERT INTO job (kind, params, actor, reason, status, started_at, heartbeat_at)'
+        " VALUES (%s, %s, %s, %s, %s, CASE WHEN %s THEN now() END, CASE WHEN %s THEN now() END)"
+        ' RETURNING job_id',
+        (kind, Jsonb(params), actor, reason, 'running' if running else 'queued', running, running),
     ).fetchone()[0]
     _event(conn, job_id, f'提交：{actor}；{reason}')
+    return job_id
+
+
+def submit(conn, kind, params, actor, reason):
+    job_id = _insert(conn, kind, params, actor, reason)
     conn.commit()
     return show(conn, job_id)
+
+
+def _echo(current, total, message):
+    print(f'[{current}/{total}] {message}' if total else message, file=sys.stderr, flush=True)
+
+
+def run_inline(conn, kind, params, actor, reason):
+    """写入任务表后在当前进程执行；失败时记录任务并重新抛出原异常。
+
+    后续任务在主任务成功后按顺序接着执行，失败只记录在各自的任务上。
+    """
+    job_id = _insert(conn, kind, params, actor, reason, running=True)
+    conn.commit()
+    with psycopg.connect(conn.info.dsn, autocommit=True) as control:
+        _event(control, job_id, '就地执行')
+        error, follow_ups = _execute(conn, control, _get(control, job_id), inline=True)
+        if error is not None:
+            raise error
+        result = show(control, job_id)
+        result['follow_ups'] = []
+        while follow_ups:
+            follow_kind, follow_params = follow_ups.pop(0)
+            child = _insert(control, follow_kind, follow_params, actor,
+                            f'{kind} #{job_id} 的后续任务', running=True)
+            _event(control, job_id, f'后续任务 #{child}：{follow_kind}')
+            _, more = _execute(conn, control, _get(control, child), inline=True)
+            follow_ups.extend(more)
+            result['follow_ups'].append(show(control, child))
+    return result
 
 
 def list_jobs(conn, *, limit=30, before=None):
@@ -209,10 +149,18 @@ def _run_next(conn, control):
         if row is None:
             return False
         job = row[0]
-        job_id = job['job_id']
         control.execute("UPDATE job SET status = 'running', started_at = now(), heartbeat_at = now()"
-                        " WHERE job_id = %s", (job_id,))
-        _event(control, job_id, '开始执行')
+                        " WHERE job_id = %s", (job['job_id'],))
+        _event(control, job['job_id'], '开始执行')
+    _execute(conn, control, job)
+    return True
+
+
+def _execute(conn, control, job, *, inline=False):
+    """执行一条已标记为 running 的任务；worker 把后续任务写入队列，就地执行时返回给调用方。"""
+    job_id = job['job_id']
+    operations.load()
+    op = operations.REGISTRY[job['kind']]
 
     def progress(current, total, message):
         with control.transaction():
@@ -221,6 +169,8 @@ def _run_next(conn, control):
                 (Jsonb({'current': current, 'total': total, 'message': message}), job_id),
             ).fetchone()[0]
             _event(control, job_id, message)
+        if inline:
+            _echo(current, total, message)
         if requested:
             raise Cancelled()
 
@@ -232,45 +182,59 @@ def _run_next(conn, control):
 
     thread = Thread(target=heartbeat, daemon=True)
     thread.start()
-    result, error = None, None
+    ctx = operations.Context(job['actor'], job['reason'], progress)
+    result, error, interrupted = None, None, None
     try:
         progress(0, 0, '准备执行')
-        result = HANDLERS[job['kind']](conn, job['params'], job['actor'], job['reason'], progress)
+        result = op.run(conn, op.params.model_validate(job['params']), ctx)
         conn.commit()
         status, message = 'succeeded', '执行完成'
     except Cancelled:
         conn.rollback()
         status, message = 'cancelled', '已取消；已完成阶段保留'
+    except KeyboardInterrupt as exc:
+        conn.rollback()
+        status, message, interrupted = 'cancelled', '已中断；已完成阶段保留', exc
     except Exception as exc:
         conn.rollback()
-        status, error = 'failed', str(exc)
-        message = error
+        status, error = 'failed', exc
+        message = str(exc)
     finally:
         stopped.set()
         thread.join()
+    follow_ups = ctx.follow_ups if status == 'succeeded' else []
     with control.transaction():
+        if not inline:
+            for kind, params in follow_ups:
+                child = _insert(control, kind, params, job['actor'], f'{job["kind"]} #{job_id} 的后续任务')
+                _event(control, job_id, f'后续任务 #{child}：{kind}')
         control.execute(
             'UPDATE job SET status = %s, result = %s, error = %s, finished_at = now(),'
             ' heartbeat_at = now(), progress = CASE WHEN %s = \'succeeded\''
             " THEN jsonb_build_object('current', 1, 'total', 1, 'message', %s::text)"
             ' ELSE progress END WHERE job_id = %s',
-            (status, Jsonb(result), error, status, message, job_id),
+            (status, Jsonb(result), message if error else None, status, message, job_id),
         )
         _event(control, job_id, message, 'error' if status == 'failed' else 'info')
-    return True
+    if interrupted is not None:
+        raise interrupted
+    return error, follow_ups
 
 
 def worker(conn):
-    """手动启动；数据库级锁限制为一个 worker，退出后任务由心跳恢复。"""
+    """数据库级锁限制为一个 worker；SIGINT 和 SIGTERM 都把当前任务记为已取消后退出。"""
+    # 后台启动的进程可能继承了被忽略的 SIGINT，这里显式恢复；SIGTERM 是 serve 和 systemd 的停止信号。
+    signal.signal(signal.SIGINT, signal.default_int_handler)
+    signal.signal(signal.SIGTERM, signal.default_int_handler)
     with psycopg.connect(conn.info.dsn, autocommit=True) as control:
         if not control.execute('SELECT pg_try_advisory_lock(762032)').fetchone()[0]:
             raise ManagementError('conflict', '已有 worker 正在运行')
-        from . import backup
+        from .ops import backup
         backup.recover(control)
         try:
             while True:
                 _recover(control)
-                backup.schedule(control)
+                backup.schedule(control, submit)
                 if not _run_next(conn, control):
                     sleep(2)
         except KeyboardInterrupt:
