@@ -1,8 +1,8 @@
 # 中流语料库 Midstream Corpus
 
-为击水语言模型（Jishui）预训练建立的语料管理与存储系统。新数据经整理与校验后入库，入库后系统支持按标题、作者、年代、体裁和来源检索，并可按需导出数据集供训练与评测使用。
+为击水语言模型（Jishui）预训练建立的语料管理与存储系统。对于新数据，入库时进行整理与校验，入库后系统支持按标题、作者、年代、体裁和来源检索，并可按需导出数据集供训练与评测使用。
 
-**项目开发中。** M1–M10 已实现：持久任务、数据集试算与多格式导出、token 统计、Web 工作台、两层导入预览、繁转简派生版、段落裁剪、重复浏览和 OSS 备份。正式环境部署与真实 OSS 联调需另行安排。
+**项目开发中。** 
 
 ## 核心能力
 
@@ -18,11 +18,11 @@
 - 批次管理：每次入库登记为一批，可查看每次入库的进度与失败记录；中途失败的批次支持断点续跑，不需要的批次可以放弃并回收空间。
 - LLM 服务：独立提供质检、自定义 prompt 生成及批量调用，统一管理接入点、凭据引用和模型配置；支持 DeepSeek 的 Chat Completions、Responses、Anthropic Messages 和 Beta FIM 生成接口。见 [LLM 使用说明](docs/llm.md)。
 
-全文检索、SFT 派生样本和 macOS 打包尚未实现。
+全文检索、SFT 派生样本和 macOS 打包将在未来实现。
 
 ## Web app
 
-Web app 支持元数据优先的文档查看、年代筛选与统计、人工审核、批次管理、正文阅读和历史版本切换。React 客户端与 FastAPI 后端分离，未来 SwiftUI 可复用 HTTP API。运行方式见 [Web app 说明](docs/webapp.md)。
+Web app 支持文档查看、年代筛选与统计、人工审核、批次管理、正文阅读和历史版本切换。React 客户端与 FastAPI 后端分离。运行方式见 [Web app 说明](docs/webapp.md)。
 
 ## 快速开始
 
@@ -81,7 +81,7 @@ worker 同一时间只执行一个任务，同库只能有一个 worker。`--no-
 
 ## 查重
 
-入库发布成功后，文档级和段落级查重作为后续任务依次运行（就地执行时在同一进程接着跑完，worker 执行时排入队列），也可以单独运行。两级结果各自保存、互不覆盖：
+入库发布成功后，文档级和段落级查重作为后续任务依次运行（就地执行时在同一进程接着跑完，worker 执行时排入队列），也可以单独运行：
 
 ```bash
 midstream dedup          # 文档级：整篇相似度，连成重复簇
@@ -127,13 +127,3 @@ midstream dedup --full   # 忽略缓存，强制完整重算文档级查重
 项目代码采用 [GPL-3.0](LICENSE)。`rust/data/` 下的 OpenCC 数据采用 Apache-2.0，见 [rust/data/LICENSE-OpenCC](rust/data/LICENSE-OpenCC)。
 
 构建脚本使用的 [PostgreSQL](https://www.postgresql.org/about/licence/) 和 [pg_bigm](https://github.com/pgbigm/pg_bigm/tree/v1.2-20250903) 采用 PostgreSQL License，[LZ4 库](https://github.com/lz4/lz4/blob/v1.10.0/lib/LICENSE)采用 BSD-2-Clause，均与 GPL-3.0 兼容。
-
-Web 批次管理支持服务器目录浏览与收藏、递归扫描、格式与字段结构分组、可视化字段映射、元数据预览和草稿恢复；来源按“内置解析器 → 已确认过的方案 → 内置来源方案 → 规则推断 → LLM 建议”逐级识别，映射方案是声明式配置，可从文件名、正文开头和嵌套记录取元数据；确认导入后自动登记并排队验证，再人工检查发布。使用范围与路径要求见 [Web 说明](docs/webapp.md)。
-
-入库支持已有来源规则识别，以及复用 LLM 服务分析未知格式的字段映射建议；确认后的 TXT、JSON/JSONL、Parquet 和行文本映射随批次保存。需升级迁移 `0008`，覆盖范围和限制见 [Web 说明](docs/webapp.md#格式识别与智能映射)。
-
-Web 侧栏提供 LLM 配置页面，可管理协议接入点、API 凭据、模型及用途默认值，与 CLI 共用后端配置；密钥不回显，支持环境变量或后端本地保存。
-
-LLM 配置页提供 DeepSeek 快速预设和官方模型列表刷新，可自动填写协议地址、模型及基础参数。
-
-Qwen 快速配置支持阿里云百炼三个区域的工作空间地址自动填写、模型目录刷新及共享凭据管理。
