@@ -127,3 +127,7 @@ midstream dedup --full   # 忽略缓存，强制完整重算文档级查重
 项目代码采用 [GPL-3.0](LICENSE)。`rust/data/` 下的 OpenCC 数据采用 Apache-2.0，见 [rust/data/LICENSE-OpenCC](rust/data/LICENSE-OpenCC)。
 
 构建脚本使用的 [PostgreSQL](https://www.postgresql.org/about/licence/) 和 [pg_bigm](https://github.com/pgbigm/pg_bigm/tree/v1.2-20250903) 采用 PostgreSQL License，[LZ4 库](https://github.com/lz4/lz4/blob/v1.10.0/lib/LICENSE)采用 BSD-2-Clause，均与 GPL-3.0 兼容。
+
+### AI 辅助清洗与标注（迁移 0018）
+
+导入时可选择在暂存阶段完成 AI 整理；“数据整理”工作区支持对已有未处理记录补清洗。每步保存 bool，结果附带证据、模型自评置信度和独立人工审核状态，支持自动应用、恢复与撤销。详细配置、CLI/API 和验证边界见 [整理指南](docs/curation.md)。新版元数据 API 的年份区间统一输出 `{start_year,end_year}`，旧输入格式仍兼容。

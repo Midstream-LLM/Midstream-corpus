@@ -6,6 +6,7 @@ import psycopg
 from psycopg.types.json import Jsonb
 
 from .versions import _write_versions
+from .metadata import EDITABLE_FIELDS
 
 
 class ManagementError(ValueError):
@@ -16,11 +17,7 @@ class ManagementError(ValueError):
         self.code = code
 
 
-_FIELDS = frozenset({
-    "quality_status", "quality_flags", "license", "title", "authors",
-    "composed_years", "composed_label", "edition_years", "genre", "category",
-    "topics", "legacy_category", "extra",
-})
+_FIELDS = frozenset(EDITABLE_FIELDS)
 _ARRAYS = frozenset({"quality_flags", "authors", "topics"})
 _RANGES = frozenset({"composed_years", "edition_years"})
 
@@ -38,25 +35,11 @@ def _patch(patch: Mapping) -> dict:
     unknown = set(patch) - _FIELDS
     if unknown:
         raise ManagementError("invalid_input", f"不支持的字段：{sorted(unknown)}")
-    result = dict(patch)
-    for key, value in result.items():
-        if key in _ARRAYS and value is not None and (
-            not isinstance(value, list) or any(not isinstance(item, str) for item in value)
-        ):
-            raise ManagementError("invalid_input", f"{key} 应为字符串数组或 null")
-        if key in _RANGES and value is not None and not isinstance(value, str):
-            raise ManagementError("invalid_input", f"{key} 应为 PostgreSQL int4range 字符串或 null")
-        if key == "extra" and (not isinstance(value, dict)):
-            raise ManagementError("invalid_input", "extra 应为对象")
-        if key == "quality_status" and value not in ("ok", "flagged", "quarantined"):
-            raise ManagementError("invalid_input", "quality_status 无效")
-        if key not in _ARRAYS | _RANGES | {"extra", "quality_status"} and (
-            value is not None and not isinstance(value, str)
-        ):
-            raise ManagementError("invalid_input", f"{key} 应为字符串或 null")
-    if result.get("quality_flags") is None and "quality_flags" in result:
-        raise ManagementError("invalid_input", "quality_flags 不能为 null")
-    return result
+    from .metadata import database_patch
+    try:
+        return database_patch(dict(patch))
+    except ValueError as exc:
+        raise ManagementError('invalid_input', '元数据未通过类型校验') from exc
 
 
 def review_document(

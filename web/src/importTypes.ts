@@ -1,3 +1,4 @@
+import type { CurationConfig } from "./Curation";
 export type Plan = {format: string; encoding: string; text_field: string; id_field: string; fields: Record<string, string>;
   constants?: Record<string, string>; path_pattern?: string; head_patterns?: string[]; trim_start?: string; trim_end?: string};
 export type FileItem = {path: string; size_bytes: number; known: boolean; source: string | null; adapter: string | null;
@@ -10,10 +11,10 @@ export type Group = {id: string; source: string; adapter: string; plan: Plan; fi
 export type Preview = {source: string; parser_version: string; objects: {path: string; size_bytes: number; sha256: string}[];
   fill_rates: {field: string; filled: number; total: number}[];
   samples: {file: string; position: string; source_key: string; metadata: Record<string, unknown>; error: string | null; text_preview: string}[]};
-export type Prepared = {groupId: string; source: string; plan: Plan | null; paths: string[]; preview: Preview;
+export type Prepared = {curation?: CurationConfig | null;groupId: string; source: string; plan: Plan | null; paths: string[]; preview: Preview;
   approval: Group["approval"]; actor: string; reason: string; token: string; result?: {batch_id: number; job_id: number}};
 export type Scan = {scan_id: string; status: string; current: string; found: number; items: FileItem[]; next_offset: number; errors: string[]};
-export type Draft = {step: number; directory: string; selected: string[]; recursive: boolean; scanId: string; scanOffset: number;
+export type Draft = {curation?: CurationConfig | null;step: number; directory: string; selected: string[]; recursive: boolean; scanId: string; scanOffset: number;
   scanStatus: string; scanErrors: string[]; files: FileItem[]; groups: Group[]; prepared: Prepared[]; note: string};
 export const emptyDraft = (): Draft => ({step: 1, directory: "", selected: [], recursive: true, scanId: "", scanOffset: 0,
   scanStatus: "", scanErrors: [], files: [], groups: [], prepared: [], note: ""});

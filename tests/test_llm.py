@@ -345,3 +345,27 @@ def test_import_identification_service():
         payload['plan']['format'] = 'txt'
         with pytest.raises(LLMError, match='物理格式'):
             service.identify_import({'format':'jsonl', 'encoding':'utf-8-sig', 'sample':'{}'})
+
+
+
+def test_local_endpoint_without_credential_and_schema_output():
+    import httpx
+    from midstream.llm.config import LLMConfig, Endpoint, Profile
+    from midstream.llm.client import LLMClient
+    from midstream.llm.protocols import generation_payload
+    seen = []
+    def handler(request):
+        seen.append(request)
+        return httpx.Response(200, json={'choices': [{'message': {'content': '{}'}, 'finish_reason': 'stop'}],
+                                         'model': 'local', 'usage': {}})
+    config = LLMConfig({}, {'local': Endpoint('chat_completions', 'http://10.0.0.5:8000/v1')},
+                       {'default': Profile('local', 'qwen', json_schema=True)})
+    assert config.describe()['endpoints']['local']['key_configured'] is None
+    with LLMClient(config, transport=httpx.MockTransport(handler)) as client:
+        client.request(generation_payload('chat_completions', config.profiles['default'], '甲', None,
+                                          schema={'type': 'object'}), profile='default')
+    assert 'authorization' not in seen[0].headers
+    body = __import__('json').loads(seen[0].content)
+    assert body['response_format']['json_schema']['schema'] == {'type': 'object'}
+    plain = generation_payload('chat_completions', Profile('local', 'm'), '甲', None, schema={'type': 'object'})
+    assert 'response_format' not in plain

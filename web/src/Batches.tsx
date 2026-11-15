@@ -32,6 +32,7 @@ type Detail = {
   records_failed: number;
   staged: { decoded: number; cleaned: number };
   has_partition: boolean;
+  uncurated?: number | null;
   failure_samples: {
     source_key: string;
     parse_error: string;
@@ -49,6 +50,7 @@ export default function Batches({ onJob, active = true }: { onJob: (id: number) 
     [actor, setActor] = useState(savedActor),
     [reason, setReason] = useState(""),
     [busy, setBusy] = useState(false),
+    [allowUncurated, setAllowUncurated] = useState(false),
     [message, setMessage] = useState(""),
     [confirm, setConfirm] = useState(false);
   const list = useLoad<{ items: Batch[]; next_cursor: number | null }>(
@@ -75,7 +77,7 @@ export default function Batches({ onJob, active = true }: { onJob: (id: number) 
     try {
       if (action === "resume" || action === "publish") {
         const job = await api<{ job_id: number }>("jobs", undefined, {
-          kind: action === "publish" ? "batch_publish" : "batch_stage", params: { batch_id: id }, actor, reason: reason.trim() || (action === "publish" ? "人工确认发布批次" : "继续暂存并验证批次"),
+          kind: action === "publish" ? "batch_publish" : "batch_stage", params: action === "publish" && allowUncurated ? { batch_id: id, allow_uncurated: true } : { batch_id: id }, actor, reason: reason.trim() || (action === "publish" ? "人工确认发布批次" : "继续暂存并验证批次"),
         });
         onJob(job.job_id);
         return;
@@ -277,8 +279,10 @@ export default function Batches({ onJob, active = true }: { onJob: (id: number) 
                     >
                       暂存并验证
                     </button>}
-                    {d.status === "validated" && <button className="primary" disabled={busy || !allowed} onClick={() => act("publish")}>确认发布</button>}
+                    {d.status === "validated" && <button className="primary" disabled={busy || !allowed || (!!d.uncurated && !allowUncurated)} onClick={() => act("publish")}>确认发布</button>}
                   </div>
+                  {d.status === "validated" && !!d.uncurated && <label className="check-row"><input type="checkbox" disabled={busy} checked={allowUncurated} onChange={e => setAllowUncurated(e.target.checked)}/>
+                    还有 {d.uncurated} 条记录未完成入库清洗。仍然发布，这些记录留到“数据整理”里补清洗（记入审计）</label>}
                   {confirm && (
                     <div className="change-preview">
                       <p>

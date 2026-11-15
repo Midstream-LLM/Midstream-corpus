@@ -7,11 +7,12 @@
 POETRY = dict(text_field='paragraphs|content|para', id_field='id',
               fields={'title': 'title|rhythmic|chapter', 'authors': 'author|_parent.author',
                       'work_title': '_parent._parent.title|_parent.title'})
-PERIODICAL = r'-(?P<year>\d{4})\.[\d.\-]+\.txt$'
+PERIODICAL = dict(path_pattern=r'-(?P<date>(?P<year>\d{4})\.[\d.\-]+)\.txt$', title_format='{work_title} {date}')
 
 PROFILES = [
     dict(source='mingqing', root=r'/ming-qing-wenji-corpus/', require={'id', 'collection', 'text'},
          plan=dict(text_field='text', id_field='id', constants={'unit_type': 'page'},
+                   title_format='{collection} 第{page}页', accept={'category': r'[经史子集]部.*'},
                    fields={'title': 'collection', 'work_title': 'collection', 'authors': 'author',
                            'composed_label': 'dynasty', 'category': 'siku_category'})),
     dict(source='wikisource', root=r'/wikisource-zh/', require={'id', 'title', 'text'},
@@ -20,13 +21,14 @@ PROFILES = [
          plan=dict(text_field='text', id_field='id',
                    fields={'title': 'title', 'authors': 'author', 'composed_label': 'dynasty|era',
                            'category': 'content_category'})),
-    dict(source='chinese_poetry', root=r'/chinese-poetry/(全唐诗/poet\.tang\.|御定全唐詩/)',
-         any={'paragraphs'}, plan=dict(POETRY, constants={'composed_label': '唐'})),
-    dict(source='chinese_poetry', root=r'/chinese-poetry/(全唐诗/poet\.song\.|宋词/)',
-         any={'paragraphs'}, plan=dict(POETRY, constants={'composed_label': '宋'})),
-    dict(source='chinese_poetry', root=r'/chinese-poetry/元曲/',
-         any={'paragraphs'}, plan=dict(POETRY, constants={'composed_label': '元'})),
-    dict(source='chinese_poetry', root=r'/chinese-poetry/', any={'paragraphs', 'content', 'para'}, plan=POETRY),
+    *[dict(source='chinese_poetry', root='/chinese-poetry/' + root, any={'paragraphs'},
+           plan=dict(POETRY, constants={k: v for k, v in (('composed_label', era), ('work_title', work)) if v}))
+      for root, era, work in ((r'全唐诗/poet\.tang\.', '唐', '全唐诗'), (r'全唐诗/poet\.song\.', '宋', '全宋诗'),
+                              (r'御定全唐詩/', '唐', '御定全唐詩'), (r'宋词/ci\.song\.', '宋', '全宋词'),
+                              (r'宋词/', '宋', ''), (r'元曲/', '元', ''), (r'五代诗词/huajianji/', '', '花间集'),
+                              (r'五代诗词/nantang/', '', '南唐二主词'))],
+    dict(source='chinese_poetry', root=r'/chinese-poetry/', any={'paragraphs', 'content', 'para'},
+         plan=dict(POETRY, path_pattern=r'/chinese-poetry/(?P<work_title>诗经|楚辞|论语|幽梦影|曹操诗集|水墨唐诗)/')),
     dict(source='daizhige', root=r'/daizhigev20/',
          plan=dict(path_pattern=r'/daizhigev20/(?P<category>.+)/(?P<title>[^/]+)\.txt$')),
     dict(source='team_texts', root=r'/new-dataset/',
@@ -37,10 +39,10 @@ PROFILES = [
                    head_patterns=[r'^Title: (?P<title>.+)$', r'^Author: (?P<authors>.+)$']),
          note='标题和作者取自文件头；正文去掉 Project Gutenberg 的头尾声明。'),
     dict(source='dongfang_ocr', root=r'/ocr_sources/dongfang/',
-         plan=dict(path_pattern=PERIODICAL, constants={'work_title': '东方杂志', 'unit_type': 'issue'}),
+         plan=dict(PERIODICAL, constants={'work_title': '东方杂志', 'unit_type': 'issue'}),
          note='OCR 文本含图片标签，需在清洗规则中处理。'),
     dict(source='shenbao_ocr', root=r'/ocr_sources/shenbao/',
-         plan=dict(path_pattern=PERIODICAL, constants={'work_title': '申报', 'unit_type': 'issue'})),
+         plan=dict(PERIODICAL, constants={'work_title': '申报', 'unit_type': 'issue'})),
 ]
 
 SKIP = [

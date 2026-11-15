@@ -6,6 +6,7 @@ import psycopg
 from pydantic import TypeAdapter
 
 from ..store import textcodec
+from .metadata import public_metadata
 
 
 @dataclass(frozen=True)
@@ -25,12 +26,16 @@ class Filters:
     min_chars: int | None = None
     composed_label: str | None = None
     only_unknown_years: bool = False
+    processed_steps: dict[str, bool] = field(default_factory=dict)
 
     @classmethod
     def from_dict(cls, data: dict) -> "Filters":
         unknown = set(data) - set(cls.__dataclass_fields__)
         if unknown:
             raise ValueError(f"未知的筛选条件：{sorted(unknown)}")
+        from .metadata import step_flags
+        if 'processed_steps' in data:
+            step_flags(data['processed_steps'])
         return TypeAdapter(cls).validate_python(data)
 
 
@@ -38,6 +43,12 @@ def where_clause(filters: Filters) -> tuple[str, dict]:
     """生成筛选条件。表别名固定为 v（版本）、d（文档）、s（来源）。"""
     clauses = ["v.is_current", "v.quality_status = ANY(%(quality)s)"]
     params: dict = {"quality": filters.quality}
+    from .metadata import step_flags
+    step_flags(filters.processed_steps)
+    for i, (step, completed) in enumerate(filters.processed_steps.items()):
+        clauses.append(f"coalesce((v.processed_steps->>%(step_{i})s)::boolean,false) = %(completed_{i})s")
+        params[f'step_{i}'] = step
+        params[f'completed_{i}'] = completed
     if filters.sources:
         clauses.append("s.name = ANY(%(sources)s)")
         params["sources"] = filters.sources
@@ -82,7 +93,7 @@ def search(
     rows = conn.execute(
         f"""SELECT d.doc_id, v.version_id, s.name, v.version_no, v.title, v.authors, v.composed_label,
                    lower(v.composed_years), upper(v.composed_years) - 1,
-                   v.category, v.genre, v.quality_status, v.quality_flags, v.char_count, v.variant
+                   v.category, v.genre, v.quality_status, v.quality_flags, v.char_count, v.variant, v.processed_steps
             FROM document_version v
             JOIN document d USING (doc_id)
             JOIN source s USING (source_id)
@@ -92,8 +103,8 @@ def search(
     ).fetchall()
     keys = ("doc_id", "version_id", "source", "version_no", "title", "authors",
             "composed_label", "year_from", "year_to", "category", "genre",
-            "quality_status", "quality_flags", "char_count", "variant")
-    return [dict(zip(keys, row)) for row in rows]
+            "quality_status", "quality_flags", "char_count", "variant", "processed_steps")
+    return [public_metadata(dict(zip(keys, row))) for row in rows]
 
 
 def get_text(conn: psycopg.Connection, doc_id: int, version_no: int | None = None) -> dict | None:
@@ -107,7 +118,7 @@ def get_text(conn: psycopg.Connection, doc_id: int, version_no: int | None = Non
     ).fetchone()
     if row is None:
         return None
-    return {**row[0], "text": textcodec.decompress(bytes(row[1]))}
+    return {**public_metadata(row[0]), "text": textcodec.decompress(bytes(row[1]))}
 
 
 def stats(conn: psycopg.Connection) -> dict:
@@ -163,7 +174,7 @@ def metadata(conn: psycopg.Connection, doc_id: int, version_no: int | None = Non
     if row[0]['variant'] is not None:
         variant_stale = not conn.execute('SELECT 1 FROM document_version WHERE doc_id=%s AND is_current'
                                          ' AND version_id=%s', (doc_id,row[0]['parent_version_id'])).fetchone()
-    return {**row[0], "variant_stale": variant_stale, "document": row[1], "source": row[2],
+    return {**public_metadata(row[0]), "variant_stale": variant_stale, "document": row[1], "source": row[2],
             "processing": {"kind": row[3], "rule_version": row[4], "batch_id": row[5]},
             "source_records": [dict(zip(keys, record)) for record in records]}
 

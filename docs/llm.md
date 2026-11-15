@@ -99,6 +99,29 @@ with LLMServices.from_config() as llm:
 
 这里的批量是受限并发的独立请求。核对的 DeepSeek 官方接口目录未提供原生 Batch 作业端点，因此本版不提交供应商批处理作业，不宣称具有供应商 Batch 的计费或时效特性。
 
+## 本地推理服务
+
+vLLM、SGLang、Ollama、llama.cpp 等提供 OpenAI 兼容接口的推理服务，用 `chat_completions` 协议接入，地址可以是内网 `http`。这类服务通常不需要 key，接入点的 `credential` 留空即可，请求不带鉴权头；Web 里选“不需要鉴权（本地推理服务）”。
+
+```toml
+[endpoints.local]
+protocol = "chat_completions"
+base_url = "http://gpu-host:8000/v1"
+concurrency = 8
+
+[profiles.local]
+endpoint = "local"
+model = "Qwen/Qwen3-32B"
+json_schema = true
+
+[services]
+curation = "local"
+```
+
+`json_schema = true` 时，调用方给出的 JSON Schema 会随请求发送（`chat_completions` 用 `response_format`，`responses` 用 `text.format`），由服务端约束解码，减少格式不合格导致的失败。目前只有 AI 整理会给出 schema。DeepSeek 官方接口不要开启。
+
+网页搜索仍走 `search` 服务指向的 DeepSeek Search；完全本地运行时在整理配置里关闭 `use_search`。本地模型的自评置信度更不可靠，自动应用的门槛应另行设定。
+
 ## 原生协议与流式请求
 
 ```python

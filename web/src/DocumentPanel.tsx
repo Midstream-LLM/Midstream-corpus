@@ -1,4 +1,5 @@
 import { rangeLabel } from "./Years";
+import { stepLabels, CurationItem } from "./Curation";
 import RepeatHighlight from "./RepeatHighlight";
 import { useState } from "react";
 import {
@@ -44,6 +45,10 @@ type Work = {
 const labels: Record<string, string> = {
   title: "标题",
   authors: "作者",
+  contributors: "责任者与角色",
+  tags: "标准标签",
+  tune_pattern: "词牌",
+  external_ids: "外部实体",
   composed_label: "成书时代标签",
   composed_years: "成书年份区间",
   edition_years: "刊刻年份区间",
@@ -192,7 +197,7 @@ function Editor({
           <summary>高级字段修正</summary>
           <p>
             可补充成书/刊刻年份区间、历史分类、extra 等字段。例如成书区间用{" "}
-            {`{"composed_years":"[618,908)"}`} 表示 618—907 年，null 表示未知。
+            {`{"composed_years":{"start_year":618,"end_year":907}}`} 表示 618—907 年，null 表示未知。
           </p>
           <textarea
             aria-label="高级元数据 JSON"
@@ -449,6 +454,8 @@ export default function DocumentPanel({
                       </div>
                     ))}
                 </dl>
+                <h3>处理步骤</h3><dl className="fields">{Object.entries((m.processed_steps || {}) as Record<string,boolean>).map(([step,done])=><div key={step}><dt>{stepLabels[step] || step}</dt><dd>{done?'已完成':'未完成'}</dd></div>)}</dl>
+                <CurationHistory key={m.doc_id} docId={m.doc_id}/>
                 <h3>来源与版本</h3>
                 <dl className="fields">
                   {Object.entries({
@@ -602,4 +609,12 @@ export default function DocumentPanel({
       )}
     </section>
   );
+}
+
+function CurationHistory({docId}:{docId:number}) {
+  const [open,setOpen]=useState(false),[id,setId]=useState<number|null>(null);
+  const data=useLoad<{items:{item_id:number;status:string}[]}>(open?`curation/items?doc_id=${docId}`:null);
+  return <div><button onClick={()=>setOpen(!open)}>整理证据与人工审核记录</button>{open && <>
+    <State loading={data.loading} error={data.error}/>{data.data?.items.map(i=><button key={i.item_id} onClick={()=>setId(i.item_id)}>工作项 #{i.item_id} · {i.status}</button>)}
+    {id && <CurationItem key={id} id={id}/>}</>}</div>;
 }

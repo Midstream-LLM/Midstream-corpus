@@ -8,6 +8,7 @@ from pydantic import Field, field_validator
 from ..operations import Context, Params, operation
 from . import batches, pipeline as ingest
 from .adapters import ADAPTERS
+from ..curation.models import CurationConfig
 
 # 发布改变了当前版本；查重作为后续任务，不在发布事务里。
 DEDUP = [('dedup', {}), ('dedup_spans', {})]
@@ -18,6 +19,7 @@ class BatchParams(Params):
 
 
 class IngestParams(Params):
+    curation: CurationConfig | None = None
     source: str
     paths: list[str] = Field(default_factory=list)
 
@@ -34,7 +36,7 @@ def _ingest(conn, params: IngestParams, ctx: Context):
     adapter = ADAPTERS[params.source]
     paths = [Path(p) for p in params.paths] or adapter.default_paths()
     try:
-        report = ingest.ingest(conn, adapter, paths)
+        report = ingest.ingest(conn, adapter, paths, curation=params.curation, actor=ctx.actor, reason=ctx.reason)
     except ingest.AlreadyImported as exc:
         return {'status': 'skipped', 'message': str(exc)}
     ctx.follow_ups.extend(DEDUP)
@@ -58,7 +60,12 @@ def _batch_stage(conn, params: BatchParams, ctx: Context):
     return batches.stage(conn, params.batch_id, actor=ctx.actor, reason=ctx.reason, progress=ctx.progress)
 
 
+class PublishParams(BatchParams):
+    # 仍有未完成入库清洗的记录时也发布；这些记录留到库内补清洗。
+    allow_uncurated: bool = False
+
+
 @operation('batch_publish', '发布已验证的批次')
-def _batch_publish(conn, params: BatchParams, ctx: Context):
+def _batch_publish(conn, params: PublishParams, ctx: Context):
     return _published(batches.publish(conn, params.batch_id, actor=ctx.actor, reason=ctx.reason,
-                                       progress=ctx.progress), ctx)
+                                       progress=ctx.progress, allow_uncurated=params.allow_uncurated), ctx)

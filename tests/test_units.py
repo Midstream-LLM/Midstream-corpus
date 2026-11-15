@@ -68,7 +68,7 @@ def test_era_unknown_is_not_guessed():
 
 def test_cleaned_metadata_records_rule_basis():
     derived = _cleaned_metadata({"composed_label": "唐", "field_basis": {"title": "source"}}, "甲乙")
-    assert derived["composed_years"] == [618, 907]
+    assert derived["composed_years"] == {"start_year":618, "end_year":907}
     assert derived["field_basis"] == {"title": "source", "composed_years": "rule"}
 
 

@@ -28,7 +28,11 @@ class ImportDetect(BaseModel):
     profile: str | None = None
 
 
+from ..curation.models import CurationConfig
+
+
 class ImportRegister(ImportPreview, Operation):
+    curation: CurationConfig | None = None
     objects: list[dict] = Field(min_length=1, max_length=MAX_BATCH_FILES)
     parser_version: str
 
@@ -50,8 +54,13 @@ def import_preview(body: ImportPreview):
 
 @router.post('/api/v1/import/register', dependencies=[Depends(browser_write)])
 def import_register(body: ImportRegister, conn=Depends(write_connection)):
-    return importing.register(conn, body.source, body.paths, body.objects,
-                              body.parser_version, body.actor, body.reason, body.plan)
+    result = importing.register(conn, body.source, body.paths, body.objects,
+                                body.parser_version, body.actor, body.reason, body.plan, commit=False)
+    if body.curation is not None:
+        from ..curation.ingestion import configure_batch
+        configure_batch(conn, result['batch_id'], body.curation)
+    conn.commit()
+    return result
 
 
 @router.get('/api/v1/batches')

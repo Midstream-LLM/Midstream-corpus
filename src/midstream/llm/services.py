@@ -64,10 +64,11 @@ class LLMServices:
     def __exit__(self, *_):
         self.client.close()
 
-    def generate(self, prompt: str, *, system: str | None = None,
-                 parameters: dict | None = None, profile: str | None = None) -> GenerationResult:
+    def generate(self, prompt: str, *, system: str | None = None, parameters: dict | None = None,
+                 profile: str | None = None, schema: dict | None = None) -> GenerationResult:
+        """schema 只在 profile 开启 json_schema 时发送；否则仍靠提示词和返回后的校验。"""
         name, selected, endpoint = self.client.config.resolve("generation", profile)
-        payload = generation_payload(endpoint.protocol, selected, prompt, system, parameters)
+        payload = generation_payload(endpoint.protocol, selected, prompt, system, parameters, schema)
         return self.client.request(payload, profile=name)
 
     def identify_import(self, sample: dict, *, profile: str | None = None) -> dict:

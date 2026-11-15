@@ -1,6 +1,7 @@
 import React, { useEffect, useState } from "react";
 import { createRoot } from "react-dom/client";
 import Corpus from "./Corpus";
+import Curation from "./Curation";
 import Stats from "./Stats";
 import Batches from "./Batches";
 import Jobs from "./Jobs";
@@ -24,6 +25,7 @@ function App() {
     stats: "统计概览",
     corpus: "语料浏览",
     review: "人工审核",
+    curation: "数据整理",
     batches: "批次管理",
     jobs: "任务中心",
     datasets: "数据集",
@@ -84,7 +86,7 @@ function App() {
           ))}
         </div>
         <div hidden={page !== "batches"}><Batches active={page === "batches"} onJob={id => navigate(`jobs/${id}`)} /></div>
-        {page === "llm" ? (
+        {page === "curation" ? <Curation onJob={id=>navigate("jobs/"+id)}/> : page === "llm" ? (
           <><OperatorSettings /><LLMSettings /><BackupSettings onJob={id=>navigate("jobs/"+id)}/></>
         ) : page === "stats" ? (
           <Stats />

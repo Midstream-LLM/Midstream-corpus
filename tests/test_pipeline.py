@@ -73,6 +73,7 @@ def conn():
         connection.execute(SCHEMA.with_name("0015_member_cuts.sql").read_text(encoding="utf-8"))
         connection.execute(SCHEMA.with_name("0016_dedup_overrides.sql").read_text(encoding="utf-8"))
         connection.execute(SCHEMA.with_name("0017_backups.sql").read_text(encoding="utf-8"))
+        connection.execute(SCHEMA.with_name("0018_curation.sql").read_text(encoding="utf-8"))
         connection.commit()
         yield connection
 

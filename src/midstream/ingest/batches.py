@@ -37,6 +37,7 @@ def _partition(conn: psycopg.Connection, batch_id: int) -> bool:
 
 
 def inspect(conn: psycopg.Connection, batch_id: int) -> dict:
+    from ..curation.ingestion import uncurated
     status, source, parser_version, published_at = _batch(conn, batch_id)
     ok, failed = conn.execute(
         "SELECT count(*) FILTER (WHERE parse_status = 'ok'),"
@@ -64,6 +65,7 @@ def inspect(conn: psycopg.Connection, batch_id: int) -> dict:
         "validation_ready": ok > 0 and staged.get("decoded", 0) == ok
                             and staged.get("cleaned", 0) == ok,
         "has_partition": _partition(conn, batch_id),
+        "uncurated": uncurated(conn, batch_id),
         "failure_samples": [
             {"source_key": key, "locator": locator, "parse_error": error}
             for key, locator, error in failures
@@ -131,10 +133,12 @@ def _event(conn: psycopg.Connection, action: str, batch_id: int, actor: str,
 
 def resume(conn: psycopg.Connection, batch_id: int, *, actor: str, reason: str,
            progress: Callable[[int, int, str], None] | None = None,
-           stop_after_validation: bool = False, publish_only: bool = False) -> dict:
+           stop_after_validation: bool = False, publish_only: bool = False,
+           allow_uncurated: bool = False) -> dict:
     """按状态重入流程；已发布的批次不会二次发布。查重由调用它的操作登记为后续任务。"""
     _identity(actor, reason)
     conn.execute("SELECT pg_advisory_lock(%s)", (batch_id,))
+    remaining = 0
     try:
         status, source, version, _ = _batch(conn, batch_id)
         if status == "published":
@@ -191,15 +195,24 @@ def resume(conn: psycopg.Connection, batch_id: int, *, actor: str, reason: str,
                     return {"status": status, "batch_id": batch_id, "event_id": event_id}
             if status != "validated" or not _partition(conn, batch_id):
                 raise ManagementError("not_recoverable", "批次缺少完整的已验证暂存层")
+            from ..curation.ingestion import curate_batch
+            curate_batch(conn, batch_id, actor=actor, reason=reason, progress=progress,
+                         allow_uncurated=allow_uncurated or stop_after_validation)
             if stop_after_validation:
                 event_id = _event(conn, 'batch_resume', batch_id, actor, reason, before, status)
                 conn.commit()
                 return {'status': status, 'batch_id': batch_id, 'event_id': event_id, 'awaiting_confirmation': True}
             if progress:
                 progress(3, 4, "发布版本")
-            report = ingest.publish(conn, batch_id, pool)
+            from ..curation.ingestion import uncurated
+            remaining = uncurated(conn, batch_id) or 0
+            report = ingest.publish(conn, batch_id, pool, allow_uncurated=allow_uncurated)
         event_id = _event(conn, "batch_resume", batch_id, actor, reason,
                           before, "published")
+        if remaining:
+            # 审计里写明放行了多少条未完成清洗的记录。
+            conn.execute("UPDATE management_event SET after_state = after_state || %s WHERE event_id = %s",
+                         (Jsonb({"uncurated_published": remaining}), event_id))
         conn.commit()
         return {"status": "published", "batch_id": batch_id, "event_id": event_id,
                 "new_documents": report.new_documents,
@@ -215,15 +228,17 @@ def stage(conn, batch_id, *, actor, reason, progress=None):
     return resume(conn, batch_id, actor=actor, reason=reason, progress=progress, stop_after_validation=True)
 
 
-def publish(conn, batch_id, *, actor, reason, progress=None):
-    return resume(conn, batch_id, actor=actor, reason=reason, progress=progress, publish_only=True)
+def publish(conn, batch_id, *, actor, reason, progress=None, allow_uncurated=False):
+    return resume(conn, batch_id, actor=actor, reason=reason, progress=progress, publish_only=True,
+                  allow_uncurated=allow_uncurated)
 
 
 def _classified(batch_id):
     return """WITH records AS (
         SELECT r.record_id,r.source_key,r.parse_error,
           CASE WHEN r.parse_status='failed' THEN 'failed'
-               WHEN previous.record_hash=r.record_hash THEN 'unchanged'
+               WHEN previous.record_hash=r.record_hash AND NOT EXISTS(
+                 SELECT 1 FROM curation_item ci WHERE ci.record_id=r.record_id AND ci.status='applied') THEN 'unchanged'
                WHEN d.doc_id IS NULL THEN 'new' ELSE 'updated' END AS status,
           sc.metadata,sc.char_count,sc.text_hash,st.content AS before,
           coalesce(sc.content,st.content) AS after,

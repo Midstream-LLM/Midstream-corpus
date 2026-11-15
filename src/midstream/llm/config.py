@@ -32,7 +32,7 @@ def _number(value, label, minimum, *, integer=False):
 class Endpoint:
     protocol: str
     base_url: str
-    credential: str
+    credential: str = ""   # 留空表示不需要鉴权，如内网的 vLLM、Ollama 等本地推理服务
     timeout: float = 120
     concurrency: int = 4
     max_retries: int = 2
@@ -63,8 +63,12 @@ class Profile:
     model: str
     max_tokens: int = 4096
     parameters: dict = field(default_factory=dict)
+    # 调用方给出 JSON Schema 时随请求发送，由服务端约束解码（vLLM、SGLang 等支持）。
+    json_schema: bool = False
 
     def __post_init__(self):
+        if not isinstance(self.json_schema, bool):
+            raise LLMError("invalid_config", "json_schema 必须是布尔值")
         if not isinstance(self.model, str) or not self.model.strip():
             raise LLMError("invalid_config", "model 不能为空")
         _number(self.max_tokens, "max_tokens", 1, integer=True)
@@ -72,6 +76,8 @@ class Profile:
             raise LLMError("invalid_config", "parameters 必须是对象")
         if {"model", "stream", "messages", "input", "instructions", "prompt", "system"} & self.parameters.keys():
             raise LLMError("invalid_config", "parameters 不能覆盖模型、输入或 stream")
+        if self.json_schema and {"response_format", "text"} & self.parameters.keys():
+            raise LLMError("invalid_config", "启用 json_schema 时不要在 parameters 里另设输出格式")
 
 
 @dataclass(frozen=True)
@@ -84,6 +90,8 @@ class LLMConfig:
     local_keys: dict[str, str] = field(default_factory=dict, repr=False)
 
     def key(self, credential: str) -> str | None:
+        if not credential:
+            return None
         return os.environ.get(self.credentials[credential]) or self.local_keys.get(credential)
 
     def __post_init__(self):
@@ -95,12 +103,14 @@ class LLMConfig:
             if not isinstance(env, str) or not env.isidentifier():
                 raise LLMError("invalid_config", f"凭据 {name} 应引用环境变量名")
         for name, endpoint in self.endpoints.items():
-            if endpoint.credential not in self.credentials:
+            if endpoint.credential and endpoint.credential not in self.credentials:
                 raise LLMError("invalid_config", f"接入点 {name} 引用了不存在的凭据")
         for name, profile in self.profiles.items():
             if profile.endpoint not in self.endpoints:
                 raise LLMError("invalid_config", f"profile {name} 引用了不存在的接入点")
-        if set(self.services) - {"generation", "quality_check", "import_detection"}:
+            if profile.json_schema and self.endpoints[profile.endpoint].protocol not in ("chat_completions", "responses"):
+                raise LLMError("invalid_config", f"profile {name} 的协议不支持 json_schema")
+        if set(self.services) - {"generation", "quality_check", "import_detection", "curation", "search"}:
             raise LLMError("invalid_config", "未知服务名称")
         if any(profile not in self.profiles for profile in self.services.values()):
             raise LLMError("invalid_config", "服务引用了不存在的 profile")
@@ -135,7 +145,7 @@ class LLMConfig:
         return {
             "endpoints": {name: {"protocol": value.protocol, "base_url": value.base_url,
                                  "credential": value.credential,
-                                 "key_configured": bool(self.key(value.credential))}
+                                 "key_configured": bool(self.key(value.credential)) if value.credential else None}
                           for name, value in self.endpoints.items()},
             "profiles": {name: {"endpoint": value.endpoint, "model": value.model}
                          for name, value in self.profiles.items()},

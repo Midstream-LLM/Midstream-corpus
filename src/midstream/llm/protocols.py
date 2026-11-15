@@ -23,7 +23,7 @@ class GenerationResult:
 
 
 def generation_payload(protocol: str, profile: Profile, prompt: str, system: str | None,
-                       parameters: dict | None = None) -> dict:
+                       parameters: dict | None = None, schema: dict | None = None) -> dict:
     if not isinstance(prompt, str) or not prompt.strip() or (system is not None and not isinstance(system, str)):
         raise LLMError("invalid_input", "prompt 必须是非空字符串，system 必须是字符串")
     if parameters is not None and not isinstance(parameters, dict):
@@ -48,6 +48,11 @@ def generation_payload(protocol: str, profile: Profile, prompt: str, system: str
                 body["system"] = system
             else:
                 body["messages"].insert(0, {"role": "system", "content": system})
+    if schema is not None and profile.json_schema:
+        if protocol == "chat_completions":
+            body["response_format"] = {"type": "json_schema", "json_schema": {"name": "result", "schema": schema}}
+        elif protocol == "responses":
+            body["text"] = {"format": {"type": "json_schema", "name": "result", "schema": schema}}
     return body
 
 

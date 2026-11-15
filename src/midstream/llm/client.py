@@ -50,6 +50,8 @@ class LLMClient:
             self._sleep(max(0, start - now))
 
     def _headers(self, endpoint: Endpoint) -> dict:
+        if not endpoint.credential:
+            return {"anthropic-version": "2023-06-01"} if endpoint.protocol == "anthropic_messages" else {}
         env = self.config.credentials[endpoint.credential]
         key = self.config.key(endpoint.credential)
         if not key:

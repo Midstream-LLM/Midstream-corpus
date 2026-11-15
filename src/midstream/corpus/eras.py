@@ -4,7 +4,7 @@
 没有收录的标签返回 None，不做猜测。
 """
 
-RULE_VERSION = "era-v2"
+RULE_VERSION = "era-v3"
 
 ERA_YEARS: dict[str, tuple[int, int]] = {
     "周": (-1046, -256),
@@ -12,23 +12,33 @@ ERA_YEARS: dict[str, tuple[int, int]] = {
     "战国": (-475, -221),
     "秦": (-221, -207),
     "汉": (-202, 220),
+    "汉魏": (-202, 266),
     "三国": (220, 280),
     "晋": (266, 420),
     "南朝宋": (420, 479),
     "南朝梁": (502, 557),
     "北齐": (550, 577),
+    "南北朝": (420, 589),
     "隋": (581, 618),
+    "隋唐": (581, 907),
     "唐": (618, 907),
     "五代": (907, 960),
     "宋": (960, 1279),
+    "两宋": (960, 1279),
     "元": (1271, 1368),
     "明": (1368, 1644),
+    "明清": (1368, 1911),
     "清": (1644, 1911),
+    "清末": (1840, 1911),
     "民国": (1912, 1949),
 }
+
+# 来源里的其他写法；标签保留原值，只用于查年份。
+ALIASES = {"yuan": "元", "tang": "唐", "song": "宋", "ming": "明", "qing": "清"}
 
 
 def era_years(label: str | None) -> tuple[int, int] | None:
     if not label:
         return None
-    return ERA_YEARS.get(label.strip())
+    label = label.strip()
+    return ERA_YEARS.get(ALIASES.get(label, label))

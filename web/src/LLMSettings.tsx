@@ -15,6 +15,7 @@ type Profile = {
   model: string;
   max_tokens: number;
   parameters: Record<string, unknown>;
+  json_schema?: boolean;
 };
 type Config = {
   credentials: Record<string, string>;
@@ -40,6 +41,8 @@ const protocolNames: Record<string, string> = {
 };
 const serviceNames: Record<string, string> = {
   generation: "通用生成",
+  curation: "语料整理",
+  search: "网页搜索（DeepSeek Search API）",
   quality_check: "语料质检",
   import_detection: "入库格式识别",
 };
@@ -610,7 +613,7 @@ export default function LLMSettings() {
                           })
                         }
                       >
-                        <option value="">请选择</option>
+                        <option value="">不需要鉴权（本地推理服务）</option>
                         {Object.keys(c.credentials).map((k) => (
                           <option key={k}>{k}</option>
                         ))}
@@ -713,6 +716,18 @@ export default function LLMSettings() {
                           })
                         }
                       />
+                    </label>
+                    <label className="check-row">
+                      <input
+                        type="checkbox"
+                        checked={!!profile.json_schema}
+                        onChange={(e) =>
+                          edit((c) => {
+                            c.profiles[name].json_schema = e.target.checked;
+                          })
+                        }
+                      />
+                      随请求发送 JSON Schema，约束输出格式（vLLM、SGLang 等支持；DeepSeek 官方接口不要勾选）
                     </label>
                     <label>
                       附加参数 JSON · {name}

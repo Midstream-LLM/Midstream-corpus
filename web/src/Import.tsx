@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { api, State, count, show, useLoad } from "./shared";
 import ServerBrowser from "./ServerBrowser";
+import { CurationOptions, defaultCuration } from "./Curation";
 import ImportGroup from "./ImportGroup";
 import { useImportDraft, savedActor } from "./importDraft";
 import { emptyDraft, groupFiles, type Scan, type Group, type Prepared, type Preview } from "./importTypes";
@@ -80,7 +81,7 @@ export default function Import({onRegistered, active}: {onRegistered: (id: numbe
           setProgress(`正在预览 ${prepared.length + 1} / ${total} 批 · ${group.source}`);
           const plan = group.adapter ? null : group.plan;
           const result = await api<Preview>("import/preview", undefined, {source: group.source, paths, plan});
-          prepared.push({groupId: group.id, source: group.source, paths, plan, preview: result,
+          prepared.push({curation: d.curation || null, groupId: group.id, source: group.source, paths, plan, preview: result,
             approval: {...group.approval, requested_by: group.approval.requested_by || actor}, actor: actor.trim(),
             reason: `目录导入；来源：${group.source}；文件数：${paths.length}。${d.note.trim()}`, token: crypto.randomUUID()});
         }
@@ -98,7 +99,7 @@ export default function Import({onRegistered, active}: {onRegistered: (id: numbe
         const result = await api<{batch_id: number; job_id: number}>("import/start", undefined, {
           request_token: entry.token, source: entry.source, plan: entry.plan, paths: entry.paths,
           objects: entry.preview.objects, parser_version: entry.preview.parser_version,
-          actor: entry.actor, reason: entry.reason,
+          actor: entry.actor, reason: entry.reason, curation: entry.curation || null,
           approval: {...entry.approval, requested_by: entry.approval.requested_by || entry.actor},
         });
         setDraft(prev => ({...prev, prepared: prev.prepared.map(p => p.token === entry.token ? {...p, result} : p)}));
@@ -130,6 +131,10 @@ export default function Import({onRegistered, active}: {onRegistered: (id: numbe
       {d.scanStatus === "failed" && <p className="notice warning">扫描未完成，请返回重新扫描。</p>}
       {d.groups.slice(groupPage * 10, (groupPage + 1) * 10).map(group => <ImportGroup key={group.id} group={group} groups={d.groups} adapters={adapters.data || []} actor={actor} disabled={locked} onChange={changeGroup} onMove={move}/>)}
       {d.groups.length > 10 && <div className="pagination"><button disabled={locked || !groupPage} onClick={() => setGroupPage(groupPage - 1)}>上一页来源</button><span>第 {groupPage + 1} / {Math.ceil(d.groups.length / 10)} 页</span><button disabled={locked || (groupPage + 1) * 10 >= d.groups.length} onClick={() => setGroupPage(groupPage + 1)}>下一页来源</button></div>}
+      <section className="panel"><label><input type="checkbox" disabled={locked} checked={!!d.curation}
+        onChange={e=>setDraft(prev=>({...prev,curation:e.target.checked?defaultCuration():null}))}/>入库时完成 AI 清洗与标注</label>
+        {d.curation && <CurationOptions value={d.curation} disabled={locked} ingestion onChange={curation=>setDraft(prev=>({...prev,curation}))}/>}
+      </section>
       <div className="edit-grid"><label>操作人<input value={actor} disabled={locked} maxLength={200} onChange={e => setActor(e.target.value)} placeholder="用于记录导入和映射确认"/></label><label>补充备注（选填）<input value={d.note} disabled={locked} maxLength={2000} onChange={e => setDraft(prev => ({...prev, note: e.target.value}))}/></label></div>
       <label className="check"><input type="checkbox" checked={remember} onChange={e => setRemember(e.target.checked)}/>在此浏览器记住操作人</label>
       {invalid && <p className="error">请补全来源名称与正文字段；编辑过的 JSON 需先点击“应用 JSON”。</p>}
@@ -139,6 +144,7 @@ export default function Import({onRegistered, active}: {onRegistered: (id: numbe
     {d.step === 3 && <div className="import-stage">
       <h2>{allDone ? "已创建批次，正在排队验证" : "检查元数据，确认导入"}</h2><p>共 {d.prepared.length} 个批次。每批最多 2000 个文件，大组自动拆分。下方展示抽样结果，暂存后进行全量验证。</p>
       {d.prepared.slice(previewPage * 5, (previewPage + 1) * 5).map((entry, index) => <details key={entry.token} open={index === 0} className="preview-batch"><summary>{entry.source} · {entry.paths.length} 个文件{entry.result ? ` · 批次 #${entry.result.batch_id} 已登记` : ""}</summary>
+        {entry.curation && <p>已启用入库清洗：暂存阶段完成书目、标签、文本质检和篇章识别，再发布。</p>}
         {entry.result && <p>验证任务 #{entry.result.job_id} 已提交。<button onClick={() => onRegistered(entry.result!.batch_id)}>查看批次</button></p>}
         <div className="table-scroll"><table><thead><tr><th>字段</th><th>样本填充率</th></tr></thead><tbody>{entry.preview.fill_rates.map(r => <tr key={r.field}><td>{labels[r.field] || r.field}</td><td>{r.filled} / {r.total} · {r.total ? (100*r.filled/r.total).toFixed(0) : 0}%</td></tr>)}</tbody></table></div>
         <div className="preview-samples">{entry.preview.samples.map((sample, i) => <article key={i}><h3>{show(sample.metadata.title)}</h3><p>{sample.file.split("/").pop()} · {sample.position}</p>

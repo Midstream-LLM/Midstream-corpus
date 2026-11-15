@@ -38,9 +38,9 @@ def _wanli_collation(current: dict) -> Change | None:
 
 RULES = {
     rule.version: rule for rule in (
-        Rule("quality-v2", None, _quality),
-        Rule("wanli-collation-v1", ["wanli"], _wanli_collation),
+        Rule("quality-v2", None, _quality, step="quality_check"),
+        Rule("wanli-collation-v1", ["wanli"], _wanli_collation, step="collation_clean"),
         Rule("t2s-v1", None, lambda current: Change(text=variants.simplify(current['text'])),
-             variant='simplified', config=variants.info()),
+             variant='simplified', config=variants.info(), step='t2s'),
     )
 }

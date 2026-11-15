@@ -6,6 +6,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import Field
 
 from ..corpus import management, query
+from ..corpus.metadata import MetadataPatch
 from .deps import Operation, browser_write, connection, write_connection
 
 router = APIRouter()
@@ -13,7 +14,7 @@ router = APIRouter()
 
 class DocumentReview(Operation):
     expected_version_id: int = Field(gt=0)
-    metadata: dict
+    metadata: MetadataPatch
 
 
 class WorkReview(Operation):
@@ -60,7 +61,7 @@ def metadata(doc_id: int, version: Annotated[int | None, Query(ge=1)] = None, co
 
 @router.post('/api/v1/documents/{doc_id}/review', dependencies=[Depends(browser_write)])
 def review(doc_id: int, body: DocumentReview, conn=Depends(write_connection)):
-    return management.review_document(conn, doc_id, body.expected_version_id, body.metadata,
+    return management.review_document(conn, doc_id, body.expected_version_id, body.metadata.model_dump(exclude_unset=True),
                                       actor=body.actor, reason=body.reason)
 
 
@@ -92,7 +93,7 @@ def documents(title: str | None = None, author: str | None = None, source: str |
               year_from: Annotated[int | None, Query(ge=-2147483647,le=2147483646)] = None,
               year_to: Annotated[int | None, Query(ge=-2147483647,le=2147483646)] = None,
               era: str | None = None, include_unknown_years: bool = False,
-              only_unknown_years: bool = False,
+              only_unknown_years: bool = False, ai_curated: bool | None = None,
               limit: Annotated[int, Query(ge=1, le=100)] = 30,
               after: Annotated[int, Query(ge=0)] = 0, conn=Depends(connection)):
     if year_from is not None and year_to is not None and year_from > year_to:
@@ -106,7 +107,8 @@ def documents(title: str | None = None, author: str | None = None, source: str |
         quality=[quality] if quality else ['ok','flagged','quarantined'],
         year_from=year_from, year_to=year_to, composed_label=era,
         include_unknown_years=include_unknown_years,
-        only_unknown_years=only_unknown_years), limit=limit + 1, after_doc=after)
+        only_unknown_years=only_unknown_years,
+        processed_steps={"ai_curation":ai_curated} if ai_curated is not None else {}), limit=limit + 1, after_doc=after)
     return {"items": rows[:limit], "next_cursor": rows[limit-1]['doc_id'] if len(rows)>limit else None}
 
 

@@ -48,8 +48,17 @@ class _HashWriter(io.RawIOBase):
 
 def _schema(fields):
     integers = {'ordinal', 'version_id', 'doc_id', *SAMPLE_FIELDS}
-    return pa.schema([(name, pa.int64() if name in integers else
-                       pa.list_(pa.string()) if name == 'authors' else pa.string()) for name in fields])
+    structured = {
+        'composed_years': pa.struct([('start_year',pa.int32()),('end_year',pa.int32())]),
+        'edition_years': pa.struct([('start_year',pa.int32()),('end_year',pa.int32())]),
+        'processed_steps': pa.map_(pa.string(),pa.bool_()),
+        'contributors': pa.list_(pa.struct([('name',pa.string()),('role',pa.string()),('entity_id',pa.string())])),
+        'tags': pa.list_(pa.struct([('taxonomy',pa.string()),('tag_id',pa.string())])),
+        'external_ids': pa.map_(pa.string(),pa.string()),
+        'field_basis': pa.map_(pa.string(),pa.string()),
+    }
+    return pa.schema([(name, structured.get(name, pa.int64() if name in integers else
+                       pa.list_(pa.string()) if name in ('authors','topics') else pa.string())) for name in fields])
 
 
 class Parquet:

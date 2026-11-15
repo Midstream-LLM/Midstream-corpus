@@ -48,6 +48,7 @@ def inputs(source, names, plan=None):
 
 
 def preview(source, names, plan=None):
+    from ..corpus.metadata import RecordMetadata
     adapter, paths, objects = inputs(source, names, plan)
     samples = []
     try:
@@ -55,7 +56,7 @@ def preview(source, names, plan=None):
         for path in paths[::max(1, len(paths) // 8)][:8]:
             for position, record in sampling.sample(adapter, path):
                 samples.append({'file': str(path), 'source_key': record.source_key, 'position': position,
-                                'metadata': record.metadata, 'error': record.error,
+                                'metadata': RecordMetadata.model_validate(record.metadata).model_dump(exclude_unset=True), 'error': record.error,
                                 'text_preview': (record.text or '')[:500]})
     except (ValueError, KeyError, TypeError, UnicodeError) as exc:
         raise ManagementError('invalid_input', '文件不能按所选来源格式解析') from exc
@@ -107,6 +108,9 @@ def start_import(conn, body):
     result = register(conn, body.source, body.paths, body.objects, body.parser_version,
                       body.actor, body.reason, body.plan, commit=False)
     batch_id = result['batch_id']
+    if body.curation is not None:
+        from ..curation.ingestion import configure_batch
+        configure_batch(conn, batch_id, body.curation)
     job_id = jobs._insert(conn, 'batch_stage', {'batch_id': batch_id}, body.actor, body.reason)
     state = dict(status='received', request_token=token, fingerprint=fingerprint, batch_id=batch_id, job_id=job_id,
                  approval=body.approval.model_dump() if body.approval else None,

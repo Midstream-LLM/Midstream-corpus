@@ -21,7 +21,10 @@ from .samples import SAMPLE_FIELDS, SAMPLERS
 
 DEFAULT_FIELDS = ['ordinal', 'version_id', 'doc_id', 'split', 'title', 'text']
 FieldName = Literal['ordinal', 'version_id', 'doc_id', 'split', 'title', 'text',
-                    'authors', 'era', 'category', 'genre', 'source']
+                    'authors', 'era', 'category', 'genre', 'source', 'composed_years', 'edition_years',
+                    'processed_steps', 'contributors', 'tags', 'tune_pattern', 'topics', 'external_ids', 'field_basis']
+CURATION_FIELDS = ['composed_years', 'edition_years', 'processed_steps', 'contributors', 'tags',
+                   'tune_pattern', 'topics', 'external_ids', 'field_basis']
 
 
 class Options(BaseModel):
@@ -51,6 +54,9 @@ def _documents(conn, release_id, *, only_cut=False):
         cursor.execute(
             'SELECT m.ordinal, m.version_id, v.doc_id, m.split, v.title, b.content,'
             ' v.authors, v.composed_label, v.category, v.genre, s.name,'
+            " jsonb_build_object('composed_years',v.composed_years,'edition_years',v.edition_years,"
+            " 'processed_steps',v.processed_steps,'contributors',v.contributors,'tags',v.tags,"
+            " 'tune_pattern',v.tune_pattern,'topics',v.topics,'external_ids',v.external_ids,'field_basis',v.field_basis),"
             ' (SELECT jsonb_agg(jsonb_build_array(start_char,end_char) ORDER BY start_char)'
             ' FROM dataset_member_cut c WHERE c.release_id=m.release_id AND c.version_id=m.version_id) cuts'
             ' FROM dataset_member m JOIN document_version v USING (version_id)'
@@ -59,9 +65,11 @@ def _documents(conn, release_id, *, only_cut=False):
             (' AND EXISTS(SELECT 1 FROM dataset_member_cut c WHERE c.release_id=m.release_id AND c.version_id=m.version_id)' if only_cut else '') +
             ' ORDER BY m.split, m.ordinal',
             (release_id,))
-        keys = DEFAULT_FIELDS + ['authors', 'era', 'category', 'genre', 'source', '_cuts']
+        keys = DEFAULT_FIELDS + ['authors', 'era', 'category', 'genre', 'source', '_curation', '_cuts']
         for row in cursor:
             document = dict(zip(keys, row))
+            from ..corpus.metadata import public_metadata
+            document.update(public_metadata(document.pop('_curation')))
             from ..datasets.cuts import apply
             document['text'] = apply(textcodec.decompress(bytes(document['text'])),document.pop('_cuts') or [])
             yield document

@@ -53,3 +53,6 @@ model = "deepseek-flash"
 [services]
 generation = "default"
 quality_check = "default"
+curation = "default"
+# Search service uses DeepSeek Search/Fetch; select a compatible endpoint profile.
+search = "default"

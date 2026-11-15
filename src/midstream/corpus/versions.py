@@ -4,12 +4,33 @@ import psycopg
 from psycopg.types.json import Jsonb
 
 
-_METADATA = """quality_status quality_flags license title authors composed_years
-    composed_label edition_years genre category topics legacy_category field_basis extra""".split()
+from .metadata import VERSION_FIELDS
 
+_METADATA = VERSION_FIELDS
 
-def _write_versions(conn: psycopg.Connection, run_id: int, changes: list[tuple], *, variant=None) -> None:
+def _write_versions(conn: psycopg.Connection, run_id: int, changes: list[tuple], *, variant=None, step=None) -> None:
     """每项为 (doc_id, parent_version_id, 新 text_hash 或 None, 字段覆盖)。"""
+    if not changes:
+        return
+    from .metadata import step_flags, consistent_patch, database_patch
+    from ..curation.tracking import record_operation
+    run = conn.execute('SELECT kind,rule_version FROM processing_run WHERE run_id=%s',(run_id,)).fetchone()
+    if step is None and run[0] == 'manual':
+        step = 'manual_edit'
+    changes = [(doc, parent, digest, dict(patch)) for doc,parent,digest,patch in changes]
+    parents_by_id = {row[0]: row for row in conn.execute(
+        'SELECT version_id,doc_id,is_current,to_jsonb(document_version) FROM document_version'
+        ' WHERE version_id=ANY(%s) ORDER BY version_id FOR UPDATE', ([c[1] for c in changes],))}
+    from .management import ManagementError
+    for doc,parent,digest,patch in changes:
+        previous = parents_by_id.get(parent)
+        if not previous or previous[1] != doc or not previous[2]:
+            raise ManagementError('conflict', '当前版本已改变，请重新处理')
+        if step:
+            patch['processed_steps'] = {**step_flags(previous[3].get("processed_steps")), **patch.get('processed_steps',{}), step: True}
+        normalized = database_patch(consistent_patch(previous[3], patch))
+        patch.clear()
+        patch.update(normalized)
     docs, parents, hashes, metadata = zip(*changes)
     if variant is None:
         conn.execute(
@@ -35,3 +56,16 @@ def _write_versions(conn: psycopg.Connection, run_id: int, changes: list[tuple],
             JOIN text_blob b ON b.text_hash = coalesce(c.text_hash, p.text_hash)""",
         (run_id, variant is None, variant, list(docs), list(parents), list(hashes), [Jsonb(m) for m in metadata]),
     )
+
+    if step:
+        rows = conn.execute('SELECT version_id,processed_steps FROM document_version WHERE run_id=%s AND parent_version_id=ANY(%s)',
+                            (run_id,list(parents))).fetchall()
+        for version_id,flags in rows:
+            record_operation(conn,run_id,{step:True},version_id=version_id,flags=flags)
+
+    conn.execute('INSERT INTO document_segment(version_id,claim_id,start_char,end_char,title,unit_type)'
+        ' SELECT n.version_id,s.claim_id,s.start_char,s.end_char,s.title,s.unit_type'
+        ' FROM document_version n JOIN document_version p ON p.version_id=n.parent_version_id'
+        ' JOIN document_segment s ON s.version_id=p.version_id'
+        ' WHERE n.run_id=%s AND n.parent_version_id=ANY(%s) AND n.text_hash=p.text_hash ON CONFLICT DO NOTHING',
+        (run_id,list(parents)))

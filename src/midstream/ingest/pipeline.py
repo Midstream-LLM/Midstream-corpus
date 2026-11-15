@@ -115,20 +115,26 @@ def _cleaned_metadata(metadata: dict, text: str) -> dict:
     derived = dict(metadata)
     basis = dict(metadata.get("field_basis", {}))
     years = eras.era_years(metadata.get("composed_label"))
-    if years:
+    if years and not metadata.get("composed_years"):
         derived["composed_years"] = list(years)
         basis["composed_years"] = "rule"
     status, flags = clean.assess(text)
     derived["quality_status"] = status
     derived["quality_flags"] = flags
     derived["field_basis"] = basis
-    return derived
+    derived["processed_steps"] = {**step_flags(metadata.get("processed_steps")), "basic_clean": True}
+    return RecordMetadata.model_validate(derived).model_dump()
 
 
 def _prepare(record: ParsedRecord) -> tuple[ParsedRecord, str | None]:
     """返回 (记录, 清洗后正文)。不能入库的记录转成失败记录。"""
     if record.error is not None:
         return record, None
+    try:
+        metadata = RecordMetadata.model_validate(record.metadata).model_dump()
+        record = replace(record, metadata=metadata)
+    except ValueError:
+        return _failed(record, "元数据未通过类型校验"), None
     text = record.text or ""
     if not _storable(text):
         return _failed(record, "正文含 NUL 或非法字符"), None
@@ -303,39 +309,20 @@ def _write_blobs(conn: psycopg.Connection, batch_id: int, pool: ProcessPoolExecu
     return plain_bytes, stored_bytes
 
 
-_VERSION_COLUMNS = """doc_id, version_no, parent_version_id, text_hash, run_id, is_current,
-    quality_status, quality_flags, char_count, license, title, authors, composed_years,
-    composed_label, edition_years, genre, category, topics, legacy_category, field_basis, extra"""
+from ..corpus.metadata import VERSION_FIELDS, RecordMetadata, version_sql, step_flags
 
+_VERSION_COLUMNS = "doc_id, version_no, parent_version_id, text_hash, run_id, is_current, char_count, " + ', '.join(VERSION_FIELDS)
 
 def _version_values(meta: str) -> str:
-    """从暂存 metadata 取出版本字段的 SQL 表达式。"""
-    return f"""
-    coalesce({meta}->>'quality_status', 'ok'),
-    coalesce(ARRAY(SELECT jsonb_array_elements_text({meta}->'quality_flags')), '{{}}'::text[]),
-    b.char_count,
-    {meta}->>'license',
-    {meta}->>'title',
-    CASE WHEN jsonb_typeof({meta}->'authors') = 'array'
-         THEN ARRAY(SELECT jsonb_array_elements_text({meta}->'authors')) END,
-    CASE WHEN jsonb_typeof({meta}->'composed_years') = 'array'
-         THEN int4range(({meta}->'composed_years'->>0)::int,
-                        ({meta}->'composed_years'->>1)::int, '[]') END,
-    {meta}->>'composed_label',
-    NULL::int4range,
-    {meta}->>'genre',
-    {meta}->>'category',
-    CASE WHEN jsonb_typeof({meta}->'topics') = 'array'
-         THEN ARRAY(SELECT jsonb_array_elements_text({meta}->'topics')) END,
-    {meta}->>'legacy_category',
-    coalesce({meta}->'field_basis', '{{}}'::jsonb),
-    coalesce({meta}->'extra', '{{}}'::jsonb)"""
+    return 'b.char_count, ' + version_sql(meta)
 
 
-def publish(conn: psycopg.Connection, batch_id: int, pool: ProcessPoolExecutor) -> IngestReport:
+def publish(conn: psycopg.Connection, batch_id: int, pool: ProcessPoolExecutor, *,
+            allow_uncurated: bool = False) -> IngestReport:
     """在一个事务里完成发布。"""
     timings = {}
     started = checkpoint = perf_counter()
+    conn.execute('SELECT pg_advisory_xact_lock(%s)', (batch_id,))
 
     def mark(name):
         nonlocal checkpoint
@@ -349,6 +336,8 @@ def publish(conn: psycopg.Connection, batch_id: int, pool: ProcessPoolExecutor) 
     if status != "validated":
         raise IngestError(f"批次 {batch_id} 状态为 {status}，不能发布")
 
+    from ..curation.ingestion import ensure_ready
+    ensure_ready(conn, batch_id, allow_uncurated=allow_uncurated)
     mark("lock")
     # 大批量写入后统计信息过期，规划器会选出近似平方复杂度的计划
     conn.execute(f"ANALYZE source_record, document, staging_text_b{int(batch_id)}")
@@ -371,7 +360,8 @@ def publish(conn: psycopg.Connection, batch_id: int, pool: ProcessPoolExecutor) 
                 ORDER BY p.batch_id DESC LIMIT 1
             ) previous ON true
             WHERE r.batch_id = {int(batch_id)} AND r.parse_status = 'ok'
-              AND previous.record_hash IS DISTINCT FROM r.record_hash"""
+              AND (previous.record_hash IS DISTINCT FROM r.record_hash
+                   OR EXISTS (SELECT 1 FROM curation_item ci WHERE ci.record_id=r.record_id AND ci.status='applied'))"""
     )
     mark("changed")
     new_documents = conn.execute(
@@ -460,6 +450,10 @@ def publish(conn: psycopg.Connection, batch_id: int, pool: ProcessPoolExecutor) 
         (batch_id,),
     ).fetchone()
     changed_count = conn.execute("SELECT count(*) FROM changed").fetchone()[0]
+    from ..curation.apply import bind_published
+    bind_published(conn, batch_id)
+    from ..curation.tracking import record_batch_clean
+    record_batch_clean(conn, batch_id, clean_run)
     conn.execute(f"DROP TABLE staging_text_b{batch_id}")
     conn.execute(
         "UPDATE source_batch SET status = 'published', published_at = now() WHERE batch_id = %s",
@@ -482,13 +476,18 @@ def publish(conn: psycopg.Connection, batch_id: int, pool: ProcessPoolExecutor) 
     )
 
 
-def ingest(conn: psycopg.Connection, adapter: Adapter, paths: list[Path]) -> IngestReport:
+def ingest(conn: psycopg.Connection, adapter: Adapter, paths: list[Path], *,
+           curation=None, actor='system', reason='ingest') -> IngestReport:
     timings = {}
     # psycopg 带后台线程，fork 有死锁风险；暂存与发布共用一个 spawn 进程池。
     context = multiprocessing.get_context("spawn")
     with ProcessPoolExecutor(max_workers=WORKERS, mp_context=context) as pool:
         started = perf_counter()
         batch_id = register_batch(conn, adapter, paths)
+        if curation is not None:
+            from ..curation.ingestion import configure_batch
+            configure_batch(conn, batch_id, curation)
+            conn.commit()
         timings["register"] = perf_counter() - started
         started = perf_counter()
         try:
@@ -504,6 +503,8 @@ def ingest(conn: psycopg.Connection, adapter: Adapter, paths: list[Path]) -> Ing
         timings["validate"] = perf_counter() - started
         if status != "validated":
             raise IngestError(f"批次 {batch_id} 验证未通过，状态 {status}")
+        from ..curation.ingestion import curate_batch
+        curate_batch(conn, batch_id, actor=actor, reason=reason)
         report = publish(conn, batch_id, pool)
     # 查重由 ingest 操作登记为后续任务。
     return replace(report, timings={**timings, **report.timings})

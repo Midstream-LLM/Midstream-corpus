@@ -15,6 +15,7 @@ from .. import config
 from .. import store
 from ..corpus.versions import _write_versions
 from ..store import textcodec
+from .tracking import record_checked
 
 
 @dataclass(frozen=True)
@@ -30,6 +31,7 @@ class Rule:
     apply: Callable[[dict], Change | None]
     variant: str | None = None
     config: dict = field(default_factory=dict)
+    step: str = "rule_reprocess"
 
 
 def _write_blobs(conn: psycopg.Connection, texts: dict, pool: ProcessPoolExecutor) -> None:
@@ -85,11 +87,13 @@ def reprocess(conn: psycopg.Connection, rule: Rule, dry_run=None, samples=20) ->
         while rows := reader.fetchmany(config.CHUNK_DOCS):
             changes = []
             texts = {}
+            unchanged = []
             for current, source_name, content in rows:
                 before = textcodec.decompress(bytes(content))
                 current.update(source=source_name, text=before)
                 change = rule.apply(current)
                 if change is None:
+                    unchanged.append(current["version_id"])
                     continue
                 after = before if change.text is None else change.text
                 metadata = dict(change.metadata)
@@ -99,6 +103,7 @@ def reprocess(conn: psycopg.Connection, rule: Rule, dry_run=None, samples=20) ->
                     digest = textcodec.text_hash(after)
                 metadata = {key: value for key, value in metadata.items() if value != current[key]}
                 if digest is None and not metadata and rule.variant is None:
+                    unchanged.append(current["version_id"])
                     continue
                 changed += 1
                 slot = randomizer.randrange(changed)
@@ -122,7 +127,10 @@ def reprocess(conn: psycopg.Connection, rule: Rule, dry_run=None, samples=20) ->
                         texts[digest] = after
             if not dry_run and changes:
                 _write_blobs(conn, texts, pool)
-                _write_versions(conn, run_id, changes, variant=rule.variant)
+                _write_versions(conn, run_id, changes, variant=rule.variant, step=rule.step)
+            if not dry_run and unchanged:
+                # 无需修改的文档不建新版本；检查结果只记在操作记录里。
+                record_checked(conn, run_id, rule.step, unchanged)
         if not dry_run:
             conn.execute(
                 "UPDATE processing_run SET config = %s, finished_at = now() WHERE run_id = %s",

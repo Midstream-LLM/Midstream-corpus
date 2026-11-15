@@ -4,6 +4,11 @@ export function yearLabel(n: number) {
   return n < 0 ? `公元前${-n}年` : `${n}年`;
 }
 export function rangeLabel(value: unknown) {
+  if (value && typeof value === 'object' && 'start_year' in value && 'end_year' in value) {
+    const range=value as {start_year:number|null;end_year:number|null};
+    if(range.start_year===range.end_year && range.start_year!==null) return yearLabel(range.start_year);
+    return `${range.start_year===null?'起始未知':yearLabel(range.start_year)} — ${range.end_year===null?'结束未知':yearLabel(range.end_year)}`;
+  }
   if (typeof value !== "string") return "未记录";
   const m = value.match(/^([[(])(-?\d*)?,(-?\d*)?([\])])$/);
   if (!m) return value;

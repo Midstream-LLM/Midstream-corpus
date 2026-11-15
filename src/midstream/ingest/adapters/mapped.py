@@ -14,6 +14,8 @@ from .base import ParsedRecord
 TARGETS = {'title', 'authors', 'composed_label', 'category', 'work_title'}
 CONSTANTS = {'license', 'composed_label', 'category', 'unit_type', 'work_title'}
 HEAD_CHARS = 4000
+# 来源用来表示“不知道”的占位词；按未知处理，原值仍留在原始字段里。
+UNKNOWN = {'佚名', '无名氏', '群星', '不详', '未知', '未分类', 'Unknown', 'Anonymous'}
 
 
 class MappingPlan(BaseModel):
@@ -30,6 +32,8 @@ class MappingPlan(BaseModel):
     head_patterns: list[str] = Field(default_factory=list)    # 对正文开头搜索的正则，命名组同上
     trim_start: str = ''                  # 正文从第一次匹配之后开始
     trim_end: str = ''                    # 正文到其后第一次匹配之前结束
+    accept: dict[str, str] = Field(default_factory=dict)      # 字段值须整体匹配该正则，否则按未知处理
+    title_format: str = ''                # 如 '{work_title} {date}'；可用记录字段、路径组和已得元数据
 
     def checked(self):
         if set(self.fields) - TARGETS:
@@ -38,8 +42,10 @@ class MappingPlan(BaseModel):
             raise ValueError('常量只允许许可证、时代标签、分类、单元类型和所属作品')
         if self.format not in ('txt', 'lines') and not self.text_field:
             raise ValueError('结构化数据必须指定正文字段')
+        if set(self.accept) - TARGETS or not re.fullmatch(r'(?:[^{}]|\{\w+\})*', self.title_format):
+            raise ValueError('取值规则或标题格式无效')
         try:
-            for pattern in (self.path_pattern, self.trim_start, self.trim_end, *self.head_patterns):
+            for pattern in (self.path_pattern, self.trim_start, self.trim_end, *self.head_patterns, *self.accept.values()):
                 re.compile(pattern)
         except re.error as exc:
             raise ValueError(f'正则无效：{exc}') from exc
@@ -47,7 +53,7 @@ class MappingPlan(BaseModel):
 
     def identity(self):
         data = self.model_dump()
-        for key in ('constants', 'path_pattern', 'head_patterns', 'trim_start', 'trim_end'):
+        for key in ('constants', 'path_pattern', 'head_patterns', 'trim_start', 'trim_end', 'accept', 'title_format'):
             if not data[key]:
                 del data[key]
         return data
@@ -191,6 +197,24 @@ class MappedAdapter:
                 'authors' in meta and (not isinstance(meta['authors'], list)
                                        or any(not isinstance(a, str) for a in meta['authors']))):
             return ParsedRecord(key, locator, record, error='元数据字段类型不符')
+        for target in ('authors', 'composed_label', 'category', 'title', 'work_title'):
+            item = meta.get(target)
+            if isinstance(item, list):
+                item = [a.strip() for a in item if a.strip() not in UNKNOWN]
+            elif item is not None and (item.strip() in UNKNOWN or (
+                    target in plan.accept and not re.fullmatch(plan.accept[target], item))):
+                item = None
+            if item:
+                meta[target] = item
+            elif target in meta:
+                del meta[target], basis[target]
+        if plan.title_format:
+            names = {k: v for k, v in record.items() if isinstance(v, (str, int)) and not isinstance(v, bool)}
+            names.update(extra, **{k: v for k, v in meta.items() if isinstance(v, str)})
+            try:
+                meta['title'], basis['title'] = plan.title_format.format_map(names).strip(), 'import_plan'
+            except KeyError:
+                pass
         if text and plan.trim_start and (found := re.search(plan.trim_start, text)):
             text = text[found.end():]
         if text and plan.trim_end and (found := re.search(plan.trim_end, text)):

@@ -10,10 +10,10 @@ from fastapi.staticfiles import StaticFiles
 
 from ..corpus import management
 from ..datasets.recipe import ExportError, TrainingLeak
-from . import corpus, datasets, dedup, ingest, jobs, llm, ops
+from . import corpus, curation, datasets, dedup, ingest, jobs, llm, ops
 
 # 注册顺序即匹配顺序；兜底的 /api/{unknown:path} 在 create_app 末尾。
-ROUTERS = (llm.router, ops.router, ingest.router, corpus.router, dedup.router, datasets.router, jobs.router)
+ROUTERS = (curation.router, llm.router, ops.router, ingest.router, corpus.router, dedup.router, datasets.router, jobs.router)
 
 
 def create_app(static_dir: Path | None = None) -> FastAPI:
