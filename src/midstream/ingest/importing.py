@@ -51,7 +51,8 @@ def preview(source, names, plan=None):
     adapter, paths, objects = inputs(source, names, plan)
     samples = []
     try:
-        for path in paths:
+        # 文件多时只在均匀抽取的 8 个文件上取样。
+        for path in paths[::max(1, len(paths) // 8)][:8]:
             for position, record in sampling.sample(adapter, path):
                 samples.append({'file': str(path), 'source_key': record.source_key, 'position': position,
                                 'metadata': record.metadata, 'error': record.error,

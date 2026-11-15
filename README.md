@@ -128,7 +128,7 @@ midstream dedup --full   # 忽略缓存，强制完整重算文档级查重
 
 构建脚本使用的 [PostgreSQL](https://www.postgresql.org/about/licence/) 和 [pg_bigm](https://github.com/pgbigm/pg_bigm/tree/v1.2-20250903) 采用 PostgreSQL License，[LZ4 库](https://github.com/lz4/lz4/blob/v1.10.0/lib/LICENSE)采用 BSD-2-Clause，均与 GPL-3.0 兼容。
 
-Web 批次管理支持服务器目录浏览与收藏、递归扫描、格式与字段结构分组、可视化字段映射、元数据预览和草稿恢复；确认导入后自动登记并排队验证，再人工检查发布。使用范围与路径要求见 [Web 说明](docs/webapp.md)。
+Web 批次管理支持服务器目录浏览与收藏、递归扫描、格式与字段结构分组、可视化字段映射、元数据预览和草稿恢复；来源按“内置解析器 → 已确认过的方案 → 内置来源方案 → 规则推断 → LLM 建议”逐级识别，映射方案是声明式配置，可从文件名、正文开头和嵌套记录取元数据；确认导入后自动登记并排队验证，再人工检查发布。使用范围与路径要求见 [Web 说明](docs/webapp.md)。
 
 入库支持已有来源规则识别，以及复用 LLM 服务分析未知格式的字段映射建议；确认后的 TXT、JSON/JSONL、Parquet 和行文本映射随批次保存。需升级迁移 `0008`，覆盖范围和限制见 [Web 说明](docs/webapp.md#格式识别与智能映射)。
 

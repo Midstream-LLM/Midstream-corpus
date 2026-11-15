@@ -72,11 +72,11 @@ export default function Import({onRegistered, active}: {onRegistered: (id: numbe
     setPreviewPage(0); stopPreview.current = false; setBusy(true); setError("");
     const prepared: Prepared[] = [];
     try {
-      const total = selectedGroups.reduce((n, g) => n + Math.ceil(g.selected.length / 20), 0);
+      const total = selectedGroups.reduce((n, g) => n + Math.ceil(g.selected.length / 2000), 0);
       for (const group of selectedGroups) {
-        for(let offset = 0; offset < group.selected.length; offset += 20) {
+        for(let offset = 0; offset < group.selected.length; offset += 2000) {
           if(stopPreview.current) {setProgress("已停止预览"); return;}
-          const paths = group.selected.slice(offset, offset + 20);
+          const paths = group.selected.slice(offset, offset + 2000);
           setProgress(`正在预览 ${prepared.length + 1} / ${total} 批 · ${group.source}`);
           const plan = group.adapter ? null : group.plan;
           const result = await api<Preview>("import/preview", undefined, {source: group.source, paths, plan});
@@ -137,7 +137,7 @@ export default function Import({onRegistered, active}: {onRegistered: (id: numbe
       <div className="import-footer"><button disabled={locked} onClick={() => setDraft(prev => ({...prev, step: 1}))}>← 调整文件范围</button>{busy && <button onClick={() => {stopPreview.current = true;}}>停止后续预览</button>}<button className="primary" disabled={locked || invalid || !selectedGroups.length || !actor.trim()} onClick={preview}>预览导入结果 →</button></div>
     </div>}
     {d.step === 3 && <div className="import-stage">
-      <h2>{allDone ? "已创建批次，正在排队验证" : "检查元数据，确认导入"}</h2><p>共 {d.prepared.length} 个批次。每批最多 20 个文件，大组自动拆分。下方展示抽样结果，暂存后进行全量验证。</p>
+      <h2>{allDone ? "已创建批次，正在排队验证" : "检查元数据，确认导入"}</h2><p>共 {d.prepared.length} 个批次。每批最多 2000 个文件，大组自动拆分。下方展示抽样结果，暂存后进行全量验证。</p>
       {d.prepared.slice(previewPage * 5, (previewPage + 1) * 5).map((entry, index) => <details key={entry.token} open={index === 0} className="preview-batch"><summary>{entry.source} · {entry.paths.length} 个文件{entry.result ? ` · 批次 #${entry.result.batch_id} 已登记` : ""}</summary>
         {entry.result && <p>验证任务 #{entry.result.job_id} 已提交。<button onClick={() => onRegistered(entry.result!.batch_id)}>查看批次</button></p>}
         <div className="table-scroll"><table><thead><tr><th>字段</th><th>样本填充率</th></tr></thead><tbody>{entry.preview.fill_rates.map(r => <tr key={r.field}><td>{labels[r.field] || r.field}</td><td>{r.filled} / {r.total} · {r.total ? (100*r.filled/r.total).toFixed(0) : 0}%</td></tr>)}</tbody></table></div>

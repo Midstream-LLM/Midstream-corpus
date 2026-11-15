@@ -140,7 +140,7 @@ def test_cancel_keeps_completed_files(tmp_path, monkeypatch):
     (tmp_path / 'b.txt').write_text('乙')
     waiting = threading.Event()
     original = discovery.inspect_file
-    def inspect(path, conn, stop):
+    def inspect(path, conn, stop, learned=()):
         if path.name == 'b.txt':
             waiting.set()
             assert stop.wait(2), 'cancel was not delivered'

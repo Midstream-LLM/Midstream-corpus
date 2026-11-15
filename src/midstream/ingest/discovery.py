@@ -11,11 +11,11 @@ import psycopg
 
 from .. import config
 from ..corpus.management import ManagementError
-from .detection import detect_one
+from .detection import detect_one, learned_plans
 
 _lock = threading.RLock()
 _scans = {}
-MAX_FILES = 10000
+MAX_FILES = 50000
 
 
 def browse(name=None, offset=0, limit=200):
@@ -54,9 +54,9 @@ def fields_of(record, prefix=''):
     return result
 
 
-def inspect_file(path, conn, stop):
+def inspect_file(path, conn, stop, learned=()):
     before = path.stat()
-    result = detect_one(path)
+    result = detect_one(path, learned)
     sample = result.pop('_sample')
     fields = fields_of(sample['record'])
     result.update(size_bytes=before.st_size, fields=fields, encoding=sample['encoding'],
@@ -64,8 +64,8 @@ def inspect_file(path, conn, stop):
     signature = {'format': result['format'], 'encoding': sample['encoding'],
                  'fields': {k: v['type'] for k, v in fields.items()}}
     result['signature'] = hashlib.sha256(json.dumps(signature, sort_keys=True).encode()).hexdigest()
-    if result['format'] == 'unsupported':
-        return dict(result, import_status='unsupported', previous_batches=[])
+    if result['format'] in ('unsupported', 'skipped'):
+        return dict(result, import_status=result['format'], previous_batches=[])
     digest = hashlib.sha256()
     with path.open('rb') as handle:
         while chunk := handle.read(1 << 20):
@@ -128,6 +128,7 @@ def _run(scan, roots, recursive):
     try:
         with psycopg.connect(config.dsn(), autocommit=True) as conn:
             conn.execute('SET default_transaction_read_only = on')
+            learned = learned_plans(conn)
             stack = list(reversed(roots))
             while stack and not stop.is_set():
                 path = stack.pop()
@@ -155,7 +156,7 @@ def _run(scan, roots, recursive):
                 with _lock:
                     scan['current'] = str(path)
                 try:
-                    item = inspect_file(path, conn, stop)
+                    item = inspect_file(path, conn, stop, learned)
                     sha = item.get('sha256')
                     if sha and sha in seen_hashes and item['import_status'] == 'new':
                         item.update(import_status='duplicate', duplicate_of=seen_hashes[sha])

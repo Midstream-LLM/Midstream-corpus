@@ -1,4 +1,5 @@
-export type Plan = {format: string; encoding: string; text_field: string; id_field: string; fields: Record<string, string>};
+export type Plan = {format: string; encoding: string; text_field: string; id_field: string; fields: Record<string, string>;
+  constants?: Record<string, string>; path_pattern?: string; head_patterns?: string[]; trim_start?: string; trim_end?: string};
 export type FileItem = {path: string; size_bytes: number; known: boolean; source: string | null; adapter: string | null;
   format: string; encoding: string; signature: string; fields: Record<string, {type: string; example: string}>;
   sample: string; plan: Plan | null; note: string; import_status: string; duplicate_of?: string;
@@ -17,7 +18,7 @@ export type Draft = {step: number; directory: string; selected: string[]; recurs
 export const emptyDraft = (): Draft => ({step: 1, directory: "", selected: [], recursive: true, scanId: "", scanOffset: 0,
   scanStatus: "", scanErrors: [], files: [], groups: [], prepared: [], note: ""});
 export const statusLabels: Record<string, string> = {new: "新文件", changed: "内容已变化", imported: "已发布 · 默认跳过",
-  pending: "已有待处理批次", unsupported: "需提取正文", duplicate: "本次内容重复", error: "读取失败"};
+  pending: "已有待处理批次", unsupported: "需提取正文", skipped: "非正文 · 已跳过", duplicate: "本次内容重复", error: "读取失败"};
 export function groupFiles(files: FileItem[]): Group[] {
   const groups = new Map<string, Group>();
   for (const file of files) {

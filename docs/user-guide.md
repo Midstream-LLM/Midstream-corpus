@@ -223,7 +223,9 @@ midstream record-training small-sources-v1 run-name
 
 ## 4. 入库新来源
 
-当前已注册 `ccc_corpus` 和 `wanli`。只有设置 `MIDSTREAM_JISHUI_RAW` 后才能省略 `--path`，使用上表中的默认文件；`--path` 可重复，用于一次导入同一来源的多个文件。
+CLI 的 `ingest` 只接受内置解析器 `ccc_corpus` 和 `wanli`。其他来源在 Web 的“新建入库批次”里导入：系统按内置来源方案、以前确认过的方案或规则推断给出映射，见 [Web 说明](webapp.md) 的“自动识别与映射方案”。
+
+只有设置 `MIDSTREAM_JISHUI_RAW` 后才能省略 `--path`，使用上表中的默认文件；`--path` 可重复，用于一次导入同一来源的多个文件。
 
 ```bash
 midstream ingest wanli --path /path/to/wanli_shilu_corpus.jsonl

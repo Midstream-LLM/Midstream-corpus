@@ -94,9 +94,34 @@ def test_unknown_detection_llm_sample_and_null(tmp_path, monkeypatch):
         def __enter__(self): return self
         def __exit__(self, *args): pass
         def identify_import(self, sample, **kwargs):
-            assert set(sample) == {'format', 'encoding', 'sample'}
+            assert set(sample) == {'format', 'encoding', 'sample', 'file_name', 'draft'}
             assert len(sample['sample']) <= 6000
             return {'plan': None, 'note': 'cannot map', 'method': 'llm', 'model': 'fixture'}
     monkeypatch.setattr(import_detection.LLMServices, 'from_config', Service)
     result = import_detection.detect([str(path)], True)['items'][0]
     assert result['plan'] is None and result['method'] == 'llm'
+
+
+def test_plan_rules_and_detection_ladder(tmp_path):
+    import json
+    from midstream.ingest import detection
+    from midstream.ingest.adapters.mapped import MappedAdapter
+    book = tmp_path / '明_小说_某甲_某书.txt'
+    book.write_text('Title: 书\n*** START ***\n正文\n*** END ***\n尾')
+    plan = dict(format='txt', constants={'license': 'cc0-1.0'}, trim_start=r'\*\*\* START \*\*\*\n', trim_end=r'\n\*\*\* END',
+                path_pattern=r'/(?P<composed_label>[^_/]+)_(?P<category>[^_/]+)_(?P<authors>[^_/]+)_(?P<title>[^/]+)\.txt$')
+    record = next(MappedAdapter('x', plan).parse(book))
+    assert record.text == '正文' and record.metadata['authors'] == ['某甲']
+    assert record.metadata['field_basis'] == {'license': 'import_plan', 'title': 'path', 'composed_label': 'path',
+                                              'category': 'path', 'authors': 'path'}
+    nested = tmp_path / 'n.json'
+    nested.write_text(json.dumps({'title': '集', 'content': [{'chapter': '篇', 'paragraphs': ['甲', '乙']}]}))
+    plan = dict(format='json', text_field='paragraphs|content', fields={'title': 'chapter|title', 'work_title': '_parent.title'})
+    record = next(MappedAdapter('x', plan).parse(nested))
+    assert (record.text, record.metadata['title'], record.metadata['work_title']) == ('甲\n乙', '篇', '集')
+    # 未知来源先得到规则草稿；确认过的方案下次直接复用。
+    found = detection.detect_one(book)
+    assert not found['known'] and found['method'] == 'inferred' and 'composed_label' in found['plan']['path_pattern']
+    saved = dict(found['plan'], path_pattern=plan and r'/(?P<title>[^/]+)\.txt$')
+    found = detection.detect_one(book, [('mine', 7, saved, [])])
+    assert found['known'] and found['source'] == 'mine' and found['method'] == 'learned'

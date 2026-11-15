@@ -11,13 +11,14 @@ from ..ingest import batches, importing, discovery, detection as import_detectio
 from .deps import Operation, browser_write, connection, write_connection
 
 router = APIRouter()
+MAX_BATCH_FILES = 2000
 
 
 class ImportPreview(BaseModel):
     model_config = ConfigDict(extra='forbid')
     source: str = Field(min_length=1, max_length=200)
     plan: dict | None = None
-    paths: list[str] = Field(min_length=1, max_length=20)
+    paths: list[str] = Field(min_length=1, max_length=MAX_BATCH_FILES)
 
 
 class ImportDetect(BaseModel):
@@ -28,13 +29,13 @@ class ImportDetect(BaseModel):
 
 
 class ImportRegister(ImportPreview, Operation):
-    objects: list[dict] = Field(min_length=1, max_length=20)
+    objects: list[dict] = Field(min_length=1, max_length=MAX_BATCH_FILES)
     parser_version: str
 
 
 @router.post('/api/v1/import/detect', dependencies=[Depends(browser_write)])
-def import_detect(body: ImportDetect):
-    return import_detection.detect(body.paths, body.use_llm, body.profile)
+def import_detect(body: ImportDetect, conn=Depends(connection)):
+    return import_detection.detect(body.paths, body.use_llm, body.profile, conn)
 
 
 @router.get('/api/v1/import/adapters')
