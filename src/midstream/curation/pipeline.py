@@ -9,7 +9,7 @@ from ..llm.services import LLMServices
 from ..llm.errors import LLMError
 from .models import CurationConfig, CURATION_VERSION, TAXONOMY_VERSION
 from .retrieval import Retrieval
-from .research import analyze
+from .research import analyze, analyze_batch
 from .repository import fingerprint, save_result
 from .apply import load_target, apply_item
 from .policy import decide
@@ -86,13 +86,84 @@ def _run(conn, *, actor, reason, config, batch_id, filters, doc_ids, limit,
     conn.commit()
     try:
         with ExitStack() as stack:
+            from ..corpus.metadata import VERSION_FIELDS
+            from .journal import Journal, JournalServices, JournalRetrieval
             after = done = 0
+
+            def tools():
+                nonlocal services, retrieval
+                if services is None:
+                    services = stack.enter_context(LLMServices.from_config())
+                if retrieval is None:
+                    retrieval = Retrieval(conn, services.client.config, config.search_profile)
+                    stack.callback(retrieval.close)
+
+            def prepare(item):
+                target = load_target(conn, item)
+                input_hash = fingerprint(target['metadata'], target['text_hash'])
+                if item['input_hash'] and input_hash != item['input_hash']:
+                    raise ManagementError('conflict', '输入已变化，请新建整理运行')
+                conn.execute('UPDATE curation_item SET input_hash=%s WHERE item_id=%s', (input_hash, item['item_id']))
+                conn.commit()
+                metadata = target['metadata']
+                # Only the common metadata contract enters a model prompt.
+                clean = {k: metadata.get(k) for k in VERSION_FIELDS if k not in ('extra', 'processed_steps', 'field_basis', 'field_claims')}
+                clean.update(target.get('context', {}))
+                if metadata.get('work_title'):
+                    clean['work_title'] = metadata['work_title']
+                    clean['work_relation'] = metadata.get('work_relation')
+                return target, clean
+
+            def failed(item_id, exc):
+                conn.rollback()
+                code = getattr(exc, 'code', 'invalid_result')
+                status = 'conflict' if code == 'conflict' else 'failed'
+                # Retain proposed results on application errors for explicit retry.
+                conn.execute("UPDATE curation_item SET status=CASE WHEN status='proposed' AND %s<>'conflict'"
+                             " THEN status ELSE %s END,error_code=%s WHERE item_id=%s", (status, status, code, item_id))
+                conn.commit()
+
+            def finish(item_id, target, result):
+                try:
+                    if result is not None:
+                        save_result(conn, item_id, result, decide(result.claims, target['metadata'], result.evidence, config))
+                        conn.commit()
+                    if config.apply:
+                        apply_item(conn, item_id, config)
+                        conn.commit()
+                except (ValueError, LLMError, psycopg.DataError) as exc:
+                    failed(item_id, exc)
+
+            def flush(batch):
+                """短记录合成一次调用；调用失败时整批记为失败，恢复时重新成批。"""
+                if not batch:
+                    return
+                first = batch[0][0]['item_id']
+                journal = Journal(conn, first, (lambda: progress(done, total, f'工作项 {first} 等 {len(batch)} 条：模型与检索')) if progress else None)
+                try:
+                    tools()  # 配置缺失等错误记在工作项上，不中断整个运行
+                    if len(batch) == 1:
+                        results = [analyze(batch[0][2], batch[0][1]['text'], config,
+                                           JournalServices(services, journal), JournalRetrieval(retrieval, journal))]
+                    else:
+                        results = analyze_batch([{'metadata': clean, 'text': target['text']} for _, target, clean in batch],
+                                                config, JournalServices(services, journal), JournalRetrieval(retrieval, journal))
+                except (ValueError, LLMError, psycopg.DataError) as exc:
+                    for item, _, _ in batch:
+                        failed(item['item_id'], exc)
+                    batch.clear()
+                    return
+                for (item, target, _), result in zip(batch, results):
+                    finish(item['item_id'], target, result)
+                batch.clear()
+
             while True:
                 rows = conn.execute('SELECT to_jsonb(i) FROM curation_item i WHERE run_id=%s AND item_id>%s'
                                     ' ORDER BY item_id LIMIT 50', (run_id, after)).fetchall()
                 if not rows:
                     break
                 conn.commit()
+                batch = []
                 for (item,) in rows:
                     after = item['item_id']
                     if progress:
@@ -100,45 +171,21 @@ def _run(conn, *, actor, reason, config, batch_id, filters, doc_ids, limit,
                     done += 1
                     if item['status'] in ('applied', 'rolled_back', 'conflict'):
                         continue
+                    if item['status'] == 'proposed':
+                        finish(after, None, None)
+                        continue
                     try:
-                        if item['status'] != 'proposed':
-                            target = load_target(conn, item)
-                            input_hash = fingerprint(target['metadata'], target['text_hash'])
-                            if item['input_hash'] and input_hash != item['input_hash']:
-                                raise ManagementError('conflict', '输入已变化，请新建整理运行')
-                            conn.execute('UPDATE curation_item SET input_hash=%s WHERE item_id=%s', (input_hash, after))
-                            conn.commit()
-                            if services is None:
-                                services = stack.enter_context(LLMServices.from_config())
-                            if retrieval is None:
-                                retrieval = Retrieval(conn, services.client.config, config.search_profile)
-                                stack.callback(retrieval.close)
-                            metadata = target['metadata']
-                            # Only the common metadata contract enters a model prompt.
-                            from ..corpus.metadata import VERSION_FIELDS
-                            clean_meta = {k: metadata.get(k) for k in VERSION_FIELDS if k not in ('extra', 'processed_steps', 'field_basis', 'field_claims')}
-                            clean_meta.update(target.get('context', {}))
-                            if metadata.get('work_title'):
-                                clean_meta['work_title'] = metadata['work_title']
-                                clean_meta['work_relation'] = metadata.get('work_relation')
-                            from .journal import Journal, JournalServices, JournalRetrieval
-                            journal = Journal(conn, after, (lambda: progress(done-1,total,f'工作项 {after}：模型与检索')) if progress else None)
-                            result = analyze(clean_meta, target['text'], config,
-                                             JournalServices(services, journal), JournalRetrieval(retrieval, journal))
-                            decisions = decide(result.claims, metadata, result.evidence, config)
-                            save_result(conn, after, result, decisions)
-                            conn.commit()
-                        if config.apply:
-                            apply_item(conn, after, config)
-                            conn.commit()
+                        target, clean = prepare(item)
                     except (ValueError, LLMError, psycopg.DataError) as exc:
-                        conn.rollback()
-                        code = getattr(exc, 'code', 'invalid_result')
-                        status = 'conflict' if code == 'conflict' else 'failed'
-                        # Retain proposed results on application errors for explicit retry.
-                        conn.execute("UPDATE curation_item SET status=CASE WHEN status='proposed' AND %s<>'conflict'"
-                                     " THEN status ELSE %s END,error_code=%s WHERE item_id=%s", (status, status, code, after))
-                        conn.commit()
+                        failed(after, exc)
+                        continue
+                    if config.batch_size > 1 and len(target['text']) <= config.batch_chars:
+                        batch.append((item, target, clean))
+                        if len(batch) >= config.batch_size:
+                            flush(batch)
+                    else:
+                        flush([(item, target, clean)])
+                flush(batch)
             conn.execute('UPDATE processing_run SET finished_at=now() WHERE run_id=%s', (run_id,))
             conn.commit()
     finally:

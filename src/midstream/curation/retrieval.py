@@ -1,5 +1,6 @@
 """Structured authorities and broad web search share an evidence/cache interface."""
 import hashlib
+import os
 import json
 import re
 from datetime import datetime, timezone
@@ -12,6 +13,9 @@ from ..llm.errors import LLMError
 from .models import Evidence
 
 
+USER_AGENT = 'MidstreamCorpus/0.1 (https://github.com/Midstream-LLM/Midstream-corpus)'
+
+
 def digest(value):
     return hashlib.sha256(json.dumps(value, sort_keys=True, ensure_ascii=False,
                                      separators=(',', ':')).encode()).hexdigest()
@@ -22,8 +26,11 @@ class Retrieval:
         self.conn = conn
         self.config = llm_config
         self.search_profile = search_profile
+        # Wikimedia 拒绝不带联系方式的 User-Agent（403）。只写公开仓库地址，不含个人信息。
+        # 外部检索可单独走代理（MIDSTREAM_RETRIEVAL_PROXY），不影响模型调用。
         self.client = client or httpx.Client(timeout=40, follow_redirects=False,
-            headers={'User-Agent': 'MidstreamCorpus/0.1 (bibliographic research)'})
+            proxy=os.environ.get('MIDSTREAM_RETRIEVAL_PROXY') or None,
+            headers={'User-Agent': USER_AGENT})
 
     def close(self):
         self.client.close()
@@ -102,7 +109,8 @@ class Retrieval:
         if action == 'gutenberg':
             if not re.fullmatch(r'[1-9]\d{0,7}', query):
                 raise ValueError('Gutenberg 查询需要 ebook ID')
-            url = f'https://www.gutenberg.org/ebooks/{query}.rdf'
+            # /ebooks/{id}.rdf 会重定向到这里，而检索客户端不跟随重定向。
+            url = f'https://www.gutenberg.org/cache/epub/{query}/pg{query}.rdf'
             try:
                 response = self.client.get(url)
                 response.raise_for_status()

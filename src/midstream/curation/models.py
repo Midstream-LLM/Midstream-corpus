@@ -28,6 +28,9 @@ class CurationConfig(Model):
     context_chars: int = Field(default=16000, ge=2000, le=60000)
     # 文本修复和切分逐段各调用一次模型；超过此字数的正文不做这两步。
     max_text_chars: int = Field(default=400000, ge=1000, le=50_000_000)
+    # 短于 batch_chars 的记录每 batch_size 条合成一次调用，分摊固定提示开销；batch_size=1 关闭。
+    batch_size: int = Field(default=20, ge=1, le=50)
+    batch_chars: int = Field(default=2000, ge=100, le=8000)
 
     @model_validator(mode='after')
     def unique_steps(self):
@@ -69,6 +72,8 @@ class TextPatch(Model):
 class Segment(Model):
     start_char: int = Field(ge=0)
     end_char: int = Field(gt=0)
+    # 起点处的原文，用来核对位置；模型编造的位置对不上就丢弃。
+    start_text: str = Field(min_length=2, max_length=40)
     title: str | None = None
     unit_type: Literal['volume', 'chapter', 'article', 'poem', 'section']
 
@@ -108,10 +113,21 @@ class Claim(Model):
         return self
 
 
+class BatchClaim(Claim):
+    record: int = Field(ge=0)
+
+
+class BatchResponse(Model):
+    action: Literal['finish', 'search', 'fetch', 'wikidata', 'gutenberg']
+    query: str = Field(default='', max_length=2000)
+    claims: list[BatchClaim] = Field(default_factory=list, max_length=200)
+    summary: str = Field(default='', max_length=4000)
+
+
 class ResearchResponse(Model):
     action: Literal['finish', 'search', 'fetch', 'wikidata', 'gutenberg']
     query: str = Field(default='', max_length=2000)
-    claims: list[Claim] = Field(default_factory=list, max_length=200)
+    claims: list[Claim] = Field(default_factory=list, max_length=40)
     summary: str = Field(default='', max_length=4000)
 
     @model_validator(mode='after')

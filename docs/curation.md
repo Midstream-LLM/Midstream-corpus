@@ -23,6 +23,8 @@ search = "default"
 
 `curation` 可选任一支持文本生成的现有 profile；`search` 须指向 DeepSeek Search API 或兼容网关。官方 DeepSeek 接入点的路径会统一到 `/v1/tools/search`、`/v1/tools/fetch`，不受生成协议影响。关闭 `use_search` 可以只用结构化查询与 LLM。
 
+外部检索（Wikidata、Gutenberg、DeepSeek Search/Fetch）使用固定的 User-Agent，内含本项目公开仓库地址；Wikimedia 会拒绝不带联系方式的请求（403）。需要代理时设置 `MIDSTREAM_RETRIEVAL_PROXY`（如 `http://127.0.0.1:7890`），只作用于外部检索，不影响模型调用。校园网经 IPv4 访问 Wikimedia 不通、经 IPv6 可以（2026-11-16 实测），IPv6 不可用时才需要代理。
+
 ```bash
 midstream run curate --params '{"filters":{"sources":["example"]},"limit":20}' --actor operator --reason '小样本整理' --queue
 midstream run curate --params '{"doc_ids":[1,2],"config":{"apply":false}}' --actor operator --reason '生成候选'
@@ -35,7 +37,18 @@ midstream run curate --params '{"resume_run_id":42,"resume_options":{"max_tool_c
 - 书目考证和打标签：每条记录一次对话，只读开头加三个均匀片段，共 `context_chars`（默认 16,000）字；模型可请求工具，默认最多 6 次。成本与正文长短无关。
 - 文本修复和篇章切分：按 `chunk_chars`（默认 12,000）逐段各调用一次模型，不联网。正文超过 `max_text_chars`（默认 40 万字）时直接记为 `curation_too_long`，不调用模型；只选前两个步骤可以处理任意长度的正文。
 
-工具超限保留未完成状态。取消在记录及调用边界生效。
+- 短记录成批：不超过 `batch_chars`（默认 2,000）字的记录每 `batch_size`（默认 20）条合成一次调用，分摊固定提示开销；`batch_size=1` 关闭。每条候选须标明所属记录、只引用该记录的正文，否则逐条丢弃；调用失败时整批记为失败，恢复时重新成批。
+- 系统说明、标签表和输出 Schema 放在系统消息里、位于每次请求的最前面，以便命中供应商的前缀缓存。
+
+模型请求的工具超出预算或未启用时，先拒绝一次并要求用已有证据直接给结论；再次请求才记为 `curation_budget_exhausted`。取消在记录及调用边界生效。
+
+### 结果校验
+
+- 输出只取第一个完整的 JSON 对象（JSON 模式只保证语法，不保证结构）。单条候选不合格、不属于本轮步骤或位置与原文不符时逐条丢弃，丢弃原因写进工作项摘要；编造证据编号在单条处理时让整条失败，在成批处理时只丢弃该候选。
+- 事实字段（作者、贡献者、成书和刊刻年代、时代标签、外部编号）必须有外部检索证据才自动应用。只引用正文时，作者须在正文里逐字出现（如卷端署名）；外部编号须出现在检索结果里。其余一律扣下待审。
+- 篇章边界须附起点处的原文 `start_text`，与正文对不上即丢弃；只覆盖全文的切分不保存。
+- 同一记录的多条标签候选合并为一条。
+- 置信度是模型自评，未校准；不同模型的尺度不同（2026-11-16 实测：本地 Qwen3.5-9B 多报 0.9 以上，DeepSeek V4.1-Flash 多在 0.7–0.85），门槛需按所用模型设定。
 
 `ingest` 注册操作也支持可选 `curation` 对象；`POST /api/v1/import/start` 和 `/import/register` 使用相同配置。`midstream operations` 和 `/api/v1/curation/schema` 提供完整 JSON Schema。
 

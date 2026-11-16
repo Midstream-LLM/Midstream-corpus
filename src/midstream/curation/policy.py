@@ -1,4 +1,5 @@
 """Deterministic acceptance policy; model confidence remains explicitly uncalibrated."""
+import json
 from collections import defaultdict
 from ..corpus.metadata import years
 from .models import Claim
@@ -14,10 +15,33 @@ def step_for(claim):
     return 'metadata_enrichment'
 
 
+FACTS = ('authors', 'contributors', 'composed_years', 'composed_label', 'edition_years', 'external_ids')
+
+
+def supported(claim, evidence):
+    """事实字段要有外部证据。只引用正文时，作者须在正文里逐字出现；外部编号须出现在检索结果里。"""
+    if claim.kind != 'metadata' or claim.field not in FACTS:
+        return True
+    cited = [evidence[k] for k in claim.evidence_keys if k in evidence]
+    outside = [e for e in cited if e.provider != 'corpus']
+    found = json.dumps([e.model_dump() for e in outside], ensure_ascii=False)
+    ids = list(claim.value.values()) if claim.field == 'external_ids' else [
+        p['entity_id'] for p in claim.value if p.get('entity_id')] if claim.field == 'contributors' else []
+    if any(i not in found for i in ids):
+        return False
+    if outside:
+        return True
+    if claim.field in ('authors', 'contributors'):
+        names = claim.value if claim.field == 'authors' else [p['name'] for p in claim.value]
+        text = ''.join(e.excerpt for e in cited)
+        return bool(names) and all(name in text for name in names)
+    return False
+
+
 def decide(claims, metadata, evidence, config):
     known = {e.key for e in evidence}
+    by_key = {e.key: e for e in evidence}
     values = defaultdict(set)
-    import json
     for claim in claims:
         if claim.kind == 'metadata':
             values[claim.field].add(json.dumps(claim.value, sort_keys=True, ensure_ascii=False))
@@ -28,7 +52,8 @@ def decide(claims, metadata, evidence, config):
         status = 'applied'
         if len(values.get(claim.field, ())) > 1:
             status = 'conflict'
-        elif not claim.evidence_keys or not set(claim.evidence_keys) <= known or claim.confidence < config.confidence_threshold:
+        elif (not claim.evidence_keys or not set(claim.evidence_keys) <= known
+              or claim.confidence < config.confidence_threshold or not supported(claim, by_key)):
             status = 'withheld'
         elif claim.kind == 'text_patch' and not config.allow_text_edits:
             status = 'withheld'

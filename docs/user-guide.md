@@ -128,6 +128,7 @@ midstream stats
 | `MIDSTREAM_WORKERS` | `8` | 入库解析、清洗、质量判定和压缩，以及重新处理压缩正文的 Python 工作进程数，使用正整数。 |
 | `MIDSTREAM_CHUNK_DOCS` | `2000` | 发布压缩和其他 Python 流程的分块记录数，也用于查重验证批量大小；JSONL 解析按约 8 MiB 原始字节分块，使用正整数。 |
 | `RAYON_NUM_THREADS` | Rayon 默认线程数 | Rust 查重扩展的线程数；与 `MIDSTREAM_WORKERS` 分开控制。 |
+| `MIDSTREAM_RETRIEVAL_PROXY` | 未设置时直连 | AI 整理的外部检索使用的 HTTP 代理，不影响模型调用 |
 | `MIDSTREAM_TEST_DSN` | 未设置时跳过端到端测试 | 只用于测试。必须指向专用测试库，测试会清空其 `public` schema。 |
 
 设置 `MIDSTREAM_JISHUI_RAW` 后，默认输入路径为：

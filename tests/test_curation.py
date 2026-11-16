@@ -112,7 +112,7 @@ def test_invented_citation_fails_without_output():
 
 def test_tool_and_model_budgets_stop_incomplete_runs():
     with pytest.raises(LLMError) as exc:
-        analyze({},'正文',CurationConfig(max_tool_calls=0),FakeServices([{'action':'search','query':'甲'}]),FakeRetrieval())
+        analyze({},'正文',CurationConfig(max_tool_calls=0),FakeServices([{'action':'search','query':'甲'}]*2),FakeRetrieval())
     assert exc.value.code=='curation_budget_exhausted'
     with pytest.raises(LLMError) as exc:
         analyze({},'甲'*1100,CurationConfig(max_text_chars=1000),FakeServices([]),FakeRetrieval())
@@ -198,3 +198,68 @@ def test_export_preserves_nested_types(tmp_path):
     assert dict(restored['processed_steps'])=={'tagging':True}
     assert restored['edition_years']==rows[0]['edition_years']
     assert restored['tags']==rows[0]['tags']
+
+
+
+def test_invalid_candidates_are_dropped_individually():
+    bad={'kind':'metadata','field':'topic','value':'政治','evidence_keys':['e0'],'confidence':0.9,'rationale':'误用字段'}
+    good={'kind':'metadata','field':'genre','value':'诗','evidence_keys':['e0'],'confidence':0.9,'rationale':'五言律诗'}
+    result=analyze({},'正文',CurationConfig(use_authorities=False,steps=['tagging']),
+                   FakeServices([{'action':'finish','claims':[bad,good]}]),FakeRetrieval())
+    assert [c.field for c in result.claims]==['genre'] and len(result.rejected)==1 and '丢弃 1 条' in result.summary
+
+
+def test_facts_need_outside_evidence_and_retrieved_ids():
+    corpus=Evidence(key='e0',provider='corpus',reference='input',excerpt='序　耐道人施士洁')
+    wiki=Evidence(key='e1',provider='wikidata',reference='https://www.wikidata.org/wiki/Q42',data={'id':'Q42'})
+    def c(field,value,keys):return Claim(field=field,value=value,confidence=0.95,rationale='理由',evidence_keys=keys)
+    cases=[(c('authors',['施士洁'],['e0']),'applied'),            # 正文署名
+           (c('authors',['罗洪先'],['e0']),'withheld'),           # 正文里没有
+           (c('composed_years',{'start_year':1900,'end_year':1900},['e0']),'withheld'),  # 只有正文
+           (c('composed_label','明',['e1']),'applied'),           # 有外部证据
+           (c('external_ids',{'wikidata':'Q5179'},['e1']),'withheld'),  # 编号不在检索结果里
+           (c('external_ids',{'wikidata':'Q42'},['e1']),'applied')]
+    for claim,expected in cases:
+        assert decide([claim],{},[corpus,wiki],CurationConfig())==[expected], claim.field
+
+
+def test_segments_must_match_text_and_tags_are_merged():
+    text='甲詩一首。乙詩二首。'
+    seg=lambda start,anchor:{'kind':'segment','field':'segments','evidence_keys':['e1'],'confidence':0.9,'rationale':'篇題',
+                             'value':{'start_char':start,'end_char':start+5,'start_text':anchor,'title':None,'unit_type':'poem'}}
+    tag=lambda tid,tax:{'kind':'metadata','field':'tags','value':[{'taxonomy':tax,'tag_id':tid}],'evidence_keys':['e0'],
+                        'confidence':0.9,'rationale':tax}
+    fake=FakeServices([{'action':'finish','claims':[tag('poetry','genre'),tag('nature','topic')]},
+                       {'action':'finish','claims':[seg(5,'乙詩'),seg(0,'丙丁')]}])
+    result=analyze({},text,CurationConfig(use_authorities=False,steps=['tagging','segmentation']),fake,FakeRetrieval())
+    segments=[c for c in result.claims if c.field=='segments']
+    assert [s.value['start_char'] for s in segments]==[5] and len(result.rejected)==1
+    tags=[c for c in result.claims if c.field=='tags']
+    assert len(tags)==1 and {t['tag_id'] for t in tags[0].value}=={'poetry','nature'}
+
+
+def test_batch_routes_claims_to_records_and_puts_static_prompt_first():
+    from midstream.curation.research import analyze_batch, BATCH_PROMPT
+    tag=lambda record,key,tid:{'record':record,'kind':'metadata','field':'tags','evidence_keys':[key],'confidence':0.95,
+                               'rationale':'体裁','value':[{'taxonomy':'genre','tag_id':tid}]}
+    seen=[]
+    class Recording(FakeServices):
+        def generate(self,prompt,**kwargs):
+            seen.append(kwargs['system']); return super().generate(prompt,**kwargs)
+    fake=Recording([{'action':'finish','claims':[tag(0,'e0','poetry'),tag(1,'e1','ci'),tag(1,'e0','qu')]}])
+    records=[{'metadata':{'title':'甲'},'text':'床前明月光'},{'metadata':{'title':'乙'},'text':'明月几时有'}]
+    first,second=analyze_batch(records,CurationConfig(use_authorities=False),fake,FakeRetrieval())
+    assert len(fake.prompts)==1 and seen==[BATCH_PROMPT] and 'records' in fake.prompts[0]
+    assert [t['tag_id'] for t in first.claims[0].value]==['poetry']
+    assert [t['tag_id'] for t in second.claims[0].value]==['ci'] and len(second.rejected)==1  # 引用了别条的正文
+    assert first.usage[0]['batch_size']==2 and second.usage==[{'batched_with':0,'batch_size':2}]
+
+
+
+def test_over_budget_request_gets_one_forced_finish_and_trailing_json_is_ignored():
+    fake=FakeServices([{'action':'search','query':'甲'}])
+    result=analyze({},'正文',CurationConfig(max_tool_calls=0,steps=['tagging']),fake,FakeRetrieval())
+    assert len(fake.prompts)==2 and fake.prompts[1]['available_tools']==[] and '已拒绝' in str(fake.prompts[1]['tool_history'])
+    from midstream.curation.research import parse
+    parsed,_=parse('{"action":"finish","query":"","claims":[],"summary":"甲"}\n\n{"action":"finish"}')
+    assert parsed.summary=='甲'
