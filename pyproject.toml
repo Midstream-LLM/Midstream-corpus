@@ -15,7 +15,7 @@ midstream = "midstream.cli:main"
 where = ["src"]
 
 [tool.setuptools.package-data]
-midstream = ["data/TSCharacters.txt", "data/LICENSE-OpenCC"]
+midstream = ["data/TSCharacters.txt", "data/LICENSE-OpenCC", "data/chise-ids.tsv.gz", "data/LICENSE-CHISE"]
 
 [tool.pytest.ini_options]
 pythonpath = ["src"]

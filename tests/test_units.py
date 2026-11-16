@@ -416,3 +416,36 @@ def test_export_template_renders_known_fields_and_skips_unknown():
     picked = [half.applies(i) for i in range(2000)]
     assert 900 < sum(picked) < 1100 and picked == [half.applies(i) for i in range(2000)]
     assert Options(template={"format": "{text}"}).model_dump()["template"]["ratio"] == 1.0
+
+
+def test_legacy_encodings_and_new_quality_flags():
+    from midstream.corpus.clean import assess
+    from midstream.ingest.detection import legacy_encoding
+    text = "學而時習之，不亦說乎？有朋自遠方來，不亦樂乎？人不知而不慍，不亦君子乎？" * 20
+    assert legacy_encoding(text.encode("big5")) == "big5hkscs"
+    assert legacy_encoding(text.encode("gb18030")) == "gb18030"
+    assert "mojibake" in assess("锟斤拷锟斤拷锟斤拷正文")[1]
+    assert assess("正文" * 30)[0] == "ok"
+    header = "\n".join(["东方杂志第一卷"] * 10 + [f"第{i}篇正文内容" for i in range(20)])
+    status, flags = assess(header)
+    assert status == "ok" and "repeated_lines" in flags   # 只作提示
+    refrain = "\n".join(["關關雎鳩在河之洲"] * 3 + ["窈窕淑女君子好逑"] * 3)   # 少于 20 行不判
+    assert "repeated_lines" not in assess(refrain)[1]
+
+
+def test_missing_glyphs_restored_or_kept_and_ocr_spaced_chars_collapsed():
+    from midstream.corpus.clean import clean_text
+    from midstream.corpus.glyphs import resolve
+    from midstream.curation.rules import _restore
+    # 能还原的换成字或表意文字描述序列；还原不了的原样保留；不带信息的记号换成“□”。
+    text = "[翟*支]与{谷九}，[宁*页]，{左木右谷}，{云云}，■〈月者〉，\ue6c0粥，■溪女。[卷之十六]〈論語〉[名]{2}⿰舟巳"
+    assert clean_text(text) == "𭣟与䜪，⿰宁页，㭲，{云云}，■〈月者〉，□粥，□溪女。[卷之十六]〈論語〉[名]{2}⿰舟巳"
+    assert resolve("亻*宁") == ("char", "佇")          # 只按原部件匹配，不因繁体写法变成两个候选
+    assert resolve("巫*页")[0] == "ids"                 # CHISE 的占位结构不能让“巫”“爽”相等
+    assert resolve("锍-釒") == ("char", "㐬")
+    assert clean_text("穆 天 子 傳\n馮寶華 馮玉卿", ocr=True) == "穆天子傳\n馮寶華 馮玉卿"
+    assert clean_text("穆 天 子 傳") == "穆 天 子 傳"
+    # 出自 glyph-normalize-v1 的版本从它之前的正文重做。
+    redone = _restore({"text": "□与□", "parent_text": "[翟*支]与\ue6c0", "source": "daizhige"})
+    assert redone.text == "𭣟与□"
+    assert _restore({"text": "无缺字", "parent_text": None, "source": "daizhige"}) is None

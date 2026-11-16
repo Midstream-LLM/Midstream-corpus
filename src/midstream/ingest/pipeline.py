@@ -126,7 +126,7 @@ def _cleaned_metadata(metadata: dict, text: str) -> dict:
     return RecordMetadata.model_validate(derived).model_dump()
 
 
-def _prepare(record: ParsedRecord) -> tuple[ParsedRecord, str | None]:
+def _prepare(record: ParsedRecord, *, ocr: bool = False) -> tuple[ParsedRecord, str | None]:
     """返回 (记录, 清洗后正文)。不能入库的记录转成失败记录。"""
     if record.error is not None:
         return record, None
@@ -138,7 +138,7 @@ def _prepare(record: ParsedRecord) -> tuple[ParsedRecord, str | None]:
     text = record.text or ""
     if not _storable(text):
         return _failed(record, "正文含 NUL 或非法字符"), None
-    cleaned = clean.clean_text(text)
+    cleaned = clean.clean_text(text, ocr=ocr)
     if not cleaned.strip():
         return _failed(record, "清洗后正文为空"), None
     return record, cleaned
@@ -172,7 +172,7 @@ def _stage_chunk(task) -> tuple[bytes, bytes]:
     adapter, batch_id, raw_id, chunk = task
     texts, records = bytearray(), bytearray()
     for parsed in adapter.parse_chunk(chunk):
-        record, cleaned = _prepare(parsed)
+        record, cleaned = _prepare(parsed, ocr=adapter.name.endswith('_ocr'))
         if cleaned is not None:
             digest = textcodec.text_hash(record.text)
             same = cleaned == record.text

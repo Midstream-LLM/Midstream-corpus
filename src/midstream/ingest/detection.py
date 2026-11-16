@@ -16,6 +16,29 @@ from ..corpus.management import ManagementError
 from ..llm.services import LLMServices
 
 
+def legacy_encoding(data):
+    """不是 UTF-8/UTF-16 时，在 GB18030 和 Big5 之间选。
+
+    GB18030 几乎能无错解码任何 Big5 字节，所以不能只看能否解码；先用 cchardet 判断
+    （思路来自 MNBVC 的 charset_mnbvc），它给不出这两者时再看谁能严格解码，都能则取 GB18030。
+    2026-11-16 用 409 篇真实正文重编码实测：GB18030 405/409、Big5 390/409、40 字短文本 400/409。
+    """
+    import cchardet
+    guess = (cchardet.detect(data).get('encoding') or '').lower()
+    if guess in ('gb2312', 'gbk', 'gb18030'):
+        return 'gb18030'
+    if guess.startswith('big5') or guess == 'cp950':
+        return 'big5hkscs'
+    valid = []
+    for encoding in ('gb18030', 'big5hkscs'):
+        try:
+            data.decode(encoding)
+            valid.append(encoding)
+        except UnicodeDecodeError:
+            pass
+    return valid[0] if len(valid) == 1 else 'gb18030'
+
+
 def sample(path):
     with path.open('rb') as handle:
         head = handle.read(32768)
@@ -38,7 +61,7 @@ def sample(path):
                 if len(text.encode(encoding)) < len(head) - 8:
                     raise ValueError()
             except ValueError:
-                encoding = 'gb18030'
+                encoding = legacy_encoding(head)
                 text = head.decode(encoding, errors='replace')
         fmt = {'json': 'json', 'jsonl': 'jsonl', 'src': 'lines', 'tgt': 'lines'}.get(path.suffix.lower().lstrip('.'), 'txt')
         record = {}
@@ -83,8 +106,12 @@ def _fits(plan, path, fmt, encoding, fields, directories=()):
     pattern = plan.get('path_pattern')
     if pattern and not re.search(pattern, path.as_posix()):
         return False
+    # 只在确认时所在的目录里复用：同一来源不同子目录的方案可能不同（如各朝诗集的时代常量），
+    # 只按字段匹配会把一个子目录的常量套到整个来源上。
+    if str(path.parent) not in directories:
+        return False
     if fmt in ('txt', 'lines'):
-        return bool(pattern) or str(path.parent) in directories
+        return True
     used = [plan['text_field'], plan['id_field'], *plan['fields'].values()]
     return all(any(option.split('.')[0] in fields | {'_parent'} for option in item.split('|')) for item in used if item)
 

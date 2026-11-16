@@ -22,7 +22,7 @@ class MappingPlan(BaseModel):
     """字段值是记录内的路径：嵌套用点分隔，`a|b` 取第一个非空项，`_parent.x` 取上层记录的字段。"""
     model_config = ConfigDict(extra='forbid')
     format: Literal['txt', 'json', 'jsonl', 'parquet', 'lines']
-    encoding: Literal['utf-8-sig', 'utf-16', 'gb18030'] = 'utf-8-sig'
+    encoding: Literal['utf-8-sig', 'utf-16', 'gb18030', 'big5hkscs'] = 'utf-8-sig'
     text_field: str = ''
     id_field: str = ''
     fields: dict[str, str] = Field(default_factory=dict)

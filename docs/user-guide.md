@@ -344,8 +344,8 @@ midstream stats
 CLI 默认只预览，打印会变化的文档数量 `changed` 和最多 20 条样本，不写入新版本。样本包含正文片段及元数据的前后值。
 
 ```bash
-midstream reprocess quality-v2
-midstream reprocess quality-v2 --apply
+midstream reprocess quality-v3
+midstream reprocess quality-v3 --apply
 midstream reprocess wanli-collation-v1
 midstream reprocess wanli-collation-v1 --apply
 midstream dedup
@@ -358,10 +358,22 @@ midstream dedup --spans
 
 | 规则 | 范围与行为 |
 |---|---|
-| `quality-v2` | 所有来源。重算质量状态和标记，不改正文。存在替换字符 `�`、汉字占非空白字符比例低于 0.3，或匹配嵌入校勘记的模式时标记为 `flagged`，否则为 `ok`。 |
+| `quality-v3` | 所有来源。重算质量状态和标记，不改正文。出现以下任一情况标记为 `flagged`，否则为 `ok`：替换字符 `�`（`replacement_char`）；汉字占非空白字符比例低于 0.3（`low_cjk_ratio`）；匹配嵌入校勘记的模式（`embedded_collation_note`）；“锟斤拷”“烫烫烫”及 Latin-1 错配残留出现 3 次以上（`mojibake`）。另记提示标记 `repeated_lines`（4 字以上的行不少于 20 行、不重复的行占比低于 95%，思路来自 MNBVC 的 deduplication_mnbvc），不改变质量状态：书籍中目录与正文同名的回目、套语也会命中。入库时用同一套判定。 |
 | `wanli-collation-v1` | 仅 `wanli`。按正文中的重复片段、ASCII 冒号、句号和校勘来源前缀等模式删除部分嵌入校勘记。不是任意校勘记的通用删除规则，执行前应查看预览。 |
+| `ccc-headword-v1` | 仅 `ccc_corpus`。字书条目（如说文）的字头只在来源的 `char` 字段里，正文只有释文；把字头补回正文开头，如“萬，蟲也。从厹，象形。”。 |
+| `glyph-restore-v1` | 所有来源。还原录入时打不出的字的写法，见下文“缺字写法”。出自已停用的 `glyph-normalize-v1`（曾一律换成“□”）的版本，从它之前的正文重做。 |
 
-入库用的 `clean-v1` 将 CRLF、CR 统一为 LF，去除指定控制字符；繁简、异体字、标点和全角空格保持原样。它与查重时的 `compare-v1` 归一化不同。
+入库用的 `clean-v3` 将 CRLF、CR 统一为 LF，去除指定控制字符，按下文还原缺字写法，OCR 来源（名称以 `_ocr` 结尾）还把逐字排开的单字（如“天 子 西 征”）合并；人名列表、表格里多字之间的空格保留。繁简、异体字、标点、引号和全角空格保持原样。它与查重时的 `compare-v1` 归一化不同。
+
+#### 缺字写法
+
+来源用各种写法表示录入时打不出的字：`[宁*页]`、`[跳-兆+孛]`、`[(尤-尢+民)/日]`、`■〈谷九〉`、`{山亢}`、`{左木右谷}`、`＜锍-釒＞`。处理顺序：
+
+1. 结构能对应到唯一的 Unicode 字，就换成这个字，如 `[翟*支]` → 𭣟、`{谷九}` → 䜪、`＜锍-釒＞` → 㐬。先按原部件匹配，找不到再试部件的繁体写法。
+2. 查不到单字但结构明确的，写成表意文字描述序列，如 `[宁*页]` → `⿰宁页`。
+3. 其余写法原样保留（括号里也可能是正常文字，如 `{云云}`）。只有不带信息的 `■`、`〓` 和私用区字符换成“□”。
+
+记法约定：`*` 左右、`/` 上下、`@` 包围、`-` 去掉部件、`+` 加上部件，`{上A下B}`、`{左A右B}`、`{外A内B}` 按字面结构。字形结构数据来自 [CHISE-IDS](https://gitlab.chise.org/CHISE/ids)（GPL-2.0-or-later，`src/midstream/data/LICENSE-CHISE`），比较时展开到最小部件、忽略同方向结构的分组方式。2026-11-16 在正式库 6,000 篇抽样上，约 34% 的拼字写法还原成单字、32% 写成描述序列、34% 原样保留；私用区字符无法还原（需要原数据所用字体的码表）。
 
 ### 添加规则
 

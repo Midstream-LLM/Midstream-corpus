@@ -1704,7 +1704,7 @@ def test_reprocess(conn, tmp_path):
 
     original = current()
     before_counts = counts()
-    quality = RULES["quality-v2"]
+    quality = RULES["quality-v3"]
     preview = reprocess.reprocess(conn, quality, dry_run=True)
     assert preview["changed"] == 1
     assert counts() == before_counts and current() == original

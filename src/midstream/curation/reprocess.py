@@ -32,6 +32,9 @@ class Rule:
     variant: str | None = None
     config: dict = field(default_factory=dict)
     step: str = "rule_reprocess"
+    # 当前版本若出自这条规则的运行，就把它的上一版正文作为 current["parent_text"] 一并给出，
+    # 用于改进旧规则：从旧规则之前的正文重做，而不是在旧规则的结果上叠加。
+    redo_after: str | None = None
 
 
 def _write_blobs(conn: psycopg.Connection, texts: dict, pool: ProcessPoolExecutor) -> None:
@@ -77,23 +80,28 @@ def reprocess(conn: psycopg.Connection, rule: Rule, dry_run=None, samples=20) ->
             condition += ' AND NOT EXISTS (SELECT 1 FROM document_version derived WHERE derived.doc_id=v.doc_id' \
                          ' AND derived.variant=%s AND derived.parent_version_id=v.version_id)'
             params.append(rule.variant)
+        parent = ("(SELECT pb.content FROM document_version p JOIN text_blob pb ON pb.text_hash = p.text_hash"
+                  " WHERE p.version_id = v.parent_version_id AND v.run_id IN"
+                  " (SELECT run_id FROM processing_run WHERE rule_version = %s))") if rule.redo_after else "NULL::bytea"
         reader.execute(
             "SELECT to_jsonb(v), s.name, b.content,"
-            " (SELECT r.raw_fields FROM source_record r WHERE r.doc_id = v.doc_id ORDER BY r.record_id DESC LIMIT 1)"
+            " (SELECT r.raw_fields FROM source_record r WHERE r.doc_id = v.doc_id ORDER BY r.record_id DESC LIMIT 1), "
+            + parent +
             " FROM document_version v"
             " JOIN document d USING (doc_id) JOIN source s USING (source_id)"
             " JOIN text_blob b USING (text_hash) WHERE v.is_current" + condition +
             " ORDER BY v.doc_id",
-            params,
+            ([rule.redo_after] if rule.redo_after else []) + params,
         )
         while rows := reader.fetchmany(config.CHUNK_DOCS):
             changes = []
             texts = {}
             unchanged = []
-            for current, source_name, content, raw_fields in rows:
+            for current, source_name, content, raw_fields, parent_content in rows:
                 before = textcodec.decompress(bytes(content))
                 # raw_fields 是来源原始字段（不含正文），规则可据此补回入库时没进正文的信息。
-                current.update(source=source_name, text=before, raw_fields=raw_fields or {})
+                current.update(source=source_name, text=before, raw_fields=raw_fields or {},
+                               parent_text=textcodec.decompress(bytes(parent_content)) if parent_content else None)
                 change = rule.apply(current)
                 if change is None:
                     unchanged.append(current["version_id"])

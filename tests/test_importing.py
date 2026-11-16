@@ -123,5 +123,11 @@ def test_plan_rules_and_detection_ladder(tmp_path):
     found = detection.detect_one(book)
     assert not found['known'] and found['method'] == 'inferred' and 'composed_label' in found['plan']['path_pattern']
     saved = dict(found['plan'], path_pattern=plan and r'/(?P<title>[^/]+)\.txt$')
-    found = detection.detect_one(book, [('mine', 7, saved, [])])
+    found = detection.detect_one(book, [('mine', 7, saved, [str(tmp_path)])])
     assert found['known'] and found['source'] == 'mine' and found['method'] == 'learned'
+    # 只在确认时的目录里复用，别的目录不套用。
+    other = tmp_path / 'other'
+    other.mkdir()
+    elsewhere = other / book.name
+    elsewhere.write_text(book.read_text())
+    assert detection.detect_one(elsewhere, [('mine', 7, saved, [str(tmp_path)])])['method'] != 'learned'

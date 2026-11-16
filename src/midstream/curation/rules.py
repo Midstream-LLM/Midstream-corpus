@@ -1,6 +1,6 @@
 """重新处理规则，按版本注册。"""
 
-from ..corpus import clean, variants
+from ..corpus import clean, glyphs, variants
 from .reprocess import Change, Rule
 
 
@@ -49,11 +49,22 @@ def _ccc_headword(current: dict) -> Change | None:
     return None
 
 
+def _restore(current: dict) -> Change | None:
+    """缺字写法能还原就还原（见 corpus.glyphs）。出自 glyph-normalize-v1 的版本从它之前的正文重做。"""
+    text = glyphs.restore(current["parent_text"] or current["text"])
+    if current["source"].endswith("_ocr"):
+        text = clean.collapse_spaced_chars(text)
+    return Change(text=text) if text != current["text"] else None
+
+
 RULES = {
     rule.version: rule for rule in (
-        Rule("quality-v2", None, _quality, step="quality_check"),
+        Rule("quality-v3", None, _quality, step="quality_check"),
         Rule("wanli-collation-v1", ["wanli"], _wanli_collation, step="collation_clean"),
         Rule("ccc-headword-v1", ["ccc_corpus"], _ccc_headword, step="rule_reprocess"),
+        # glyph-normalize-v1（2026-11-16，一律换成“□”）已由 glyph-restore-v1 取代，不再提供。
+        Rule(glyphs.RULE_VERSION, None, _restore, step="rule_reprocess", redo_after="glyph-normalize-v1",
+             config={"chise_ids": glyphs.data_info()}),
         Rule("t2s-v1", None, lambda current: Change(text=variants.simplify(current['text'])),
              variant='simplified', config=variants.info(), step='t2s'),
     )
