@@ -612,11 +612,15 @@ midstream export-release 1 --format parquet
 midstream export-release 1 --format jsonl --compression zst --shard-mb 256
 midstream export-release 1 --format pkl --fields ordinal version_id doc_id split title text authors era category genre source
 midstream export-release 1 --format jsonl --unit sample --max-chars 8192 --overlap-chars 256
+midstream export-release 1 --format jsonl --template '[《{title}》][{authors}]\n{text}'
+midstream export-release 1 --format jsonl --template '[【{era}·{genre}】]{text}' --template-ratio 0.5 --template-seed 1
 ```
 
 formats 为 parquet/jsonl/pkl；JSONL 可加外层 zst 压缩。fields 默认六列，可增加 authors、era、category、genre、source，也可只取需要的列。pkl 每片是一个 `list[dict]`，**只加载可信的 pkl 文件**；文件校验也会加载这些分片。
 
 shard_mb 默认 256，以行的 UTF-8 JSON 大小预算分片，不是压缩后文件字节上限；单篇或单个 sample 超过预算时单独成片。内存受分片预算与最大单篇正文限制，读取不累积全库正文。sample 默认 max_chars=8192、overlap_chars=0，优先段落、其次句末，再按字符截断；自动增加 sample_index/start_char/end_char（Unicode 码点偏移）。相邻 sample 重叠长度固定，去除后续 sample 的重叠前缀可还原原文。原发布的 ordinal、成员和摘要不变。
+
+正文模板（`--template`，API 为 `options.template`）把元数据拼进 `text` 字段，写法固定、可复现。可用字段：`{title}`、`{authors}`（多人用“、”连接）、`{era}`、`{category}`、`{genre}`、`{tune_pattern}`、`{source}`、`{text}`。方括号是可选段，其中任一字段为空时整段省略，未知不会写成“未知”；`{text}` 必须恰好出现一次且不在方括号里。`--template-ratio` 指定套用模板的文档比例，按 `--template-seed` 和 doc_id 的哈希固定选取，可用于只给一部分数据加元数据前缀。模板配置写入 manifest。切分为 sample 时，位置按拼接后的正文计算，模板内容只出现在每篇的第一个 sample。模板只作用于文本导出；token 统计和 NPY token 分片仍按原正文计算。
 
 每次创建新 export_id；manifest.json 固定发布 ID、原配方、内容摘要、格式、实际字段、unit/切分参数和各文件的行数、字节数、SHA-256。数据文件写出时顺带计算一次哈希，先临时文件再改名；全部分片和 manifest 完成后才公布整个目录并登记 completed。异常中断清理本次临时目录；强制杀进程时可能留下 `.<export_id>.tmp`，它不是已完成导出，也没有完成产物记录。重试生成新目录，不覆盖旧导出。
 

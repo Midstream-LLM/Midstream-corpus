@@ -399,3 +399,20 @@ def test_dictionary_entries_keep_their_headword():
     assert _ccc_headword(current).text == "禹，蟲也。从厹，象形。"
     assert _ccc_headword({"text": "禹，蟲也。", "raw_fields": {"char": "禹"}}) is None   # 已补过
     assert _ccc_headword({"text": "正文", "raw_fields": {"chapter": "卷一"}}) is None     # 不是字书条目
+
+
+def test_export_template_renders_known_fields_and_skips_unknown():
+    import pytest
+    from midstream.delivery.export import Options
+    from midstream.delivery.template import Template
+    t = Template(format="[《{title}》][{authors}]\n[【{era}】]{text}")
+    poem = {"doc_id": 1, "title": "石", "authors": ["李嶠"], "era": "唐", "text": "宗子維城固"}
+    assert t.render(poem) == "《石》李嶠\n【唐】宗子維城固"
+    assert t.render({"doc_id": 2, "title": "無題", "authors": None, "era": "", "text": "甲"}) == "《無題》\n甲"
+    for bad in ("{title}", "[{text}]", "{text}{text}", "[[{title}]]{text}", "{who}{text}"):
+        with pytest.raises(ValueError):
+            Template(format=bad)
+    half = Template(format="[{title}]{text}", ratio=0.5, seed=3)
+    picked = [half.applies(i) for i in range(2000)]
+    assert 900 < sum(picked) < 1100 and picked == [half.applies(i) for i in range(2000)]
+    assert Options(template={"format": "{text}"}).model_dump()["template"]["ratio"] == 1.0

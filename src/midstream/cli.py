@@ -121,7 +121,9 @@ def _export_preview(conn, args) -> int:
 def _export_release(conn, args) -> int:
     options = Options(format=args.format, fields=args.fields, unit=args.unit,
                                 shard_mb=args.shard_mb, max_chars=args.max_chars,
-                                overlap_chars=args.overlap_chars, compression=args.compression)
+                                overlap_chars=args.overlap_chars, compression=args.compression,
+                                template={'format': args.template.replace('\\n', '\n'), 'ratio': args.template_ratio,
+                                          'seed': args.template_seed} if args.template else None)
     return _operate(conn, args, "dataset_export",
                     {"release_id": args.release_id, "options": options.model_dump(mode="json")})
 
@@ -343,6 +345,9 @@ def main() -> int:
     p.add_argument('--max-chars', type=int, default=8192)
     p.add_argument('--overlap-chars', type=int, default=0)
     p.add_argument('--compression', choices=('zst',))
+    p.add_argument('--template', help='正文模板，如 "[《{title}》][{authors}]\\n{text}"；\\n 表示换行')
+    p.add_argument('--template-ratio', type=float, default=1.0, help='套用模板的文档比例')
+    p.add_argument('--template-seed', type=int, default=0, help='按比例选取文档的种子')
     _job_options(p)
     p.set_defaults(handler=_export_release)
 

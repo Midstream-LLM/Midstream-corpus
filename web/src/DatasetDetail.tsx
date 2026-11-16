@@ -9,7 +9,8 @@ export default function DatasetDetail({ id, onCopy, onJob }: { id: number; onCop
     [tokenizer, setTokenizer] = useState(""), [format, setFormat] = useState("parquet"), [unit, setUnit] = useState("document"),
     [shard, setShard] = useState(256), [maxChars, setMaxChars] = useState(8192), [overlap, setOverlap] = useState(0),
     [fields, setFields] = useState(allFields.slice(0, 6)), [zst, setZst] = useState(false), [hash, setHash] = useState(false),
-    [run, setRun] = useState(""), [busy, setBusy] = useState(false), [message, setMessage] = useState("");
+    [run, setRun] = useState(""), [busy, setBusy] = useState(false), [message, setMessage] = useState(""),
+    [template, setTemplate] = useState(""), [ratio, setRatio] = useState(1), [seed, setSeed] = useState(0);
   const detail = useLoad<Release>("datasets/" + id, tick), stats = useLoad<TokenStats[]>("datasets/" + id + "/token-stats", tick),
     exports = useLoad<Export[]>("datasets/" + id + "/exports", tick),
     training = useLoad<{ run_name: string; used_at: string; note: string }[]>("datasets/" + id + "/training", tick);
@@ -53,10 +54,17 @@ export default function DatasetDetail({ id, onCopy, onJob }: { id: number; onCop
         {unit === "sample" && <><label>每条最多字符<input type="number" min="1" value={maxChars} onChange={e => setMaxChars(Number(e.target.value))} /></label>
           <label>重叠字符<input type="number" min="0" value={overlap} onChange={e => setOverlap(Number(e.target.value))} /></label></>}</div>
       {format === "jsonl" && <label className="check"><input type="checkbox" checked={zst} onChange={e => setZst(e.target.checked)} />Zstandard 压缩</label>}
+      <fieldset><legend>正文模板（选填）</legend>
+        <label>模板<input value={template} placeholder="[《{title}》][{authors}]\n{text}" onChange={e => setTemplate(e.target.value)} /></label>
+        <p>把元数据拼进 text 字段。可用 {"{title} {authors} {era} {category} {genre} {tune_pattern} {source} {text}"}；方括号内任一字段为空时整段省略；{"{text}"} 必须出现一次且不在方括号里。输入框里的 \n 表示换行。</p>
+        {template.trim() && <div className="edit-grid"><label>套用比例（0–1）<input type="number" min="0" max="1" step="0.05" value={ratio} onChange={e => setRatio(Number(e.target.value))} /></label>
+          <label>选取种子<input type="number" step="1" value={seed} onChange={e => setSeed(Number(e.target.value))} /></label></div>}
+      </fieldset>
       <fieldset><legend>导出字段</legend><div className="actions">{allFields.map(field => <label className="check" key={field}><input type="checkbox" checked={fields.includes(field)}
         onChange={e => setFields(e.target.checked ? [...fields, field] : fields.filter(x => x !== field))} />{field}</label>)}</div></fieldset>
       <button disabled={!enabled || !fields.length || shard <= 0 || (unit === "sample" && (maxChars <= overlap || overlap < 0))}
-        onClick={() => act("exports", { options: { format, fields, unit, shard_mb: shard, max_chars: maxChars, overlap_chars: overlap, compression: zst ? "zst" : null } })}>提交导出任务</button>
+        onClick={() => act("exports", { options: { format, fields, unit, shard_mb: shard, max_chars: maxChars, overlap_chars: overlap, compression: zst ? "zst" : null,
+          template: template.trim() ? { format: template.replace(/\\n/g, "\n"), ratio, seed } : null } })}>提交导出任务</button>
       <h3>导出历史与下载</h3><State loading={exports.loading && !exports.data} error={exports.error} empty={exports.data?.length === 0} />
       {exports.data?.map(item => <details key={item.export_id}><summary>#{item.export_id} · {item.format} · {{ completed: "已完成", failed: "失败", writing: "写出中" }[item.status as "completed"]}</summary>
         {item.error && <p className="error">{item.error}</p>}

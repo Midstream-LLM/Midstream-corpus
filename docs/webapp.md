@@ -204,7 +204,7 @@ CLI 同样可用 `midstream jobs list/show/cancel/retry`，详见使用指南。
 
 - **Token 统计**：填后端分词器路径、操作人/依据，提交 token_stats，完成后回详情看总量、分划分/来源/类别和分位数。统计按分词器 JSON 指纹区分，完整正文计数缓存可跨发布复用，裁剪正文直接计算。
 - **校验**：提交 dataset_verify；默认核对固定成员摘要/字符数、已完成文件存在/大小/行数，选哈希校验才重读文件核对 SHA-256。
-- **导出**：选择 parquet/jsonl/pkl、字段、document/sample、分片大小；sample 设置 max_chars/overlap_chars，JSONL 可选 zst。提交 dataset_export，成功后历史展示 manifest 和文件清单。PKL 只加载可信文件。多次导出使用相同固定成员，每次独立 export_id。详细参数见 [导出说明](user-guide.md#按已有发布多次导出)。
+- **导出**：选择 parquet/jsonl/pkl、字段、document/sample、分片大小；sample 设置 max_chars/overlap_chars，JSONL 可选 zst。可选“正文模板”把标题、作者、时代等拼进 text，并设置套用比例和选取种子（语法见导出说明）。提交 dataset_export，成功后历史展示 manifest 和文件清单。PKL 只加载可信文件。多次导出使用相同固定成员，每次独立 export_id。详细参数见 [导出说明](user-guide.md#按已有发布多次导出)。
 - **下载到本地**：按详情实际路径复制 rsync 模板，将 USER@HOST 替换为 SSH 连接信息，在自己的电脑执行；API 不接受输出路径，导出根由后端 MIDSTREAM_EXPORT_ROOT 决定。
 - **登记训练**：填运行名、操作人、依据；仅登记使用，不启动训练。后续发布会据此检查 val/test 是否泄漏。
 

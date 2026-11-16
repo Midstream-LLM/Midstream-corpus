@@ -18,6 +18,7 @@ from ..datasets.recipe import ExportError
 from ..datasets.release import get_release, verify_members
 from .formats import FORMATS, _HashWriter
 from .samples import SAMPLE_FIELDS, SAMPLERS
+from .template import Template
 
 DEFAULT_FIELDS = ['ordinal', 'version_id', 'doc_id', 'split', 'title', 'text']
 FieldName = Literal['ordinal', 'version_id', 'doc_id', 'split', 'title', 'text',
@@ -36,6 +37,8 @@ class Options(BaseModel):
     unit: Literal['document', 'sample'] = 'document'
     max_chars: int = Field(default=8192, gt=0)
     overlap_chars: int = Field(default=0, ge=0)
+    # 把标题、作者等拼进 text 字段；切分为 sample 时，位置按拼接后的正文计算。
+    template: Template | None = None
 
     @model_validator(mode='after')
     def valid(self):
@@ -78,6 +81,8 @@ def _documents(conn, release_id, *, only_cut=False):
 def _rows(conn, release_id, options):
     fields = list(options.fields) + (SAMPLE_FIELDS if options.unit == 'sample' else [])
     for document in _documents(conn, release_id):
+        if options.template and options.template.applies(document['doc_id']):
+            document = {**document, 'text': options.template.render(document)}
         records = SAMPLERS[options.unit](document, options)
         for record in records:
             yield document['split'], {name: record[name] for name in fields}
