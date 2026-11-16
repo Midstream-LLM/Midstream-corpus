@@ -385,3 +385,17 @@ def test_operation_registry_validates_params():
         with pytest.raises(ManagementError) as error:
             jobs.submit(None, kind, params, 'tester', '校验')
         assert error.value.code == 'invalid_input'
+
+
+def test_dictionary_entries_keep_their_headword():
+    import json
+    from midstream.curation.rules import _ccc_headword
+    from midstream.ingest.adapters.base import JsonlChunk
+    from midstream.ingest.adapters.ccc import CccCorpusAdapter
+    entry = {"id": "shuowen#9684", "source": "说文解字", "char": "萬", "content": "蟲也。从厹，象形。"}
+    line = json.dumps(entry, ensure_ascii=False).encode() + b"\n"
+    assert CccCorpusAdapter().parse_chunk(JsonlChunk(line, 1, 0))[0].text == "萬，蟲也。从厹，象形。"
+    current = {"text": "蟲也。从厹，象形。", "raw_fields": {"char": "禹"}}
+    assert _ccc_headword(current).text == "禹，蟲也。从厹，象形。"
+    assert _ccc_headword({"text": "禹，蟲也。", "raw_fields": {"char": "禹"}}) is None   # 已补过
+    assert _ccc_headword({"text": "正文", "raw_fields": {"chapter": "卷一"}}) is None     # 不是字书条目

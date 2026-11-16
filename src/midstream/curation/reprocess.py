@@ -78,7 +78,9 @@ def reprocess(conn: psycopg.Connection, rule: Rule, dry_run=None, samples=20) ->
                          ' AND derived.variant=%s AND derived.parent_version_id=v.version_id)'
             params.append(rule.variant)
         reader.execute(
-            "SELECT to_jsonb(v), s.name, b.content FROM document_version v"
+            "SELECT to_jsonb(v), s.name, b.content,"
+            " (SELECT r.raw_fields FROM source_record r WHERE r.doc_id = v.doc_id ORDER BY r.record_id DESC LIMIT 1)"
+            " FROM document_version v"
             " JOIN document d USING (doc_id) JOIN source s USING (source_id)"
             " JOIN text_blob b USING (text_hash) WHERE v.is_current" + condition +
             " ORDER BY v.doc_id",
@@ -88,9 +90,10 @@ def reprocess(conn: psycopg.Connection, rule: Rule, dry_run=None, samples=20) ->
             changes = []
             texts = {}
             unchanged = []
-            for current, source_name, content in rows:
+            for current, source_name, content, raw_fields in rows:
                 before = textcodec.decompress(bytes(content))
-                current.update(source=source_name, text=before)
+                # raw_fields 是来源原始字段（不含正文），规则可据此补回入库时没进正文的信息。
+                current.update(source=source_name, text=before, raw_fields=raw_fields or {})
                 change = rule.apply(current)
                 if change is None:
                     unchanged.append(current["version_id"])

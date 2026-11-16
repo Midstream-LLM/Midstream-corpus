@@ -78,7 +78,7 @@ def test_proposal_retry_does_not_call_model_and_conflict_does_not_overwrite(conn
 
 def test_failed_budget_keeps_record_unclean_and_can_resume(conn):
     doc,old=seed(conn)
-    result=run(conn,config=CurationConfig(max_tool_calls=0),services=FakeServices([{'action':'search','query':'甲'}]))
+    result=run(conn,config=CurationConfig(max_tool_calls=0),services=FakeServices([{'action':'search','query':'甲'}]*2))  # 超预算先被拒一次，再请求才失败
     assert result['counts']=={'failed':1}
     assert not query.metadata(conn,doc)['processed_steps'].get('ai_curation',False)
     result=run(conn,resume_run_id=result['run_id'],resume_options=ResumeOptions(max_tool_calls=2),services=FakeServices([{'action':'finish'}]))

@@ -34,7 +34,7 @@ def test_register_audit_transaction_and_duplicate(monkeypatch, tmp_path):
         return 42
     monkeypatch.setattr(ingest, 'register_batch', register)
     monkeypatch.setattr(importing, '_event', lambda *args: calls.append('audit'))
-    args = (Conn(), 'ccc_corpus', [str(path)], objects, 'ccc-corpus-v1', 'tester', 'test')
+    args = (Conn(), 'ccc_corpus', [str(path)], objects, 'ccc-corpus-v2', 'tester', 'test')
     assert importing.register(*args)['batch_id'] == 42
     assert calls == ['register', 'audit', 'commit']
     def duplicate(*args, **kwargs): raise ingest.AlreadyImported('already imported')

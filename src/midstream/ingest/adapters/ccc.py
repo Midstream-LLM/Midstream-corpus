@@ -26,7 +26,7 @@ def _unit_type(record: dict) -> str:
 
 class CccCorpusAdapter(JsonlAdapter):
     name = "ccc_corpus"
-    parser_version = "ccc-corpus-v1"
+    parser_version = "ccc-corpus-v2"
     description = "Chinese Classical Corpus：十三经、说文解字、资治通鉴和二十四史前 15 部"
     license_note = "cc0-1.0（数据集 README 声明）"
 
@@ -49,6 +49,9 @@ class CccCorpusAdapter(JsonlAdapter):
             if not isinstance(text, str) or not text:
                 records.append(ParsedRecord(str(key), locator, raw_fields, error="正文为空"))
                 continue
+            # 字书条目（如说文）的字头只在 char 字段里；不补回，正文只剩释文，不同字头会被当成重复。
+            if record.get("char"):
+                text = f"{record['char']}，{text}"
             author = record.get("author")
             metadata = {
                 "title": _title(record),
