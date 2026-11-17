@@ -610,6 +610,42 @@ details pre {
   font-size: 11px;
   color: #6d8273;
 }
+.year-edit {
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+  font-size: 11px;
+  color: #6d8273;
+  min-width: 0;
+}
+.year-edit > div {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.year-edit input {
+  flex: 1;
+  min-width: 0;
+}
+.year-edit i {
+  font-style: normal;
+  color: #a1ac9e;
+}
+.year-edit small {
+  display: flex;
+  gap: 10px;
+  flex-wrap: wrap;
+  color: #8a9a8c;
+}
+.year-edit button.link {
+  border: 0;
+  padding: 0;
+  background: none;
+  color: #27765d;
+  font: inherit;
+  text-decoration: underline;
+  cursor: pointer;
+}
 .edit-grid textarea,
 textarea {
   border: 1px solid #dfe5db;

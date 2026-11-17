@@ -1,4 +1,5 @@
-import { rangeLabel } from "./Years";
+import { rangeLabel, yearLabel } from "./Years";
+import { savedActor } from "./importDraft";
 import { stepLabels, CurationItem } from "./Curation";
 import RepeatHighlight from "./RepeatHighlight";
 import { useState } from "react";
@@ -66,10 +67,13 @@ const basis: Record<string, string> = {
   rule: "规则处理",
   human: "人工审核",
 };
+const ranges = ["composed_years", "edition_years"];
 const common = [
   "title",
   "authors",
+  "composed_years",
   "composed_label",
+  "edition_years",
   "genre",
   "category",
   "topics",
@@ -77,13 +81,37 @@ const common = [
   "quality_status",
   "quality_flags",
 ];
+type Range = { start_year: number | null; end_year: number | null };
 function initial(m: Metadata) {
-  return Object.fromEntries(
-    common.map((k) => [
-      k,
-      Array.isArray(m[k]) ? (m[k] as string[]).join("\n") : String(m[k] ?? ""),
-    ]),
-  );
+  const form: Record<string, string> = {};
+  for (const k of common) {
+    if (ranges.includes(k)) {
+      const r = m[k] as Range | null;
+      form[k + ".from"] = String(r?.start_year ?? "");
+      form[k + ".to"] =
+        r && r.end_year !== r.start_year ? String(r.end_year ?? "") : "";
+    } else
+      form[k] = Array.isArray(m[k])
+        ? (m[k] as string[]).join("\n")
+        : String(m[k] ?? "");
+  }
+  return form;
+}
+// 只填起始年表示单一年份；两格都空表示未知。
+function parseRange(label: string, from: string, to: string): Range | null {
+  if (!from && !to) return null;
+  const a = from ? Number(from) : null,
+    b = to ? Number(to) : a;
+  for (const n of [a, b])
+    if (n !== null && (!Number.isInteger(n) || n === 0))
+      throw new Error(`${label}须为非零整数，公元前用负数`);
+  if (a !== null && b !== null && a > b)
+    throw new Error(`${label}的起始年不能晚于结束年`);
+  return { start_year: a, end_year: b };
+}
+function titleYear(title: string) {
+  const m = title.match(/(?<!\d)(\d{3,4})\s*年/);
+  return m ? m[1] : "";
 }
 function Editor({
   metadata,
@@ -96,7 +124,7 @@ function Editor({
 }) {
   const [form, setForm] = useState(initial(metadata)),
     [advanced, setAdvanced] = useState("{}"),
-    [actor, setActor] = useState(""),
+    [actor, setActor] = useState(savedActor),
     [reason, setReason] = useState(""),
     [error, setError] = useState(""),
     [busy, setBusy] = useState(false),
@@ -105,7 +133,10 @@ function Editor({
     const base = initial(metadata);
     const patch: Record<string, unknown> = {};
     for (const k of common) {
-      if (form[k] !== base[k])
+      if (ranges.includes(k)) {
+        if (form[k + ".from"] !== base[k + ".from"] || form[k + ".to"] !== base[k + ".to"])
+          patch[k] = parseRange(labels[k], form[k + ".from"], form[k + ".to"]);
+      } else if (form[k] !== base[k])
         patch[k] = ["authors", "topics", "quality_flags"].includes(k)
           ? form[k]
               .split("\n")
@@ -136,6 +167,58 @@ function Editor({
       setBusy(false);
     }
   }
+  function set(values: Record<string, string>) {
+    setPreview(null);
+    setForm({ ...form, ...values });
+  }
+  const hint = titleYear(form.title);
+  function yearField(k: string) {
+    const from = form[k + ".from"],
+      to = form[k + ".to"];
+    let text = "两格都留空表示年份未知";
+    try {
+      const r = parseRange(labels[k], from, to);
+      if (r) text = rangeLabel(r);
+    } catch (e) {
+      text = (e as Error).message;
+    }
+    return (
+      <div key={k} className="year-edit" role="group" aria-label={labels[k]}>
+        <span>{labels[k].replace("区间", "")}</span>
+        <div>
+          <input
+            type="number"
+            step="1"
+            aria-label={labels[k] + "起始年"}
+            placeholder="年份，如 2003"
+            value={from}
+            onChange={(e) => set({ [k + ".from"]: e.target.value })}
+          />
+          <i>—</i>
+          <input
+            type="number"
+            step="1"
+            aria-label={labels[k] + "结束年"}
+            placeholder="结束年（单一年份留空）"
+            value={to}
+            onChange={(e) => set({ [k + ".to"]: e.target.value })}
+          />
+        </div>
+        <small>
+          {text}
+          {k === "composed_years" && hint && hint !== from && (
+            <button
+              type="button"
+              className="link"
+              onClick={() => set({ [k + ".from"]: hint, [k + ".to"]: "" })}
+            >
+              填入标题中的{yearLabel(Number(hint))}
+            </button>
+          )}
+        </small>
+      </div>
+    );
+  }
   return (
     <div className="editor">
       <h3>修正元数据 · 基于 v{metadata.version_no}</h3>
@@ -154,7 +237,7 @@ function Editor({
         }}
       >
         <div className="edit-grid">
-          {common.map((k) => (
+          {common.map((k) => ranges.includes(k) ? yearField(k) : (
             <label key={k}>
               {labels[k]}
               {k === "quality_status" ? (
@@ -196,8 +279,8 @@ function Editor({
         <details>
           <summary>高级字段修正</summary>
           <p>
-            可补充成书/刊刻年份区间、历史分类、extra 等字段。例如成书区间用{" "}
-            {`{"composed_years":{"start_year":618,"end_year":907}}`} 表示 618—907 年，null 表示未知。
+            以 JSON 补充历史分类、extra 等字段，或只知一端的年份区间。例如{" "}
+            {`{"composed_years":{"start_year":618,"end_year":null}}`} 表示 618 年以后；此处的值优先于上方表单。
           </p>
           <textarea
             aria-label="高级元数据 JSON"
@@ -257,8 +340,8 @@ function Editor({
               {Object.entries(preview).map(([k, v]) => (
                 <tr key={k}>
                   <td>{labels[k] || k}</td>
-                  <td>{show(metadata[k])}</td>
-                  <td>{show(v)}</td>
+                  <td>{ranges.includes(k) ? rangeLabel(metadata[k]) : show(metadata[k])}</td>
+                  <td>{ranges.includes(k) ? (v ? rangeLabel(v) : "未知") : show(v)}</td>
                 </tr>
               ))}
             </tbody>
