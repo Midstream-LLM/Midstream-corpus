@@ -1,0 +1,95 @@
+{
+ "version": "team-texts-map-v1",
+ "key": "category",
+ "comment": "按来源分类原值映射；小说话本另由正文回目规则区分章回。",
+ "map": {
+  "小说话本": {
+   "genre": [
+    "xiaoshuo"
+   ],
+   "class": [
+    "zi.xiaoshuo"
+   ]
+  },
+  "剧曲": {
+   "genre": [
+    "xiqu"
+   ],
+   "class": [
+    "ji.ciqu"
+   ]
+  },
+  "诗歌": {
+   "genre": [
+    "yunwen.shi"
+   ],
+   "class": [
+    "ji"
+   ]
+  },
+  "词集": {
+   "genre": [
+    "yunwen.ci"
+   ],
+   "class": [
+    "ji.ciqu"
+   ]
+  },
+  "散文": {
+   "genre": [
+    "sanwen"
+   ],
+   "class": [
+    "ji"
+   ]
+  },
+  "史书": {
+   "genre": [
+    "shiti"
+   ],
+   "class": [
+    "shi"
+   ]
+  },
+  "医书": {
+   "genre": [
+    "zhuanzhu.yifang"
+   ],
+   "class": [
+    "zi.yijia"
+   ]
+  },
+  "算法": {
+   "genre": [
+    "zhuanzhu.suanshu"
+   ],
+   "class": [
+    "zi.tianwen"
+   ]
+  },
+  "农业": {
+   "genre": [
+    "zhuanzhu.nongshu"
+   ],
+   "class": [
+    "zi.nongjia"
+   ]
+  },
+  "兵书": {
+   "genre": [
+    "zhuanzhu.bingshu"
+   ],
+   "class": [
+    "zi.bingjia"
+   ]
+  },
+  "技艺": {
+   "genre": [
+    "zhuanzhu.jiyi"
+   ],
+   "class": [
+    "zi.yishu"
+   ]
+  }
+ }
+}

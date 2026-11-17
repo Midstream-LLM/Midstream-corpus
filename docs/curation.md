@@ -69,7 +69,7 @@ midstream run curate --params '{"resume_run_id":42,"resume_options":{"max_tool_c
   "composed_years": {"start_year": 800, "end_year": 810},
   "edition_years": null,
   "contributors": [{"name": "示例作者", "role": "author", "entity_id": null}],
-  "tags": [{"taxonomy": "genre", "tag_id": "poetry"}],
+  "tags": [{"taxonomy": "genre", "tag_id": "yunwen.shi"}, {"taxonomy": "era", "tag_id": "suitang.tang"}],
   "external_ids": {},
   "field_claims": {},
   "processed_steps": {"basic_clean": true, "metadata_enrichment": true, "tagging": true,
@@ -77,7 +77,7 @@ midstream run curate --params '{"resume_run_id":42,"resume_options":{"max_tool_c
 }
 ```
 
-年份未知为 `null`，无零年；单侧边界可空。责任者支持 author/compiler/commentator/translator/editor，`authors` 作为 author 角色的兼容投影同步维护。层级书目分类、文体、主题、语体使用分开的 taxonomy 与稳定 tag_id；词牌单列 `tune_pattern`。现有 `genre/category/topics` 保留作来源兼容字段，多标签以 `tags` 表达。原始数据继续存放在 `source_record.raw_fields`。
+年份未知为 `null`，无零年；单侧边界可空。责任者支持 author/compiler/commentator/translator/editor，`authors` 作为 author 角色的兼容投影同步维护。时代（era）、体裁（genre）、部类（class，古籍四库类目、现代中图法大类）、地域（region）、语体（register）、主题（topic）使用分开的 taxonomy 与稳定 tag_id，词表在 `src/midstream/data/taxonomy/vocabulary.json`；词牌单列 `tune_pattern`。现有 `genre/category/topics` 保留作来源兼容字段，多标签以 `tags` 表达。原始数据继续存放在 `source_record.raw_fields`。
 
 布尔标记表达已完成的处理历史，普通后续修订继承标记。缺键等价于 false；失败、仅生成候选和部分步骤未完成，不将完整 AI 整理标记设为 true。正常完成但无可确认的修改可以保留未知，并标记完成。低置信度与冲突候选保存为 withheld/conflict；完成的是考证与决策流程。人工审核是否完成独立记录。
 

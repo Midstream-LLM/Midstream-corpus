@@ -67,9 +67,24 @@ def test_era_unknown_is_not_guessed():
 
 
 def test_cleaned_metadata_records_rule_basis():
-    derived = _cleaned_metadata({"composed_label": "唐", "field_basis": {"title": "source"}}, "甲乙")
+    derived = _cleaned_metadata("test", {"composed_label": "唐", "field_basis": {"title": "source"}}, "甲乙")
     assert derived["composed_years"] == {"start_year":618, "end_year":907}
-    assert derived["field_basis"] == {"title": "source", "composed_years": "rule"}
+    assert derived["tags"] == [{"taxonomy": "era", "tag_id": "suitang.tang"}]
+    assert derived["field_basis"] == {"title": "source", "tags.era": "source_map", "composed_years": "source_map"}
+
+
+def test_taxonomy_mapping():
+    from midstream.corpus import classify
+    assert classify.classify("wanli", {})["tags"]["class"] == ["shi.biannian"]
+    chapters = "第一回 甲\n第二回 乙\n第三回 丙"
+    assert classify.classify("team_texts", {"category": "小说话本", "text": chapters})["tags"]["genre"] == ["xiaoshuo.zhanghui"]
+    # 来源给的年份不被时代区间覆盖，时代由年份推出。
+    current = {"composed_years": {"start_year": 1100, "end_year": 1110}, "field_basis": {"composed_years": "source"}}
+    patch = classify.merge(current, classify.classify("test", current))
+    assert "composed_years" not in patch and patch["tags"] == [{"taxonomy": "era", "tag_id": "song.song.beisong"}]
+    # 已有的维度不动。
+    current = {"composed_label": "唐", "tags": [{"taxonomy": "era", "tag_id": "song"}], "field_basis": {}}
+    assert "tags" not in classify.merge(current, classify.classify("test", current))
 
 
 def test_prepare_rejects_nul_and_empty():

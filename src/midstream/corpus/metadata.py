@@ -73,7 +73,7 @@ from .taxonomy import TAXONOMY
 
 
 class Tag(Model):
-    taxonomy: Literal['genre', 'bibliographic_class', 'topic', 'language_style']
+    taxonomy: Literal['era', 'genre', 'class', 'region', 'register', 'topic']
     tag_id: str = Field(pattern=r'^[a-z][a-z0-9_.-]*$')
 
     @model_validator(mode='after')

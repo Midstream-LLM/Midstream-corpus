@@ -1,0 +1,118 @@
+{
+ "version": "greathangpt-map-v1",
+ "key": "raw.source",
+ "comment": "按子来源（原始字段 source）映射，取不到时按 content_category。Poetry/Werneror 诗词混合，只标到韵文一级。后备映射补主映射缺的维度。",
+ "map": {
+  "chinese-poetry/全唐诗": {
+   "genre": [
+    "yunwen.shi"
+   ],
+   "class": [
+    "ji.zongji"
+   ]
+  },
+  "chinese-poetry/宋词": {
+   "genre": [
+    "yunwen.ci"
+   ],
+   "class": [
+    "ji.ciqu"
+   ]
+  },
+  "chinese-poetry/元曲": {
+   "genre": [
+    "yunwen.qu"
+   ],
+   "class": [
+    "ji.ciqu"
+   ]
+  },
+  "chinese-poetry/纳兰性德": {
+   "genre": [
+    "yunwen.ci"
+   ],
+   "class": [
+    "ji.ciqu"
+   ]
+  },
+  "chinese-poetry/水墨唐诗": {
+   "genre": [
+    "yunwen.shi"
+   ],
+   "class": [
+    "ji.zongji"
+   ]
+  },
+  "chinese-poetry/曹操诗集": {
+   "genre": [
+    "yunwen.shi"
+   ],
+   "class": [
+    "ji.bieji"
+   ]
+  },
+  "chinese-poetry/论语": {
+   "genre": [
+    "jingjie.yulu"
+   ],
+   "class": [
+    "jing.sishu"
+   ]
+  },
+  "chinese-poetry/四书五经": {
+   "class": [
+    "jing"
+   ]
+  },
+  "CBETA/": {
+   "genre": [
+    "zongjiao.fojing"
+   ],
+   "class": [
+    "zi.shijia"
+   ]
+  },
+  "CBETA/A": {
+   "genre": [
+    "zongjiao.fojing"
+   ],
+   "class": [
+    "zi.shijia"
+   ]
+  },
+  "CBETA/B": {
+   "genre": [
+    "zongjiao.fojing"
+   ],
+   "class": [
+    "zi.shijia"
+   ]
+  },
+  "Poetry/Werneror": {
+   "genre": [
+    "yunwen"
+   ]
+  }
+ },
+ "fallback_key": "raw.content_category",
+ "fallback": {
+  "集": {
+   "class": [
+    "ji"
+   ]
+  },
+  "佛": {
+   "genre": [
+    "zongjiao.fojing"
+   ],
+   "class": [
+    "zi.shijia"
+   ]
+  },
+  "经": {
+   "class": [
+    "jing"
+   ]
+  }
+ }
+}

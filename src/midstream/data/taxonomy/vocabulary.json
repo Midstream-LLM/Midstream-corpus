@@ -1,0 +1,854 @@
+{
+ "version": "midstream-taxonomy-v1",
+ "comment": "时代、体裁、部类、地域、语体的受控词表；设计见 Project docs/taxonomy.md。编号稳定，中文名仅供显示。",
+ "era": [
+  {
+   "id": "xianqin",
+   "name": "先秦",
+   "start": -1600,
+   "end": -221
+  },
+  {
+   "id": "xianqin.shang",
+   "name": "商",
+   "start": -1600,
+   "end": -1046
+  },
+  {
+   "id": "xianqin.zhou",
+   "name": "周",
+   "start": -1046,
+   "end": -256
+  },
+  {
+   "id": "xianqin.zhou.xizhou",
+   "name": "西周",
+   "start": -1046,
+   "end": -771
+  },
+  {
+   "id": "xianqin.zhou.chunqiu",
+   "name": "春秋",
+   "start": -770,
+   "end": -476
+  },
+  {
+   "id": "xianqin.zhou.zhanguo",
+   "name": "战国",
+   "start": -475,
+   "end": -221
+  },
+  {
+   "id": "qinhan",
+   "name": "秦汉",
+   "start": -221,
+   "end": 220
+  },
+  {
+   "id": "qinhan.qin",
+   "name": "秦",
+   "start": -221,
+   "end": -207
+  },
+  {
+   "id": "qinhan.han",
+   "name": "汉",
+   "start": -202,
+   "end": 220
+  },
+  {
+   "id": "qinhan.han.xihan",
+   "name": "西汉",
+   "start": -202,
+   "end": 8
+  },
+  {
+   "id": "qinhan.han.xin",
+   "name": "新",
+   "start": 9,
+   "end": 23
+  },
+  {
+   "id": "qinhan.han.donghan",
+   "name": "东汉",
+   "start": 25,
+   "end": 220
+  },
+  {
+   "id": "weijin",
+   "name": "魏晋南北朝",
+   "start": 220,
+   "end": 589
+  },
+  {
+   "id": "weijin.sanguo",
+   "name": "三国",
+   "start": 220,
+   "end": 280
+  },
+  {
+   "id": "weijin.jin",
+   "name": "晋",
+   "start": 266,
+   "end": 420
+  },
+  {
+   "id": "weijin.jin.xijin",
+   "name": "西晋",
+   "start": 266,
+   "end": 316
+  },
+  {
+   "id": "weijin.jin.dongjin",
+   "name": "东晋",
+   "start": 317,
+   "end": 420
+  },
+  {
+   "id": "weijin.nanchao",
+   "name": "南朝",
+   "start": 420,
+   "end": 589
+  },
+  {
+   "id": "weijin.beichao",
+   "name": "北朝",
+   "start": 386,
+   "end": 581
+  },
+  {
+   "id": "suitang",
+   "name": "隋唐五代",
+   "start": 581,
+   "end": 979
+  },
+  {
+   "id": "suitang.sui",
+   "name": "隋",
+   "start": 581,
+   "end": 618
+  },
+  {
+   "id": "suitang.tang",
+   "name": "唐",
+   "start": 618,
+   "end": 907
+  },
+  {
+   "id": "suitang.wudai",
+   "name": "五代十国",
+   "start": 907,
+   "end": 979
+  },
+  {
+   "id": "song",
+   "name": "宋辽金",
+   "start": 916,
+   "end": 1279
+  },
+  {
+   "id": "song.song",
+   "name": "宋",
+   "start": 960,
+   "end": 1279
+  },
+  {
+   "id": "song.song.beisong",
+   "name": "北宋",
+   "start": 960,
+   "end": 1127
+  },
+  {
+   "id": "song.song.nansong",
+   "name": "南宋",
+   "start": 1127,
+   "end": 1279
+  },
+  {
+   "id": "song.liao",
+   "name": "辽",
+   "start": 916,
+   "end": 1125
+  },
+  {
+   "id": "song.jin",
+   "name": "金",
+   "start": 1115,
+   "end": 1234
+  },
+  {
+   "id": "song.xixia",
+   "name": "西夏",
+   "start": 1038,
+   "end": 1227
+  },
+  {
+   "id": "yuan",
+   "name": "元",
+   "start": 1271,
+   "end": 1368
+  },
+  {
+   "id": "ming",
+   "name": "明",
+   "start": 1368,
+   "end": 1644
+  },
+  {
+   "id": "qing",
+   "name": "清",
+   "start": 1644,
+   "end": 1911
+  },
+  {
+   "id": "qing.early",
+   "name": "清前中期",
+   "start": 1644,
+   "end": 1839
+  },
+  {
+   "id": "qing.late",
+   "name": "晚清",
+   "start": 1840,
+   "end": 1911
+  },
+  {
+   "id": "minguo",
+   "name": "民国",
+   "start": 1912,
+   "end": 1949
+  },
+  {
+   "id": "dangdai",
+   "name": "当代",
+   "start": 1949,
+   "end": null
+  }
+ ],
+ "genre": [
+  {
+   "id": "yunwen",
+   "name": "韵文"
+  },
+  {
+   "id": "yunwen.shi",
+   "name": "诗"
+  },
+  {
+   "id": "yunwen.ci",
+   "name": "词"
+  },
+  {
+   "id": "yunwen.qu",
+   "name": "散曲"
+  },
+  {
+   "id": "yunwen.fu",
+   "name": "赋"
+  },
+  {
+   "id": "yunwen.chuci",
+   "name": "楚辞"
+  },
+  {
+   "id": "yunwen.pianwen",
+   "name": "骈文"
+  },
+  {
+   "id": "yunwen.jisong",
+   "name": "偈颂"
+  },
+  {
+   "id": "yunwen.yunyu",
+   "name": "韵语"
+  },
+  {
+   "id": "yunwen.duilian",
+   "name": "对联"
+  },
+  {
+   "id": "sanwen",
+   "name": "散文"
+  },
+  {
+   "id": "sanwen.lunshuo",
+   "name": "论说"
+  },
+  {
+   "id": "sanwen.xuba",
+   "name": "序跋"
+  },
+  {
+   "id": "sanwen.shuxin",
+   "name": "书信"
+  },
+  {
+   "id": "sanwen.zaji",
+   "name": "杂记"
+  },
+  {
+   "id": "sanwen.zhuanzhuang",
+   "name": "传状碑志"
+  },
+  {
+   "id": "sanwen.aiji",
+   "name": "哀祭"
+  },
+  {
+   "id": "sanwen.biji",
+   "name": "笔记"
+  },
+  {
+   "id": "sanwen.shihua",
+   "name": "诗话词话"
+  },
+  {
+   "id": "sanwen.riji",
+   "name": "日记"
+  },
+  {
+   "id": "gongdu",
+   "name": "公文"
+  },
+  {
+   "id": "gongdu.zhaoling",
+   "name": "诏令"
+  },
+  {
+   "id": "gongdu.zouyi",
+   "name": "奏议"
+  },
+  {
+   "id": "gongdu.gongwen",
+   "name": "公牍"
+  },
+  {
+   "id": "fazhi",
+   "name": "法制"
+  },
+  {
+   "id": "fazhi.luling",
+   "name": "律令"
+  },
+  {
+   "id": "fazhi.fagui",
+   "name": "法规"
+  },
+  {
+   "id": "fazhi.pandu",
+   "name": "判牍"
+  },
+  {
+   "id": "xiaoshuo",
+   "name": "小说"
+  },
+  {
+   "id": "xiaoshuo.wenyan",
+   "name": "文言小说"
+  },
+  {
+   "id": "xiaoshuo.huaben",
+   "name": "话本"
+  },
+  {
+   "id": "xiaoshuo.zhanghui",
+   "name": "章回"
+  },
+  {
+   "id": "xiaoshuo.xiandai",
+   "name": "现代小说"
+  },
+  {
+   "id": "xiqu",
+   "name": "戏曲"
+  },
+  {
+   "id": "xiqu.zaju",
+   "name": "杂剧"
+  },
+  {
+   "id": "xiqu.chuanqi",
+   "name": "传奇"
+  },
+  {
+   "id": "xiqu.difang",
+   "name": "地方戏"
+  },
+  {
+   "id": "xiqu.juben",
+   "name": "剧本"
+  },
+  {
+   "id": "shiti",
+   "name": "史体"
+  },
+  {
+   "id": "shiti.jizhuan",
+   "name": "纪传"
+  },
+  {
+   "id": "shiti.biannian",
+   "name": "编年"
+  },
+  {
+   "id": "shiti.benmo",
+   "name": "纪事本末"
+  },
+  {
+   "id": "shiti.shilu",
+   "name": "实录"
+  },
+  {
+   "id": "shiti.fangzhi",
+   "name": "方志"
+  },
+  {
+   "id": "shiti.nianpu",
+   "name": "年谱"
+  },
+  {
+   "id": "jingjie",
+   "name": "经解"
+  },
+  {
+   "id": "jingjie.zhushu",
+   "name": "注疏"
+  },
+  {
+   "id": "jingjie.yulu",
+   "name": "语录"
+  },
+  {
+   "id": "gongju",
+   "name": "工具书"
+  },
+  {
+   "id": "gongju.cishu",
+   "name": "辞书字书"
+  },
+  {
+   "id": "gongju.leishu",
+   "name": "类书"
+  },
+  {
+   "id": "gongju.mulu",
+   "name": "目录"
+  },
+  {
+   "id": "zongjiao",
+   "name": "宗教经典"
+  },
+  {
+   "id": "zongjiao.fojing",
+   "name": "佛典"
+  },
+  {
+   "id": "zongjiao.daojing",
+   "name": "道经"
+  },
+  {
+   "id": "zhuanzhu",
+   "name": "专著"
+  },
+  {
+   "id": "zhuanzhu.yifang",
+   "name": "医方本草"
+  },
+  {
+   "id": "zhuanzhu.suanshu",
+   "name": "算书历书"
+  },
+  {
+   "id": "zhuanzhu.nongshu",
+   "name": "农书"
+  },
+  {
+   "id": "zhuanzhu.bingshu",
+   "name": "兵书"
+  },
+  {
+   "id": "zhuanzhu.pulu",
+   "name": "谱录"
+  },
+  {
+   "id": "zhuanzhu.jiyi",
+   "name": "技艺"
+  },
+  {
+   "id": "baozhang",
+   "name": "报章"
+  },
+  {
+   "id": "baozhang.xinwen",
+   "name": "新闻报道"
+  },
+  {
+   "id": "baozhang.qikan",
+   "name": "期刊杂志"
+  }
+ ],
+ "class": [
+  {
+   "id": "jing",
+   "name": "经部"
+  },
+  {
+   "id": "jing.yi",
+   "name": "易"
+  },
+  {
+   "id": "jing.shu",
+   "name": "书"
+  },
+  {
+   "id": "jing.shi",
+   "name": "诗"
+  },
+  {
+   "id": "jing.li",
+   "name": "礼"
+  },
+  {
+   "id": "jing.chunqiu",
+   "name": "春秋"
+  },
+  {
+   "id": "jing.xiaojing",
+   "name": "孝经"
+  },
+  {
+   "id": "jing.wujing",
+   "name": "五经总义"
+  },
+  {
+   "id": "jing.sishu",
+   "name": "四书"
+  },
+  {
+   "id": "jing.yue",
+   "name": "乐"
+  },
+  {
+   "id": "jing.xiaoxue",
+   "name": "小学"
+  },
+  {
+   "id": "shi",
+   "name": "史部"
+  },
+  {
+   "id": "shi.zhengshi",
+   "name": "正史"
+  },
+  {
+   "id": "shi.biannian",
+   "name": "编年"
+  },
+  {
+   "id": "shi.benmo",
+   "name": "纪事本末"
+  },
+  {
+   "id": "shi.bieshi",
+   "name": "别史"
+  },
+  {
+   "id": "shi.zashi",
+   "name": "杂史"
+  },
+  {
+   "id": "shi.zhaoling",
+   "name": "诏令奏议"
+  },
+  {
+   "id": "shi.zhuanji",
+   "name": "传记"
+  },
+  {
+   "id": "shi.shichao",
+   "name": "史钞"
+  },
+  {
+   "id": "shi.zaiji",
+   "name": "载记"
+  },
+  {
+   "id": "shi.shiling",
+   "name": "时令"
+  },
+  {
+   "id": "shi.dili",
+   "name": "地理"
+  },
+  {
+   "id": "shi.zhiguan",
+   "name": "职官"
+  },
+  {
+   "id": "shi.zhengshu",
+   "name": "政书"
+  },
+  {
+   "id": "shi.mulu",
+   "name": "目录"
+  },
+  {
+   "id": "shi.shiping",
+   "name": "史评"
+  },
+  {
+   "id": "zi",
+   "name": "子部"
+  },
+  {
+   "id": "zi.rujia",
+   "name": "儒家"
+  },
+  {
+   "id": "zi.bingjia",
+   "name": "兵家"
+  },
+  {
+   "id": "zi.fajia",
+   "name": "法家"
+  },
+  {
+   "id": "zi.nongjia",
+   "name": "农家"
+  },
+  {
+   "id": "zi.yijia",
+   "name": "医家"
+  },
+  {
+   "id": "zi.tianwen",
+   "name": "天文算法"
+  },
+  {
+   "id": "zi.shushu",
+   "name": "术数"
+  },
+  {
+   "id": "zi.yishu",
+   "name": "艺术"
+  },
+  {
+   "id": "zi.pulu",
+   "name": "谱录"
+  },
+  {
+   "id": "zi.zajia",
+   "name": "杂家"
+  },
+  {
+   "id": "zi.leishu",
+   "name": "类书"
+  },
+  {
+   "id": "zi.xiaoshuo",
+   "name": "小说家"
+  },
+  {
+   "id": "zi.shijia",
+   "name": "释家"
+  },
+  {
+   "id": "zi.daojia",
+   "name": "道家"
+  },
+  {
+   "id": "ji",
+   "name": "集部"
+  },
+  {
+   "id": "ji.chuci",
+   "name": "楚辞"
+  },
+  {
+   "id": "ji.bieji",
+   "name": "别集"
+  },
+  {
+   "id": "ji.zongji",
+   "name": "总集"
+  },
+  {
+   "id": "ji.shiwenping",
+   "name": "诗文评"
+  },
+  {
+   "id": "ji.ciqu",
+   "name": "词曲"
+  },
+  {
+   "id": "ztf",
+   "name": "中图法大类（四库容纳不了的现代文献）"
+  },
+  {
+   "id": "ztf.a",
+   "name": "马克思主义、列宁主义、毛泽东思想、邓小平理论"
+  },
+  {
+   "id": "ztf.b",
+   "name": "哲学、宗教"
+  },
+  {
+   "id": "ztf.c",
+   "name": "社会科学总论"
+  },
+  {
+   "id": "ztf.d",
+   "name": "政治、法律"
+  },
+  {
+   "id": "ztf.e",
+   "name": "军事"
+  },
+  {
+   "id": "ztf.f",
+   "name": "经济"
+  },
+  {
+   "id": "ztf.g",
+   "name": "文化、科学、教育、体育"
+  },
+  {
+   "id": "ztf.h",
+   "name": "语言、文字"
+  },
+  {
+   "id": "ztf.i",
+   "name": "文学"
+  },
+  {
+   "id": "ztf.j",
+   "name": "艺术"
+  },
+  {
+   "id": "ztf.k",
+   "name": "历史、地理"
+  },
+  {
+   "id": "ztf.n",
+   "name": "自然科学总论"
+  },
+  {
+   "id": "ztf.o",
+   "name": "数理科学和化学"
+  },
+  {
+   "id": "ztf.p",
+   "name": "天文学、地球科学"
+  },
+  {
+   "id": "ztf.q",
+   "name": "生物科学"
+  },
+  {
+   "id": "ztf.r",
+   "name": "医药、卫生"
+  },
+  {
+   "id": "ztf.s",
+   "name": "农业科学"
+  },
+  {
+   "id": "ztf.t",
+   "name": "工业技术"
+  },
+  {
+   "id": "ztf.u",
+   "name": "交通运输"
+  },
+  {
+   "id": "ztf.v",
+   "name": "航空、航天"
+  },
+  {
+   "id": "ztf.x",
+   "name": "环境科学、安全科学"
+  },
+  {
+   "id": "ztf.z",
+   "name": "综合性图书"
+  }
+ ],
+ "region": [
+  {
+   "id": "chaoxian",
+   "name": "朝鲜"
+  },
+  {
+   "id": "riben",
+   "name": "日本"
+  },
+  {
+   "id": "yuenan",
+   "name": "越南"
+  },
+  {
+   "id": "liuqiu",
+   "name": "琉球"
+  }
+ ],
+ "register": [
+  {
+   "id": "wenyan",
+   "name": "文言"
+  },
+  {
+   "id": "baihua",
+   "name": "白话"
+  },
+  {
+   "id": "wenbai",
+   "name": "文白混合"
+  }
+ ],
+ "topic": [
+  {
+   "id": "politics",
+   "name": "政治"
+  },
+  {
+   "id": "war",
+   "name": "战争"
+  },
+  {
+   "id": "frontier",
+   "name": "边塞"
+  },
+  {
+   "id": "history",
+   "name": "历史"
+  },
+  {
+   "id": "philosophy",
+   "name": "哲学"
+  },
+  {
+   "id": "religion",
+   "name": "宗教"
+  },
+  {
+   "id": "science",
+   "name": "科学"
+  },
+  {
+   "id": "society",
+   "name": "社会"
+  },
+  {
+   "id": "nature",
+   "name": "自然"
+  },
+  {
+   "id": "love",
+   "name": "爱情"
+  },
+  {
+   "id": "travel",
+   "name": "旅行"
+  }
+ ]
+}

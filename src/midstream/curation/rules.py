@@ -1,6 +1,7 @@
 """重新处理规则，按版本注册。"""
 
-from ..corpus import clean, glyphs, variants
+from ..corpus import classify, clean, glyphs, variants
+from ..corpus.metadata import years
 from .reprocess import Change, Rule
 
 
@@ -57,6 +58,13 @@ def _restore(current: dict) -> Change | None:
     return Change(text=text) if text != current["text"] else None
 
 
+def _taxonomy(current: dict) -> Change | None:
+    """按来源映射表补规范标签（时代、体裁、部类、地域）和年份，只填空维度。"""
+    current = {**current, "composed_years": years(current["composed_years"])}
+    patch = classify.merge(current, classify.classify(current["source"], current))
+    return Change(metadata=patch) if patch else None
+
+
 RULES = {
     rule.version: rule for rule in (
         Rule("quality-v3", None, _quality, step="quality_check"),
@@ -65,6 +73,7 @@ RULES = {
         # glyph-normalize-v1（2026-11-16，一律换成“□”）已由 glyph-restore-v1 取代，不再提供。
         Rule(glyphs.RULE_VERSION, None, _restore, step="rule_reprocess", redo_after="glyph-normalize-v1",
              config={"chise_ids": glyphs.data_info()}),
+        Rule(classify.MAP_VERSION, None, _taxonomy, step="tagging", config={"maps": classify.versions()}),
         Rule("t2s-v1", None, lambda current: Change(text=variants.simplify(current['text'])),
              variant='simplified', config=variants.info(), step='t2s'),
     )

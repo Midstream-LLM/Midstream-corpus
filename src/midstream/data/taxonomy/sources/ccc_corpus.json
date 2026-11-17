@@ -1,0 +1,217 @@
+{
+ "version": "ccc-map-v1",
+ "key": "raw.source",
+ "comment": "CCC 按书名（原始字段 source）映射。",
+ "map": {
+  "说文解字": {
+   "genre": [
+    "gongju.cishu"
+   ],
+   "class": [
+    "jing.xiaoxue"
+   ]
+  },
+  "尔雅": {
+   "genre": [
+    "gongju.cishu"
+   ],
+   "class": [
+    "jing.xiaoxue"
+   ]
+  },
+  "诗经": {
+   "genre": [
+    "yunwen.shi"
+   ],
+   "class": [
+    "jing.shi"
+   ]
+  },
+  "周易": {
+   "class": [
+    "jing.yi"
+   ]
+  },
+  "尚书": {
+   "class": [
+    "jing.shu"
+   ]
+  },
+  "礼记": {
+   "class": [
+    "jing.li"
+   ]
+  },
+  "孝经": {
+   "class": [
+    "jing.xiaojing"
+   ]
+  },
+  "论语": {
+   "genre": [
+    "jingjie.yulu"
+   ],
+   "class": [
+    "jing.sishu"
+   ]
+  },
+  "孟子": {
+   "class": [
+    "jing.sishu"
+   ]
+  },
+  "大学": {
+   "class": [
+    "jing.sishu"
+   ]
+  },
+  "中庸": {
+   "class": [
+    "jing.sishu"
+   ]
+  },
+  "春秋左传": {
+   "class": [
+    "jing.chunqiu"
+   ]
+  },
+  "春秋公羊传": {
+   "class": [
+    "jing.chunqiu"
+   ]
+  },
+  "春秋穀梁传": {
+   "class": [
+    "jing.chunqiu"
+   ]
+  },
+  "资治通鉴": {
+   "genre": [
+    "shiti.biannian"
+   ],
+   "class": [
+    "shi.biannian"
+   ]
+  },
+  "史记": {
+   "genre": [
+    "shiti.jizhuan"
+   ],
+   "class": [
+    "shi.zhengshi"
+   ]
+  },
+  "汉书": {
+   "genre": [
+    "shiti.jizhuan"
+   ],
+   "class": [
+    "shi.zhengshi"
+   ]
+  },
+  "后汉书": {
+   "genre": [
+    "shiti.jizhuan"
+   ],
+   "class": [
+    "shi.zhengshi"
+   ]
+  },
+  "三国志": {
+   "genre": [
+    "shiti.jizhuan"
+   ],
+   "class": [
+    "shi.zhengshi"
+   ]
+  },
+  "晋书": {
+   "genre": [
+    "shiti.jizhuan"
+   ],
+   "class": [
+    "shi.zhengshi"
+   ]
+  },
+  "宋书": {
+   "genre": [
+    "shiti.jizhuan"
+   ],
+   "class": [
+    "shi.zhengshi"
+   ]
+  },
+  "南齐书": {
+   "genre": [
+    "shiti.jizhuan"
+   ],
+   "class": [
+    "shi.zhengshi"
+   ]
+  },
+  "梁书": {
+   "genre": [
+    "shiti.jizhuan"
+   ],
+   "class": [
+    "shi.zhengshi"
+   ]
+  },
+  "陈书": {
+   "genre": [
+    "shiti.jizhuan"
+   ],
+   "class": [
+    "shi.zhengshi"
+   ]
+  },
+  "魏书": {
+   "genre": [
+    "shiti.jizhuan"
+   ],
+   "class": [
+    "shi.zhengshi"
+   ]
+  },
+  "北齐书": {
+   "genre": [
+    "shiti.jizhuan"
+   ],
+   "class": [
+    "shi.zhengshi"
+   ]
+  },
+  "周书": {
+   "genre": [
+    "shiti.jizhuan"
+   ],
+   "class": [
+    "shi.zhengshi"
+   ]
+  },
+  "隋书": {
+   "genre": [
+    "shiti.jizhuan"
+   ],
+   "class": [
+    "shi.zhengshi"
+   ]
+  },
+  "南史": {
+   "genre": [
+    "shiti.jizhuan"
+   ],
+   "class": [
+    "shi.zhengshi"
+   ]
+  },
+  "北史": {
+   "genre": [
+    "shiti.jizhuan"
+   ],
+   "class": [
+    "shi.zhengshi"
+   ]
+  }
+ }
+}

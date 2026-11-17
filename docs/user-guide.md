@@ -25,7 +25,7 @@
 
 数据集发布后，成员、顺序和划分不再变化。之后入库、重新处理或查重不会改变旧数据集。重复簇快照和指纹缓存是派生数据，不具备这种不可变性。
 
-未知元数据留空。已收录的朝代标签可由规则映射为成书年份区间，依据写入 `field_basis`；没有对应规则就保留未知。`wanli` 的事件日期保存在 `extra.event_date`，不作为成书年份。
+未知元数据留空。来源原值（`composed_label`、`genre`、`category`）原样保留；入库时按统一分类体系补规范标签（`tags` 里的 era/genre/class/region），并由时代推出成书年份区间，依据记为 `field_basis` 的 `tags.<维度>` 和 `composed_years`，值为 `source_map`。映射表在 `src/midstream/data/taxonomy/`：`era_labels.json` 是各来源共用的时代标签表，`sources/<来源>.json` 是各来源的体裁、部类映射。只填空维度，不覆盖已有标签；来源或人工给出的年份不被时代区间覆盖。时代按内容年代，汇编多个时代内容的可有多个时代标签，年份取覆盖范围。已入库的数据用 `midstream reprocess taxonomy-map-v1 --apply` 补齐（每个有变化的文档建一个新版本）。`wanli` 的事件日期保存在 `extra.event_date`，不作为成书年份。
 
 ## 2. 安装与建库
 

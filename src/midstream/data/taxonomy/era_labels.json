@@ -1,0 +1,290 @@
+{
+ "version": "era-labels-v1",
+ "comment": "来源时代标签 -> 规范时代（可多个）；years 只在不能由标签区间直接得出时给出（之交按前朝最后 30 年至后朝最初 30 年）。",
+ "labels": {
+  "先秦": {
+   "era": [
+    "xianqin"
+   ]
+  },
+  "周": {
+   "era": [
+    "xianqin.zhou"
+   ]
+  },
+  "春秋": {
+   "era": [
+    "xianqin.zhou.chunqiu"
+   ]
+  },
+  "战国": {
+   "era": [
+    "xianqin.zhou.zhanguo"
+   ]
+  },
+  "秦": {
+   "era": [
+    "qinhan.qin"
+   ]
+  },
+  "汉": {
+   "era": [
+    "qinhan.han"
+   ]
+  },
+  "晋": {
+   "era": [
+    "weijin.jin"
+   ]
+  },
+  "南朝宋": {
+   "era": [
+    "weijin.nanchao"
+   ]
+  },
+  "南朝梁": {
+   "era": [
+    "weijin.nanchao"
+   ]
+  },
+  "北齐": {
+   "era": [
+    "weijin.beichao"
+   ]
+  },
+  "南北朝": {
+   "era": [
+    "weijin.nanchao",
+    "weijin.beichao"
+   ]
+  },
+  "魏晋": {
+   "era": [
+    "weijin.sanguo",
+    "weijin.jin"
+   ],
+   "years": [
+    220,
+    420
+   ]
+  },
+  "汉魏": {
+   "era": [
+    "qinhan.han",
+    "weijin.sanguo"
+   ],
+   "years": [
+    -202,
+    266
+   ]
+  },
+  "隋": {
+   "era": [
+    "suitang.sui"
+   ]
+  },
+  "唐": {
+   "era": [
+    "suitang.tang"
+   ]
+  },
+  "隋唐": {
+   "era": [
+    "suitang.sui",
+    "suitang.tang"
+   ]
+  },
+  "宋": {
+   "era": [
+    "song.song"
+   ]
+  },
+  "两宋": {
+   "era": [
+    "song.song"
+   ]
+  },
+  "辽": {
+   "era": [
+    "song.liao"
+   ]
+  },
+  "金": {
+   "era": [
+    "song.jin"
+   ]
+  },
+  "元": {
+   "era": [
+    "yuan"
+   ]
+  },
+  "yuan": {
+   "era": [
+    "yuan"
+   ]
+  },
+  "明": {
+   "era": [
+    "ming"
+   ]
+  },
+  "清": {
+   "era": [
+    "qing"
+   ]
+  },
+  "明清": {
+   "era": [
+    "ming",
+    "qing"
+   ]
+  },
+  "清末": {
+   "era": [
+    "qing.late"
+   ]
+  },
+  "民国": {
+   "era": [
+    "minguo"
+   ]
+  },
+  "近现代": {
+   "era": [
+    "qing.late",
+    "minguo"
+   ],
+   "years": [
+    1840,
+    1949
+   ]
+  },
+  "当代": {
+   "era": [
+    "dangdai"
+   ]
+  },
+  "隋末唐初": {
+   "era": [
+    "suitang.sui",
+    "suitang.tang"
+   ],
+   "years": [
+    588,
+    648
+   ]
+  },
+  "唐末宋初": {
+   "era": [
+    "suitang.tang",
+    "song.song"
+   ],
+   "years": [
+    877,
+    990
+   ]
+  },
+  "宋末金初": {
+   "era": [
+    "song.song.beisong",
+    "song.jin"
+   ],
+   "years": [
+    1097,
+    1145
+   ]
+  },
+  "宋末元初": {
+   "era": [
+    "song.song.nansong",
+    "yuan"
+   ],
+   "years": [
+    1249,
+    1301
+   ]
+  },
+  "金末元初": {
+   "era": [
+    "song.jin",
+    "yuan"
+   ],
+   "years": [
+    1204,
+    1301
+   ]
+  },
+  "元末明初": {
+   "era": [
+    "yuan",
+    "ming"
+   ],
+   "years": [
+    1338,
+    1398
+   ]
+  },
+  "明末清初": {
+   "era": [
+    "ming",
+    "qing"
+   ],
+   "years": [
+    1614,
+    1674
+   ]
+  },
+  "清末民国初": {
+   "era": [
+    "qing.late",
+    "minguo"
+   ],
+   "years": [
+    1881,
+    1942
+   ]
+  },
+  "清末近现代初": {
+   "era": [
+    "qing.late",
+    "minguo"
+   ],
+   "years": [
+    1881,
+    1942
+   ]
+  },
+  "民国末当代初": {
+   "era": [
+    "minguo",
+    "dangdai"
+   ],
+   "years": [
+    1919,
+    1979
+   ]
+  },
+  "近现代末当代初": {
+   "era": [
+    "minguo",
+    "dangdai"
+   ],
+   "years": [
+    1919,
+    1979
+   ]
+  },
+  "魏晋末南北朝初": {
+   "era": [
+    "weijin.jin",
+    "weijin.nanchao",
+    "weijin.beichao"
+   ],
+   "years": [
+    390,
+    450
+   ]
+  }
+ }
+}

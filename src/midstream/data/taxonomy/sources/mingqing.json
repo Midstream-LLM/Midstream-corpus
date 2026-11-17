@@ -1,0 +1,10 @@
+{
+ "version": "mingqing-map-v1",
+ "key": null,
+ "comment": "明清文集都是别集。",
+ "all": {
+  "class": [
+   "ji.bieji"
+  ]
+ }
+}

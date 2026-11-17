@@ -19,7 +19,7 @@ from time import perf_counter
 import psycopg
 
 from ..corpus import clean
-from ..corpus import eras
+from ..corpus import classify
 from .. import store
 from ..store import textcodec
 from .adapters.base import Adapter, ParsedRecord
@@ -110,14 +110,13 @@ def register_batch(conn: psycopg.Connection, adapter: Adapter, paths: list[Path]
     return batch_id
 
 
-def _cleaned_metadata(metadata: dict, text: str) -> dict:
-    """清洗版的元数据：来源值保留，规则推断值标明依据。"""
+def _cleaned_metadata(source: str, metadata: dict, text: str, raw_fields: dict | None = None) -> dict:
+    """清洗版的元数据：来源值保留，规范标签和推断年份标明依据。"""
+    metadata = RecordMetadata.model_validate(metadata).model_dump()
     derived = dict(metadata)
-    basis = dict(metadata.get("field_basis", {}))
-    years = eras.era_years(metadata.get("composed_label"))
-    if years and not metadata.get("composed_years"):
-        derived["composed_years"] = list(years)
-        basis["composed_years"] = "rule"
+    derived.update(classify.merge(metadata, classify.classify(
+        source, {**metadata, "raw_fields": raw_fields or {}, "text": text})))
+    basis = dict(derived.get("field_basis", {}))
     status, flags = clean.assess(text)
     derived["quality_status"] = status
     derived["quality_flags"] = flags
@@ -183,7 +182,7 @@ def _stage_chunk(task) -> tuple[bytes, bytes]:
             )))
             texts.extend(_copy_row((
                 batch_id, record.source_key, "cleaned",
-                json.dumps(_cleaned_metadata(record.metadata, cleaned), ensure_ascii=False),
+                json.dumps(_cleaned_metadata(adapter.name, record.metadata, cleaned, record.raw_fields), ensure_ascii=False),
                 None if same else cleaned,
                 digest if same else textcodec.text_hash(cleaned), len(cleaned),
             )))
@@ -210,7 +209,7 @@ def stage(conn: psycopg.Connection, batch_id: int, adapter: Adapter,
         (
             batch_id, adapter.parser_version, "{}",
             batch_id, clean.RULE_VERSION,
-            json.dumps({"quality": clean.QUALITY_RULE_VERSION, "era": eras.RULE_VERSION}),
+            json.dumps({"quality": clean.QUALITY_RULE_VERSION, "taxonomy": classify.MAP_VERSION, "maps": classify.versions()}),
         ),
     )
     tasks = ((adapter, batch_id, raw_id, chunk)

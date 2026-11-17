@@ -1,0 +1,20 @@
+{
+ "version": "wanli-map-v1",
+ "key": null,
+ "comment": "万历实录：记万历一朝（1573–1620）之事。",
+ "all": {
+  "era": [
+   "ming"
+  ],
+  "years": [
+   1573,
+   1620
+  ],
+  "genre": [
+   "shiti.shilu"
+  ],
+  "class": [
+   "shi.biannian"
+  ]
+ }
+}

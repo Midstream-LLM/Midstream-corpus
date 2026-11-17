@@ -1,0 +1,423 @@
+{
+ "version": "daizhige-map-v1",
+ "key": "category",
+ "match": "prefix",
+ "comment": "按目录路径映射，取最长匹配前缀；四库里分散的目录（诸子、笔记、志存记录、修身治家、启蒙蒙学）只到部。",
+ "map": {
+  "佛藏": {
+   "genre": [
+    "zongjiao.fojing"
+   ],
+   "class": [
+    "zi.shijia"
+   ]
+  },
+  "道藏": {
+   "genre": [
+    "zongjiao.daojing"
+   ],
+   "class": [
+    "zi.daojia"
+   ]
+  },
+  "医藏": {
+   "genre": [
+    "zhuanzhu.yifang"
+   ],
+   "class": [
+    "zi.yijia"
+   ]
+  },
+  "儒藏": {
+   "class": [
+    "jing"
+   ]
+  },
+  "儒藏/尚书": {
+   "class": [
+    "jing.shu"
+   ]
+  },
+  "儒藏/诗经": {
+   "class": [
+    "jing.shi"
+   ],
+   "genre": [
+    "yunwen.shi"
+   ]
+  },
+  "儒藏/礼经": {
+   "class": [
+    "jing.li"
+   ]
+  },
+  "儒藏/春秋": {
+   "class": [
+    "jing.chunqiu"
+   ]
+  },
+  "儒藏/孝经": {
+   "class": [
+    "jing.xiaojing"
+   ]
+  },
+  "儒藏/四书": {
+   "class": [
+    "jing.sishu"
+   ]
+  },
+  "儒藏/乐经": {
+   "class": [
+    "jing.yue"
+   ]
+  },
+  "儒藏/五经总义": {
+   "class": [
+    "jing.wujing"
+   ]
+  },
+  "儒藏/小学": {
+   "class": [
+    "jing.xiaoxue"
+   ]
+  },
+  "儒藏/语录": {
+   "class": [
+    "zi.rujia"
+   ],
+   "genre": [
+    "jingjie.yulu"
+   ]
+  },
+  "儒藏/修身治家": {
+   "class": [
+    "zi"
+   ]
+  },
+  "儒藏/启蒙蒙学": {
+   "class": [
+    "zi"
+   ]
+  },
+  "易藏/易经": {
+   "class": [
+    "jing.yi"
+   ]
+  },
+  "易藏/术数": {
+   "class": [
+    "zi.shushu"
+   ]
+  },
+  "史藏": {
+   "class": [
+    "shi"
+   ]
+  },
+  "史藏/正史": {
+   "class": [
+    "shi.zhengshi"
+   ],
+   "genre": [
+    "shiti.jizhuan"
+   ]
+  },
+  "史藏/编年": {
+   "class": [
+    "shi.biannian"
+   ],
+   "genre": [
+    "shiti.biannian"
+   ]
+  },
+  "史藏/纪事本末": {
+   "class": [
+    "shi.benmo"
+   ],
+   "genre": [
+    "shiti.benmo"
+   ]
+  },
+  "史藏/别史": {
+   "class": [
+    "shi.bieshi"
+   ]
+  },
+  "史藏/载记": {
+   "class": [
+    "shi.zaiji"
+   ]
+  },
+  "史藏/传记": {
+   "class": [
+    "shi.zhuanji"
+   ]
+  },
+  "史藏/地理": {
+   "class": [
+    "shi.dili"
+   ]
+  },
+  "史藏/职官": {
+   "class": [
+    "shi.zhiguan"
+   ]
+  },
+  "史藏/政书": {
+   "class": [
+    "shi.zhengshu"
+   ]
+  },
+  "史藏/目录": {
+   "class": [
+    "shi.mulu"
+   ]
+  },
+  "史藏/史评": {
+   "class": [
+    "shi.shiping"
+   ]
+  },
+  "史藏/诏令奏议": {
+   "class": [
+    "shi.zhaoling"
+   ],
+   "genre": [
+    "gongdu"
+   ]
+  },
+  "史藏/志存记录": {
+   "class": [
+    "shi"
+   ]
+  },
+  "史藏/经世文编": {
+   "class": [
+    "ji.zongji"
+   ]
+  },
+  "子藏": {
+   "class": [
+    "zi"
+   ]
+  },
+  "子藏/兵家": {
+   "class": [
+    "zi.bingjia"
+   ],
+   "genre": [
+    "zhuanzhu.bingshu"
+   ]
+  },
+  "子藏/法家": {
+   "class": [
+    "zi.fajia"
+   ]
+  },
+  "子藏/农家": {
+   "class": [
+    "zi.nongjia"
+   ],
+   "genre": [
+    "zhuanzhu.nongshu"
+   ]
+  },
+  "子藏/算法": {
+   "class": [
+    "zi.tianwen"
+   ],
+   "genre": [
+    "zhuanzhu.suanshu"
+   ]
+  },
+  "子藏/类书": {
+   "class": [
+    "zi.leishu"
+   ],
+   "genre": [
+    "gongju.leishu"
+   ]
+  },
+  "子藏/笔记": {
+   "class": [
+    "zi"
+   ],
+   "genre": [
+    "sanwen.biji"
+   ]
+  },
+  "子藏/诸子": {
+   "class": [
+    "zi"
+   ]
+  },
+  "集藏": {
+   "class": [
+    "ji"
+   ]
+  },
+  "集藏/四库别集": {
+   "class": [
+    "ji.bieji"
+   ]
+  },
+  "集藏/文总集": {
+   "class": [
+    "ji.zongji"
+   ]
+  },
+  "集藏/文评": {
+   "class": [
+    "ji.shiwenping"
+   ]
+  },
+  "集藏/小说": {
+   "class": [
+    "zi.xiaoshuo"
+   ],
+   "genre": [
+    "xiaoshuo"
+   ]
+  },
+  "集藏/话本": {
+   "class": [
+    "zi.xiaoshuo"
+   ],
+   "genre": [
+    "xiaoshuo.huaben"
+   ]
+  },
+  "集藏/演义": {
+   "class": [
+    "zi.xiaoshuo"
+   ],
+   "genre": [
+    "xiaoshuo.zhanghui"
+   ]
+  },
+  "集藏/笑话": {
+   "class": [
+    "zi.xiaoshuo"
+   ],
+   "genre": [
+    "sanwen.biji"
+   ]
+  },
+  "集藏/宝卷": {
+   "class": [
+    "zi.xiaoshuo"
+   ],
+   "genre": [
+    "yunwen.yunyu"
+   ]
+  },
+  "集藏/谜语": {
+   "class": [
+    "zi.xiaoshuo"
+   ]
+  },
+  "诗藏": {
+   "class": [
+    "ji"
+   ]
+  },
+  "诗藏/诗集": {
+   "class": [
+    "ji"
+   ],
+   "genre": [
+    "yunwen.shi"
+   ]
+  },
+  "诗藏/词集": {
+   "class": [
+    "ji.ciqu"
+   ],
+   "genre": [
+    "yunwen.ci"
+   ]
+  },
+  "诗藏/楚辞": {
+   "class": [
+    "ji.chuci"
+   ],
+   "genre": [
+    "yunwen.chuci"
+   ]
+  },
+  "诗藏/汉赋": {
+   "class": [
+    "ji.zongji"
+   ],
+   "genre": [
+    "yunwen.fu"
+   ]
+  },
+  "诗藏/剧曲": {
+   "class": [
+    "ji.ciqu"
+   ],
+   "genre": [
+    "xiqu"
+   ]
+  },
+  "诗藏/诗话": {
+   "class": [
+    "ji.shiwenping"
+   ],
+   "genre": [
+    "sanwen.shihua"
+   ]
+  },
+  "诗藏/词话": {
+   "class": [
+    "ji.shiwenping"
+   ],
+   "genre": [
+    "sanwen.shihua"
+   ]
+  },
+  "诗藏/对联": {
+   "genre": [
+    "yunwen.duilian"
+   ]
+  },
+  "艺藏": {
+   "class": [
+    "zi.yishu"
+   ]
+  },
+  "艺藏/器物": {
+   "class": [
+    "zi.pulu"
+   ],
+   "genre": [
+    "zhuanzhu.pulu"
+   ]
+  },
+  "艺藏/饮馔": {
+   "class": [
+    "zi.pulu"
+   ],
+   "genre": [
+    "zhuanzhu.pulu"
+   ]
+  },
+  "艺藏/草木鸟兽虫鱼": {
+   "class": [
+    "zi.pulu"
+   ],
+   "genre": [
+    "zhuanzhu.pulu"
+   ]
+  },
+  "艺藏/工艺": {
+   "class": [
+    "zi.pulu"
+   ],
+   "genre": [
+    "zhuanzhu.jiyi"
+   ]
+  }
+ }
+}

@@ -1,0 +1,237 @@
+{
+ "version": "chinese-poetry-map-v1",
+ "key": "work_title",
+ "comment": "按所属作品映射；没有作品的按原始字段：rhythmic/para -> 词，dynasty=yuan -> 散曲，其余为诗。时代优先用作品给出的。",
+ "map": {
+  "全唐诗": {
+   "genre": [
+    "yunwen.shi"
+   ],
+   "class": [
+    "ji.zongji"
+   ]
+  },
+  "全宋诗": {
+   "genre": [
+    "yunwen.shi"
+   ],
+   "class": [
+    "ji.zongji"
+   ]
+  },
+  "御定全唐詩": {
+   "genre": [
+    "yunwen.shi"
+   ],
+   "class": [
+    "ji.zongji"
+   ]
+  },
+  "唐詩三百首": {
+   "genre": [
+    "yunwen.shi"
+   ],
+   "class": [
+    "ji.zongji"
+   ],
+   "era": [
+    "suitang.tang"
+   ]
+  },
+  "千家詩": {
+   "genre": [
+    "yunwen.shi"
+   ],
+   "class": [
+    "ji.zongji"
+   ],
+   "era": [
+    "suitang.tang",
+    "song.song"
+   ]
+  },
+  "水墨唐诗": {
+   "genre": [
+    "yunwen.shi"
+   ],
+   "class": [
+    "ji.zongji"
+   ],
+   "era": [
+    "suitang.tang"
+   ]
+  },
+  "曹操诗集": {
+   "genre": [
+    "yunwen.shi"
+   ],
+   "class": [
+    "ji.bieji"
+   ],
+   "era": [
+    "qinhan.han.donghan"
+   ]
+  },
+  "全宋词": {
+   "genre": [
+    "yunwen.ci"
+   ],
+   "class": [
+    "ji.ciqu"
+   ]
+  },
+  "花间集": {
+   "genre": [
+    "yunwen.ci"
+   ],
+   "class": [
+    "ji.ciqu"
+   ],
+   "era": [
+    "suitang.wudai"
+   ]
+  },
+  "南唐二主词": {
+   "genre": [
+    "yunwen.ci"
+   ],
+   "class": [
+    "ji.ciqu"
+   ],
+   "era": [
+    "suitang.wudai"
+   ]
+  },
+  "诗经": {
+   "genre": [
+    "yunwen.shi"
+   ],
+   "class": [
+    "jing.shi"
+   ],
+   "era": [
+    "xianqin.zhou"
+   ]
+  },
+  "楚辞": {
+   "genre": [
+    "yunwen.chuci"
+   ],
+   "class": [
+    "ji.chuci"
+   ],
+   "era": [
+    "xianqin.zhou.zhanguo"
+   ]
+  },
+  "论语": {
+   "genre": [
+    "jingjie.yulu"
+   ],
+   "class": [
+    "jing.sishu"
+   ],
+   "era": [
+    "xianqin.zhou.chunqiu"
+   ]
+  },
+  "古文觀止": {
+   "genre": [
+    "sanwen"
+   ],
+   "class": [
+    "ji.zongji"
+   ],
+   "era": [
+    "xianqin",
+    "qinhan",
+    "weijin",
+    "suitang",
+    "song",
+    "ming"
+   ]
+  },
+  "幽梦影": {
+   "genre": [
+    "sanwen.biji"
+   ],
+   "era": [
+    "qing"
+   ]
+  },
+  "幼學瓊林": {
+   "genre": [
+    "yunwen.yunyu"
+   ],
+   "era": [
+    "ming"
+   ]
+  },
+  "聲律啓蒙": {
+   "genre": [
+    "yunwen.yunyu"
+   ],
+   "era": [
+    "qing"
+   ]
+  },
+  "弟子規": {
+   "genre": [
+    "yunwen.yunyu"
+   ],
+   "era": [
+    "qing"
+   ]
+  },
+  "文字蒙求": {
+   "genre": [
+    "yunwen.yunyu"
+   ],
+   "era": [
+    "qing"
+   ]
+  },
+  "增廣賢文": {
+   "genre": [
+    "yunwen.yunyu"
+   ],
+   "era": [
+    "ming"
+   ]
+  }
+ },
+ "by_raw": {
+  "rhythmic": {
+   "genre": [
+    "yunwen.ci"
+   ],
+   "class": [
+    "ji.ciqu"
+   ]
+  },
+  "para": {
+   "genre": [
+    "yunwen.ci"
+   ],
+   "class": [
+    "ji.ciqu"
+   ],
+   "era": [
+    "qing"
+   ]
+  },
+  "dynasty=yuan": {
+   "genre": [
+    "yunwen.qu"
+   ],
+   "class": [
+    "ji.ciqu"
+   ]
+  }
+ },
+ "default": {
+  "genre": [
+   "yunwen.shi"
+  ]
+ }
+}

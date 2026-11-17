@@ -55,7 +55,7 @@ def test_boolean_markers_reject_coercion(bad):
 
 
 def test_metadata_years_and_publication_preservation():
-    meta=_cleaned_metadata({'composed_label':'唐','composed_years':[800,810],'edition_years':[1870,1870]},'甲乙')
+    meta=_cleaned_metadata("test", {'composed_label':'唐','composed_years':[800,810],'edition_years':[1870,1870]},'甲乙')
     assert meta['composed_years']=={'start_year':800,'end_year':810}
     assert meta['edition_years']=={'start_year':1870,'end_year':1870}
     assert meta['processed_steps']['basic_clean'] is True
@@ -191,7 +191,7 @@ def test_export_preserves_nested_types(tmp_path):
     from midstream.delivery.formats import Parquet
     import pyarrow.parquet as pq
     rows=[{'processed_steps':{'tagging':True},'edition_years':{'start_year':1870,'end_year':1870},
-           'tags':[{'taxonomy':'genre','tag_id':'poetry'}]}]
+           'tags':[{'taxonomy':'genre','tag_id':'yunwen.shi'}]}]
     path=tmp_path/'typed.parquet'
     with path.open('wb') as stream:Parquet().write(stream,rows,Options())
     restored=pq.read_table(path).to_pylist()[0]
@@ -229,13 +229,13 @@ def test_segments_must_match_text_and_tags_are_merged():
                              'value':{'start_char':start,'end_char':start+5,'start_text':anchor,'title':None,'unit_type':'poem'}}
     tag=lambda tid,tax:{'kind':'metadata','field':'tags','value':[{'taxonomy':tax,'tag_id':tid}],'evidence_keys':['e0'],
                         'confidence':0.9,'rationale':tax}
-    fake=FakeServices([{'action':'finish','claims':[tag('poetry','genre'),tag('nature','topic')]},
+    fake=FakeServices([{'action':'finish','claims':[tag('yunwen.shi','genre'),tag('nature','topic')]},
                        {'action':'finish','claims':[seg(5,'乙詩'),seg(0,'丙丁')]}])
     result=analyze({},text,CurationConfig(use_authorities=False,steps=['tagging','segmentation']),fake,FakeRetrieval())
     segments=[c for c in result.claims if c.field=='segments']
     assert [s.value['start_char'] for s in segments]==[5] and len(result.rejected)==1
     tags=[c for c in result.claims if c.field=='tags']
-    assert len(tags)==1 and {t['tag_id'] for t in tags[0].value}=={'poetry','nature'}
+    assert len(tags)==1 and {t['tag_id'] for t in tags[0].value}=={'yunwen.shi','nature'}
 
 
 def test_batch_routes_claims_to_records_and_puts_static_prompt_first():
@@ -246,12 +246,12 @@ def test_batch_routes_claims_to_records_and_puts_static_prompt_first():
     class Recording(FakeServices):
         def generate(self,prompt,**kwargs):
             seen.append(kwargs['system']); return super().generate(prompt,**kwargs)
-    fake=Recording([{'action':'finish','claims':[tag(0,'e0','poetry'),tag(1,'e1','ci'),tag(1,'e0','qu')]}])
+    fake=Recording([{'action':'finish','claims':[tag(0,'e0','yunwen.shi'),tag(1,'e1','yunwen.ci'),tag(1,'e0','yunwen.qu')]}])
     records=[{'metadata':{'title':'甲'},'text':'床前明月光'},{'metadata':{'title':'乙'},'text':'明月几时有'}]
     first,second=analyze_batch(records,CurationConfig(use_authorities=False),fake,FakeRetrieval())
     assert len(fake.prompts)==1 and seen==[BATCH_PROMPT] and 'records' in fake.prompts[0]
-    assert [t['tag_id'] for t in first.claims[0].value]==['poetry']
-    assert [t['tag_id'] for t in second.claims[0].value]==['ci'] and len(second.rejected)==1  # 引用了别条的正文
+    assert [t['tag_id'] for t in first.claims[0].value]==['yunwen.shi']
+    assert [t['tag_id'] for t in second.claims[0].value]==['yunwen.ci'] and len(second.rejected)==1  # 引用了别条的正文
     assert first.usage[0]['batch_size']==2 and second.usage==[{'batched_with':0,'batch_size':2}]
 
 
