@@ -34,7 +34,9 @@ const active = (job: Job) => ["queued", "running"].includes(job.status);
 function Progress({ job }: { job: Job }) {
   return <>
     <progress aria-label="任务进度" style={{ width: "100%" }}
-      max={job.progress.total || 1} value={job.progress.total ? job.progress.current : undefined} />
+      max={job.progress.total || 1}
+      // 没有总步数时，只有排队或运行中的任务显示不定进度；已结束的停在实际位置，成功的显示满格。
+      value={job.progress.total ? job.progress.current : active(job) ? undefined : job.status === "succeeded" ? 1 : 0} />
     <small>{job.progress.message}{job.progress.total > 0 && ` · ${job.progress.current}/${job.progress.total}`}</small>
   </>;
 }
