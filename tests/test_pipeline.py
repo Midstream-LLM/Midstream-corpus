@@ -1857,7 +1857,7 @@ def test_span_dedup_pipeline(conn, tmp_path):
              "丙" * 150]
     path = write(tmp_path / "spans.jsonl", [row(f"s#{i}", text) for i, text in enumerate(texts)])
     report = ingest_inline(conn, "ccc_corpus", [path])
-    assert report.dedup_spans["rule_version"] == "span-v1"
+    assert report.dedup_spans["rule_version"] == "span-v2"
     assert report.dedup_spans["representatives"] == 3
     assert report.dedup_spans["spans"] == 1
     versions = dict(conn.execute(
@@ -1887,6 +1887,14 @@ def test_span_dedup_pipeline(conn, tmp_path):
     # 文档查重独立运行，不覆盖段落快照。
     dedup.dedup(conn)
     assert snapshot()[0][0] == second["run_id"]
+    # 只改元数据：沿用段落结果，换成新的当前版本。
+    reprocess.reprocess(conn, reprocess.Rule(
+        "span-meta-v1", None, lambda doc: reprocess.Change(metadata={"title": f"t{doc['doc_id']}"})
+    ), dry_run=False)
+    moved = dedup.dedup_spans(conn)
+    assert moved["reused_snapshot"] and moved["remapped_spans"] == 2
+    current = {v for v, in conn.execute("SELECT version_id FROM document_version WHERE is_current")}
+    assert {snapshot()[0][1], snapshot()[0][4]} <= current
     reprocess.reprocess(conn, reprocess.Rule(
         "span-test-v1", None, lambda doc: reprocess.Change(text=str(doc["doc_id"]) * 40)
     ))

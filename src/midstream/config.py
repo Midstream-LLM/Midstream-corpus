@@ -9,6 +9,8 @@ from sqlalchemy.engine import URL
 HOME = Path(os.environ.get("MIDSTREAM_HOME", "~/.local/share/midstream")).expanduser().resolve()
 JISHUI_RAW = Path(os.environ["MIDSTREAM_JISHUI_RAW"]) if "MIDSTREAM_JISHUI_RAW" in os.environ else None
 EXPORT_ROOT = Path(os.environ.get("MIDSTREAM_EXPORT_ROOT", HOME / "exports"))
+# 段落查重等大临时文件的位置；默认与导出目录同级的 tmp（服务器上在 HDD），不放 /tmp 内存盘。
+TMP_ROOT = Path(os.environ.get("MIDSTREAM_TMP", EXPORT_ROOT.parent / "tmp"))
 WORKERS = int(os.environ.get("MIDSTREAM_WORKERS", "8"))
 CHUNK_DOCS = int(os.environ.get("MIDSTREAM_CHUNK_DOCS", "2000"))
 

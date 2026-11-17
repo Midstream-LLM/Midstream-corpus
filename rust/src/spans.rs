@@ -3,7 +3,7 @@ use std::collections::{BinaryHeap, HashMap};
 use std::fs::{self, File};
 use std::io::{BufReader, BufWriter, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 
 use pyo3::{prelude::*, types::PyBytes};
 use rayon::prelude::*;
@@ -391,26 +391,27 @@ impl SpanDeduper {
                         .map_init(
                             || Writer::new(&partitions),
                             |writer, group| {
+                                // 星形配对：组按文档序排好，每篇只与最早出现这个指纹的一篇比较。
+                                // 输出每段本来只记一个出处（较早的一篇），两两配对只会多出无用的候选。
+                                let first = &group[0];
                                 let mut count = 0;
-                                for (i, a) in group.iter().enumerate() {
-                                    for b in &group[i + 1..] {
-                                        if a[2] == b[2] {
-                                            continue;
-                                        }
-                                        // 围绕解压成本较大的文档聚集候选，与版本方向无关。
-                                        let (a, b) = if documents[a[2] as usize].bytes
-                                            >= documents[b[2] as usize].bytes
-                                        {
-                                            (a, b)
-                                        } else {
-                                            (b, a)
-                                        };
-                                        writer.push(
-                                            a[2] as usize * 256 / documents.len(),
-                                            &[a[2], b[2], a[3], b[3]],
-                                        );
-                                        count += 1;
+                                for b in &group[1..] {
+                                    if b[2] == first[2] {
+                                        continue;
                                     }
+                                    // 围绕解压成本较大的文档聚集候选，与版本方向无关。
+                                    let (a, b) = if documents[first[2] as usize].bytes
+                                        >= documents[b[2] as usize].bytes
+                                    {
+                                        (first, b)
+                                    } else {
+                                        (b, first)
+                                    };
+                                    writer.push(
+                                        a[2] as usize * 256 / documents.len(),
+                                        &[a[2], b[2], a[3], b[3]],
+                                    );
+                                    count += 1;
                                 }
                                 count
                             },
@@ -471,21 +472,27 @@ impl SpanDeduper {
                 },
             )
             .peekable();
+            // 种子按较大的文档聚集。它常是许多文档的共同出处（星形配对下更是如此），
+            // 单篇就可能超过批次预算：不计入预算，并在相邻批次间沿用，避免为每个配对重复解压。
+            let mut carried: Option<(u32, Arc<Normalized>)> = None;
             while seeds.peek().is_some() {
                 let mut batch = Vec::new();
                 let mut slots = HashMap::new();
                 let mut bytes = 0;
+                let anchor = seeds.peek().unwrap()[0];
                 while let Some(&row) = seeds.peek() {
                     let extra: usize = row[..2]
                         .iter()
-                        .filter(|doc| !slots.contains_key(*doc))
+                        .filter(|doc| !slots.contains_key(*doc) && **doc != anchor)
                         .map(|&doc| {
                             self.documents[doc as usize].bytes * 18
                                 + self.documents[doc as usize].size
                         })
                         .sum();
+                    // 只在要加载新文档时检查预算：已装入的一对超出预算时，同一对的其余种子仍归这一批，
+                    // 否则每条种子单独成批，两篇大文档要反复解压。
                     if !batch.is_empty()
-                        && (bytes + extra > TEXT_BYTES || batch.len() * 16 >= 16 << 20)
+                        && ((extra > 0 && bytes + extra > TEXT_BYTES) || batch.len() * 16 >= 16 << 20)
                     {
                         break;
                     }
@@ -500,7 +507,8 @@ impl SpanDeduper {
                 for (&doc, &slot) in &slots {
                     ids[slot] = doc;
                 }
-                let texts: Vec<Normalized> = ids
+                let reuse = carried.take().filter(|(doc, _)| slots.contains_key(doc));
+                let texts: Vec<Arc<Normalized>> = ids
                     .par_iter()
                     .map_init(
                         || {
@@ -511,18 +519,24 @@ impl SpanDeduper {
                             )
                         },
                         |(file, text, blob), &doc| {
+                            if let Some((kept, normalized)) = &reuse {
+                                if *kept == doc {
+                                    return normalized.clone();
+                                }
+                            }
                             let d = &self.documents[doc as usize];
                             file.seek(SeekFrom::Start(d.offset)).unwrap();
                             blob.resize(d.size, 0);
                             file.read_exact(blob).unwrap();
                             text.normalize_span(blob, true);
-                            Normalized {
+                            Arc::new(Normalized {
                                 chars: std::mem::take(&mut text.chars),
                                 positions: std::mem::take(&mut text.positions),
-                            }
+                            })
                         },
                     )
                     .collect();
+                drop(reuse);
                 // 同一对、同一对角线连续处理；已扩展区间内的种子直接合并，避免重复扩展。
                 let mut starts = vec![0];
                 for i in 1..batch.len() {
@@ -592,6 +606,8 @@ impl SpanDeduper {
                         },
                     )
                     .sum::<usize>();
+                let last = batch.last().unwrap()[0];
+                carried = Some((last, texts[slots[&last]].clone()));
             }
         }
         matched.finish();

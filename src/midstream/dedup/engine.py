@@ -28,6 +28,28 @@ def _input_digest(conn) -> bytes:
     return digest.digest()
 
 
+def _text_digest(conn) -> bytes:
+    """段落查重只看正文：按文档取当前正文哈希。只改元数据的新版本不改变它。"""
+    digest = hashlib.sha256()
+    _read(conn, "COPY (SELECT doc_id, variant, text_hash, char_count FROM document_version WHERE is_current"
+          " ORDER BY doc_id, variant NULLS FIRST) TO STDOUT (FORMAT BINARY)", None, digest.update)
+    _read(conn, 'COPY (SELECT override_id,left_doc_id,right_doc_id FROM dedup_override'
+          ' ORDER BY override_id) TO STDOUT (FORMAT BINARY)', None, digest.update)
+    return digest.digest()
+
+
+def _remap_spans(conn) -> int:
+    """正文未变时把段落结果里的旧版本换成同一文档、同一正文的当前版本。"""
+    moved = 0
+    for column in ("version_id", "source_version_id"):
+        moved += conn.execute(
+            f"UPDATE dup_span d SET {column} = c.version_id FROM document_version o, document_version c"
+            f" WHERE d.{column} = o.version_id AND NOT o.is_current AND c.doc_id = o.doc_id AND c.is_current"
+            " AND c.text_hash = o.text_hash AND c.variant IS NOT DISTINCT FROM o.variant"
+        ).rowcount
+    return moved
+
+
 def document_snapshot_current(conn) -> bool:
     """文档级快照是否覆盖全部当前版本。"""
     row = conn.execute(
@@ -281,17 +303,26 @@ def dedup_spans(conn: psycopg.Connection, *, full: bool = False,
 
 def _dedup_spans(conn: psycopg.Connection, *, full: bool, progress=None) -> dict:
     started = perf_counter()
-    report = {"rule_version": "span-v1", "k": 32, "w": 32, "min_span": 64}
-    parameters = {**report, "comparison_rule": RULE_VERSION}
-    directory = tempfile.mkdtemp(prefix="midstream-spans-")
+    report = {"rule_version": "span-v2", "k": 32, "w": 32, "min_span": 64, "pairing": "star"}
+    config.TMP_ROOT.mkdir(parents=True, exist_ok=True)
+    directory = tempfile.mkdtemp(prefix="midstream-spans-", dir=config.TMP_ROOT)
     try:
         with conn.transaction(), store.reader(conn) as source:
             if progress:
                 progress(0, 5, "段落查重：检查快照")
             conn.execute("SELECT pg_advisory_xact_lock(762031)")
             digest = _input_digest(conn)
+            text_digest = _text_digest(conn).hex()
+            parameters = {**report, "comparison_rule": RULE_VERSION, "text_digest": text_digest}
             if not full and (reused := _reuse_snapshot(conn, "paragraph", digest, parameters, started)):
                 return reused
+            stored = conn.execute("SELECT parameters FROM dedup_snapshot WHERE level = 'paragraph'").fetchone()
+            if not full and stored and stored[0] == parameters:
+                # 只有元数据变了：沿用结果，换成当前版本，并让快照对上新的版本集合。
+                moved = _remap_spans(conn)
+                conn.execute("UPDATE dedup_snapshot SET input_digest = %s WHERE level = 'paragraph'", (digest,))
+                reused = _reuse_snapshot(conn, "paragraph", digest, parameters, started)
+                return {**reused, "remapped_spans": moved}
             report.update(reused_snapshot=False, input_seconds=perf_counter() - started)
             stage = perf_counter()
             if progress:
@@ -334,7 +365,7 @@ def _dedup_spans(conn: psycopg.Connection, *, full: bool, progress=None) -> dict
             if progress:
                 progress(4, 5, "段落查重：保存结果")
             run_id = conn.execute(
-                "INSERT INTO processing_run (kind, rule_version) VALUES ('dedup', 'span-v1')"
+                "INSERT INTO processing_run (kind, rule_version) VALUES ('dedup', 'span-v2')"
                 " RETURNING run_id"
             ).fetchone()[0]
             conn.execute("TRUNCATE dup_span")
