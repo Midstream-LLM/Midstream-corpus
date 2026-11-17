@@ -87,6 +87,41 @@ def test_taxonomy_mapping():
     assert "tags" not in classify.merge(current, classify.classify("test", current))
 
 
+def test_taxonomy_inference():
+    from midstream.corpus import infer
+    docs = [
+        ("wikisource", 1, "某書 (四庫全書本)/卷一", "某書卷一\n宋　張三　撰\n正文"),
+        ("wikisource", 2, "某書 (四庫全書本)/卷二", "某書卷二\n宋　張三　撰\n正文"),
+        ("wikisource", 3, "某書 (四庫全書本)/卷三", "正文"),
+        # 总集的署名是编者，不定时代。
+        ("wikisource", 4, "詩紀", "欽定四庫全書\n集部八\n詩紀　　總集類\n明　馮惟訥　撰\n"),
+        ("wikisource", 5, "国务院关于同意设立酒泉海关的批复", "甘肃省人民政府：……\n国务院\n二○一九年三月一日"),
+        ("wikisource", 6, "中华人民共和国国务院令第582号", "现公布……"),
+        ("wikisource", 7, "司法院院解字第2941號解釋", "擄掠人為奴……"),
+        ("wikisource", 8, "孫子兵法", "孫子曰"),
+        ("wikisource", 10, "公平交易法 (民國80年)", "第一條"),
+        ("wikisource", 11, "中華民國參議院閉會致辭", "諸君"),
+        ("daizhige", 9, "某经", "後秦 鳩摩羅什 譯\n如是我聞"),
+    ]
+    found = infer.infer(docs, {}, {}, 2026)
+    tags = {doc: {dim: v[0][0] for dim, v in r["tags"].items()} for doc, r in found.items()}
+    assert tags[3]["era"] == "song.song"
+    assert "era" not in tags[4] and tags[4]["class"] == "ji.zongji"
+    assert tags[5] == {"era": "dangdai", "jurisdiction": "prc", "genre": "gongdu.gongwen"}
+    assert found[5]["years"] == (2019, 2019)
+    assert tags[6]["genre"] == "gongdu.gongwen" and tags[6]["era"] == "dangdai"
+    assert tags[7] == {"era": "minguo", "jurisdiction": "roc", "genre": "fazhi.pandu", "class": "ztf.d"}
+    assert 8 not in found
+    assert tags[10]["jurisdiction"] == "tw" and 11 not in found
+    assert found[9]["tags"]["era"] == (["weijin"], "rule:translation")
+    # 映射给的部可以细化为类；来源给的不动。
+    current = {"tags": [{"taxonomy": "class", "tag_id": "ji"}], "field_basis": {"tags.class": "source_map"}}
+    assert infer.merge(current, {"tags": {"class": (["ji.zongji"], "rule")}, "years": None})["tags"] == \
+        [{"taxonomy": "class", "tag_id": "ji.zongji"}]
+    current["field_basis"] = {"tags.class": "source"}
+    assert infer.merge(current, {"tags": {"class": (["ji.zongji"], "rule")}, "years": None}) == {}
+
+
 def test_prepare_rejects_nul_and_empty():
     bad = ParsedRecord("k", {}, {}, text="甲\x00乙")
     assert _prepare(bad)[0].error

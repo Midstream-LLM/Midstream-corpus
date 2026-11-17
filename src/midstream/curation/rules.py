@@ -1,6 +1,8 @@
 """重新处理规则，按版本注册。"""
 
-from ..corpus import classify, clean, glyphs, variants
+from datetime import date
+
+from ..corpus import classify, clean, glyphs, infer, variants
 from ..corpus.metadata import years
 from .reprocess import Change, Rule
 
@@ -65,6 +67,24 @@ def _taxonomy(current: dict) -> Change | None:
     return Change(metadata=patch) if patch else None
 
 
+_INFERRED = {}
+
+
+def _prepare_infer(conn) -> None:
+    _INFERRED.clear()
+    _INFERRED.update(infer.load(conn, date.today().year))
+
+
+def _infer(current: dict) -> Change | None:
+    """无来源原值的来源按正文和题名推断规范标签与年份（见 corpus.infer）。"""
+    found = _INFERRED.get(current["doc_id"])
+    if not found:
+        return None
+    current = {**current, "composed_years": years(current["composed_years"])}
+    patch = infer.merge(current, found)
+    return Change(metadata=patch) if patch else None
+
+
 RULES = {
     rule.version: rule for rule in (
         Rule("quality-v3", None, _quality, step="quality_check"),
@@ -74,6 +94,7 @@ RULES = {
         Rule(glyphs.RULE_VERSION, None, _restore, step="rule_reprocess", redo_after="glyph-normalize-v1",
              config={"chise_ids": glyphs.data_info()}),
         Rule(classify.MAP_VERSION, None, _taxonomy, step="tagging", config={"maps": classify.versions()}),
+        Rule(infer.RULE_VERSION, infer.SOURCES, _infer, step="tagging", prepare=_prepare_infer),
         Rule("t2s-v1", None, lambda current: Change(text=variants.simplify(current['text'])),
              variant='simplified', config=variants.info(), step='t2s'),
     )

@@ -1,4 +1,4 @@
-"""时代、体裁、部类、地域、语体、主题的受控词表（data/taxonomy/vocabulary.json）。
+"""时代、体裁、部类、地域、发布法域、语体、主题的受控词表（data/taxonomy/vocabulary.json）。
 
 编号稳定，中文名只用于显示。设计见 Project docs/taxonomy.md。
 时代带年份区间（无公元 0 年，两端都含）；`end` 为 None 表示至今。
@@ -11,7 +11,7 @@ _DATA = Path(__file__).parents[1] / 'data' / 'taxonomy'
 _VOCABULARY = json.loads((_DATA / 'vocabulary.json').read_text(encoding='utf-8'))
 
 TAXONOMY_VERSION = _VOCABULARY['version']
-DIMENSIONS = ('era', 'genre', 'class', 'region', 'register', 'topic')
+DIMENSIONS = ('era', 'genre', 'class', 'region', 'jurisdiction', 'register', 'topic')
 TAXONOMY = {name: {item['id']: item['name'] for item in _VOCABULARY[name]} for name in DIMENSIONS}
 ERA_YEARS = {item['id']: (item['start'], item['end'] if item['end'] is not None else date.today().year)
              for item in _VOCABULARY['era']}

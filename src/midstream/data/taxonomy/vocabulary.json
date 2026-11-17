@@ -1,6 +1,6 @@
 {
  "version": "midstream-taxonomy-v1",
- "comment": "时代、体裁、部类、地域、语体的受控词表；设计见 Project docs/taxonomy.md。编号稳定，中文名仅供显示。",
+ "comment": "时代、体裁、部类、地域、发布法域、语体的受控词表；设计见 Project docs/taxonomy.md。编号稳定，中文名仅供显示。",
  "era": [
   {
    "id": "xianqin",
@@ -789,6 +789,32 @@
   {
    "id": "liuqiu",
    "name": "琉球"
+  }
+ ],
+ "jurisdiction": [
+  {
+   "id": "prc",
+   "name": "中华人民共和国"
+  },
+  {
+   "id": "roc",
+   "name": "中华民国（1949 年以前）"
+  },
+  {
+   "id": "tw",
+   "name": "中国台湾"
+  },
+  {
+   "id": "hk",
+   "name": "香港"
+  },
+  {
+   "id": "mo",
+   "name": "澳门"
+  },
+  {
+   "id": "intl",
+   "name": "国际组织与多边条约"
   }
  ],
  "register": [

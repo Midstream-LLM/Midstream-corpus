@@ -35,6 +35,8 @@ class Rule:
     # 当前版本若出自这条规则的运行，就把它的上一版正文作为 current["parent_text"] 一并给出，
     # 用于改进旧规则：从旧规则之前的正文重做，而不是在旧规则的结果上叠加。
     redo_after: str | None = None
+    # 需要先看全库（如按作品汇总信号）的规则，在逐篇处理前用只读连接准备一次。
+    prepare: Callable[[psycopg.Connection], None] | None = None
 
 
 def _write_blobs(conn: psycopg.Connection, texts: dict, pool: ProcessPoolExecutor) -> None:
@@ -73,6 +75,8 @@ def reprocess(conn: psycopg.Connection, rule: Rule, dry_run=None, samples=20) ->
                 max_workers=config.WORKERS, mp_context=multiprocessing.get_context("spawn")
             ))
         source = stack.enter_context(store.reader(conn))
+        if rule.prepare:
+            rule.prepare(source)
         reader = stack.enter_context(source.cursor(name="current_versions"))
         condition = " AND s.name = ANY(%s)" if rule.sources is not None else ""
         params = [rule.sources] if rule.sources is not None else []

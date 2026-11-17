@@ -25,7 +25,7 @@
 
 数据集发布后，成员、顺序和划分不再变化。之后入库、重新处理或查重不会改变旧数据集。重复簇快照和指纹缓存是派生数据，不具备这种不可变性。
 
-未知元数据留空。来源原值（`composed_label`、`genre`、`category`）原样保留；入库时按统一分类体系补规范标签（`tags` 里的 era/genre/class/region），并由时代推出成书年份区间，依据记为 `field_basis` 的 `tags.<维度>` 和 `composed_years`，值为 `source_map`。映射表在 `src/midstream/data/taxonomy/`：`era_labels.json` 是各来源共用的时代标签表，`sources/<来源>.json` 是各来源的体裁、部类映射。只填空维度，不覆盖已有标签；来源或人工给出的年份不被时代区间覆盖。时代按内容年代，汇编多个时代内容的可有多个时代标签，年份取覆盖范围。已入库的数据用 `midstream reprocess taxonomy-map-v1 --apply` 补齐（每个有变化的文档建一个新版本）。`wanli` 的事件日期保存在 `extra.event_date`，不作为成书年份。
+未知元数据留空。来源原值（`composed_label`、`genre`、`category`）原样保留；入库时按统一分类体系补规范标签（`tags` 里的 era/genre/class/region），并由时代推出成书年份区间，依据记为 `field_basis` 的 `tags.<维度>` 和 `composed_years`，值为 `source_map`。映射表在 `src/midstream/data/taxonomy/`：`era_labels.json` 是各来源共用的时代标签表，`sources/<来源>.json` 是各来源的体裁、部类映射。只填空维度，不覆盖已有标签；来源或人工给出的年份不被时代区间覆盖。时代按内容年代，汇编多个时代内容的可有多个时代标签，年份取覆盖范围。已入库的数据用 `midstream reprocess taxonomy-map-v1 --apply` 补齐（每个有变化的文档建一个新版本）。维基文库、殆知阁、古腾堡没有可映射的来源原值，用 `midstream reprocess taxonomy-infer-v1` 按正文和题名推断：署名行（朝代＋人名＋撰/著）、四库提要与类目、诗题后的诗人、题名或落款里的年份、现代公文的发布机关和题名结尾（法规、判牍、公牍）。同一作品的时代和部类在各卷不冲突时传给其余各卷；总集、类书不按编者署名定时代；“译”给出的是译出时代，依据记为 `rule:translation`，其余为 `rule`。现代文献另有发布法域（`jurisdiction`：中华人民共和国、中华民国（只用于 1949 年以前）、中国台湾（1949 年以后的台湾地区）、香港、澳门、国际组织与多边条约），只在题名里的机关能唯一确定时填写；中华民国机关的文献按年份分为 `roc` 与 `tw`，年代不明或正当 1949 年的不填。映射或规则给出的上级部类（如“集部”）可被推断出的下级类目替换。这条规则要先看全库再逐篇写入，不在入库时运行，新数据入库后重跑即可。`wanli` 的事件日期保存在 `extra.event_date`，不作为成书年份。
 
 ## 2. 安装与建库
 
