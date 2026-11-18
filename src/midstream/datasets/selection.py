@@ -99,6 +99,9 @@ def _variant_selection(conn, variant, selected):
     return [chosen[item.doc_id] for item in selected]
 
 
+TAG_DIMENSIONS = ('era', 'genre', 'class', 'region', 'jurisdiction')
+
+
 def facets(conn, recipe):
     where, params = _selection_where(recipe)
     result = {name: [] for name in ('sources', 'categories', 'genres', 'eras', 'quality')}
@@ -110,4 +113,16 @@ def facets(conn, recipe):
         f' WHERE {where} GROUP BY f.name, f.value ORDER BY f.name, f.value NULLS FIRST', params,
     ):
         result[name].append({'value': value, 'documents': documents, 'chars': int(chars)})
+    # 规范标签按编号计数；无该维度标签的记为 value=None。
+    tags = {dim: [] for dim in TAG_DIMENSIONS}
+    for dim, value, documents, chars in conn.execute(
+        'SELECT dim, t.tag_id, count(*), sum(v.char_count) FROM document_version v'
+        ' JOIN document d USING (doc_id) JOIN source s USING (source_id)'
+        ' CROSS JOIN unnest(%(tag_dims)s::text[]) dim'
+        ' LEFT JOIN LATERAL (SELECT e->>\'tag_id\' AS tag_id FROM jsonb_array_elements(v.tags) e'
+        '   WHERE e->>\'taxonomy\' = dim) t ON true'
+        f' WHERE {where} GROUP BY dim, t.tag_id', {**params, 'tag_dims': list(TAG_DIMENSIONS)},
+    ):
+        tags[dim].append({'value': value, 'documents': documents, 'chars': int(chars)})
+    result['tags'] = tags
     return result

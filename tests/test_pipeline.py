@@ -2209,3 +2209,23 @@ def test_run_inline_uses_worker_path(conn, tmp_path):
         jobs.run_inline(conn, 'batch_resume', {'batch_id': 999}, 'tester', '不存在')
     failed = jobs.list_jobs(conn, limit=1)[0]
     assert failed['kind'] == 'batch_resume' and failed['status'] == 'failed'
+
+
+def test_tag_filters_include_descendants_and_untagged(conn, tmp_path):
+    path = write(tmp_path / "tags.jsonl", [row("t#1", "汉代正文" * 30), row("t#2", "唐代正文" * 30, era="唐"),
+                                           row("t#3", "未知正文" * 30, era="")])
+    ingest_inline(conn, "ccc_corpus", [path])
+    keys = dict(conn.execute("SELECT d.doc_id, d.source_key FROM document d").fetchall())
+
+    def found(**filters):
+        return sorted(keys[r["doc_id"]] for r in query.search(conn, query.Filters.from_dict(filters)))
+
+    # 选上级 qinhan 含下级 qinhan.han；未标注维度单独选。
+    assert found(tags={"era": ["qinhan"]}) == ["t#1"]
+    assert found(tags={"era": ["qinhan"]}, untagged=["era"]) == ["t#1", "t#3"]
+    recipe = Recipe.load({"name": "tags", "seed": "s", "splits": {"train": 1},
+                          "include": [{"year_to": 1944, "include_unknown_years": True}],
+                          "exclude": [{"tags": {"era": ["suitang"]}}]})
+    assert sorted(keys[c.doc_id] for c in _select(conn, recipe)) == ["t#1", "t#3"]
+    with pytest.raises(ValueError):
+        query.Filters.from_dict({"tags": {"era": ["no-such-era"]}})

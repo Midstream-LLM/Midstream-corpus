@@ -29,6 +29,14 @@ def stats(conn=Depends(connection)):
     return query.overview(conn)
 
 
+@router.get('/api/v1/taxonomy')
+def taxonomy_vocabulary():
+    """规范标签词表，按词表文件顺序；编号用点分层级，前端据此建树。"""
+    from ..corpus.taxonomy import TAXONOMY, TAXONOMY_VERSION
+    return {'version': TAXONOMY_VERSION,
+            'dimensions': {dim: [{'id': i, 'name': n} for i, n in items.items()] for dim, items in TAXONOMY.items()}}
+
+
 @router.get('/api/v1/years/options')
 def year_options(conn=Depends(connection)):
     return query.year_options(conn)

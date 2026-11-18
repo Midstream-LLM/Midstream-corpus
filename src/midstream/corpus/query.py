@@ -1,5 +1,6 @@
 """按当前版本查询。"""
 
+import json
 from dataclasses import dataclass, field
 
 import psycopg
@@ -27,6 +28,10 @@ class Filters:
     composed_label: str | None = None
     only_unknown_years: bool = False
     processed_steps: dict[str, bool] = field(default_factory=dict)
+    # 规范标签：{维度: [编号]}，选中某级即含其下级；同一维度内任一命中，不同维度须同时满足。
+    tags: dict[str, list[str]] = field(default_factory=dict)
+    # 这些维度另外接受“没有该维度标签”的文档（与 tags 同维度时取并集）。
+    untagged: list[str] = field(default_factory=list)
 
     @classmethod
     def from_dict(cls, data: dict) -> "Filters":
@@ -36,7 +41,34 @@ class Filters:
         from .metadata import step_flags
         if 'processed_steps' in data:
             step_flags(data['processed_steps'])
-        return TypeAdapter(cls).validate_python(data)
+        filters = TypeAdapter(cls).validate_python(data)
+        from .taxonomy import TAXONOMY
+        for dim in [*filters.tags, *filters.untagged]:
+            if dim not in TAXONOMY:
+                raise ValueError(f"未知的标签维度：{dim}")
+        for dim, ids in filters.tags.items():
+            if unknown := [i for i in ids if i not in TAXONOMY[dim]]:
+                raise ValueError(f"未登记的 {dim} 标签：{unknown}")
+        return filters
+
+
+def _tag_clauses(filters: Filters, params: dict) -> list[str]:
+    """标签用 jsonb 包含判断，可走 tags 上的 GIN 索引；选中的编号展开为自身及全部下级。"""
+    from .taxonomy import TAXONOMY
+    clauses = []
+    for d, dim in enumerate(sorted(set(filters.tags) | set(filters.untagged))):
+        ids = filters.tags.get(dim, [])
+        expanded = sorted({t for i in ids for t in TAXONOMY[dim] if t == i or t.startswith(i + ".")})
+        parts = []
+        for j, tag in enumerate(expanded):
+            params[f"tag_{d}_{j}"] = json.dumps([{"taxonomy": dim, "tag_id": tag}])
+            parts.append(f"v.tags @> %(tag_{d}_{j})s::jsonb")
+        if dim in filters.untagged:
+            params[f"tag_{d}_none"] = json.dumps([{"taxonomy": dim}])
+            parts.append(f"NOT v.tags @> %(tag_{d}_none)s::jsonb")
+        if parts:
+            clauses.append("(" + " OR ".join(parts) + ")")
+    return clauses
 
 
 def where_clause(filters: Filters) -> tuple[str, dict]:
@@ -81,6 +113,7 @@ def where_clause(filters: Filters) -> tuple[str, dict]:
         clauses.append(overlap)
         params["year_from"] = filters.year_from
         params["year_to"] = filters.year_to
+    clauses.extend(_tag_clauses(filters, params))
     return " AND ".join(clauses), params
 
 

@@ -999,3 +999,15 @@ textarea:focus-visible, summary:focus-visible { outline: 2px solid #27765d; outl
 .change-preview pre { white-space:pre-wrap; overflow-wrap:anywhere; max-height:360px; overflow:auto; }
 
 .check-row { display: flex; gap: .5rem; align-items: flex-start; margin-top: .75rem; }
+
+.tag-filter { margin: 16px 0; }
+.tag-filter h4 { margin: 0 0 8px; }
+.tag-dimension { border: 1px solid #dfe5dc; border-radius: 6px; padding: 8px 12px; margin-bottom: 8px; }
+.tag-dimension > summary { cursor: pointer; font-weight: 600; overflow-wrap: anywhere; }
+.tag-dimension ul { list-style: none; margin: 4px 0 0; padding-left: 18px; }
+.tag-dimension > ul { padding-left: 0; max-height: 320px; overflow: auto; }
+.tag-dimension details, .tag-dimension details[open] { border-top: none; padding: 0; font-size: inherit; }
+.dataset-wizard .tag-dimension li { margin: 2px 0; padding: 0; border: none; cursor: auto; }
+.tag-dimension details > summary { cursor: pointer; }
+.tag-dimension .check { display: inline-flex; align-items: baseline; gap: 6px; padding: 2px 0; border: none; background: none; min-height: 0; margin: 0; }
+.tag-dimension small { color: #68786c; }

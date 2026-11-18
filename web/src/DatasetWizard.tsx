@@ -1,7 +1,8 @@
 import { useEffect, useMemo, useState } from "react";
 import { api, useLoad, State, count, quality } from "./shared";
 import { YearFilter } from "./Years";
-import { splitNames, type Filter, type Recipe, type Facets, type Plan, type Reservation } from "./datasetTypes";
+import { TagFilter } from "./TagFilter";
+import { splitNames, type Facet, type Filter, type Recipe, type Facets, type Plan, type Reservation } from "./datasetTypes";
 
 function Ids({ label, values, onChange }: { label: string; values: number[]; onChange: (ids: number[]) => void }) {
   const [text, setText] = useState(values.join(", "));
@@ -32,6 +33,7 @@ function FilterEditor({ filter, onChange, base }: { filter: Filter; onChange: (f
       })}</fieldset>;
     })}</div>
     <State loading={false} error={facets.error} />
+    <TagFilter filter={filter} onChange={onChange} counts={(facets.data as unknown as { tags?: Record<string, Facet[]> } | null)?.tags} />
     <YearFilter values={years} onChange={values => {
       const next = { ...filter };
       for (const key of ["year_from", "year_to", "composed_label", "include_unknown_years", "only_unknown_years"]) delete next[key];

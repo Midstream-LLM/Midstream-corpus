@@ -514,6 +514,10 @@ midstream dedup --spans
 | `include_unknown_years` | 布尔值，默认 `false` | 有年份筛选时是否包含未知年份，规则与 search 相同。 |
 | `quality` | 字符串数组，导出默认 `["ok"]` | 可显式选择 `ok`、`flagged`、`quarantined`；空数组不会选中任何文档。 |
 | `min_chars` | 整数，默认 `null` | 当前版本字符数下限，含端点；是保存正文的字符数，不是归一化后长度。 |
+| `tags` | 对象 `{维度: [编号]}`，默认 `{}` | 按规范标签筛选，维度为 `era`、`genre`、`class`、`region`、`jurisdiction` 等，编号见 `src/midstream/data/taxonomy/vocabulary.json`（`GET /api/v1/taxonomy` 可取）。选中某级即含全部下级（`song` 含 `song.song.beisong`）；同一维度内任一命中，不同维度须同时满足；未登记的维度或编号报错。 |
+| `untagged` | 字符串数组，默认 `[]` | 这些维度另外接受没有该维度标签的文档；与 `tags` 同维度时取并集。 |
+
+例：只排除确认在 1945 年以后的语料、其余（含年份未知）都收，可写收入条件 `{"year_to": 1944, "include_unknown_years": true}`，再加排除条件 `{"tags": {"era": ["dangdai"]}, "only_unknown_years": true, "quality": ["ok", "flagged", "quarantined"]}`；后者只去掉没有年份、但由发布机关等规则判为当代的文档。有年份的文档交给年份条件，按区间相交，跨 1945 年的保留；排除条件不要只写时代标签，否则同时标了民国和当代的跨时期文档也会被去掉。
 
 未设置的字符串筛选可省略或用 `null`。筛选之间为“且”；以主线当前版本选材，再按 variant 映射实际成员，不支持任意指定历史版本。documents.add/remove 使用 doc_id，版本同样由 variant 决定。
 

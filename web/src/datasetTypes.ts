@@ -2,6 +2,7 @@ export type Filter = {
   sources?: string[]; authors?: string[]; categories?: string[]; genres?: string[]; quality?: string[];
   composed_label?: string; year_from?: number; year_to?: number;
   include_unknown_years?: boolean; only_unknown_years?: boolean;
+  tags?: Record<string, string[]>; untagged?: string[];
   [key: string]: unknown;
 };
 export type Reservation = { doc_ids?: number[]; releases?: { release_id: number; split: string }[] };
