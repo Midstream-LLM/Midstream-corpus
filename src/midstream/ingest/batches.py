@@ -66,6 +66,11 @@ def inspect(conn: psycopg.Connection, batch_id: int) -> dict:
                             and staged.get("cleaned", 0) == ok,
         "has_partition": _partition(conn, batch_id),
         "uncurated": uncurated(conn, batch_id),
+        # 最近一次成功的净增量预估（batch_estimate 任务结果）。
+        "estimate": next(iter(conn.execute(
+            "SELECT result FROM job WHERE kind = 'batch_estimate' AND status = 'succeeded'"
+            " AND (params->>'batch_id')::bigint = %s ORDER BY job_id DESC LIMIT 1", (batch_id,)
+        ).fetchone() or ()), None),
         "failure_samples": [
             {"source_key": key, "locator": locator, "parse_error": error}
             for key, locator, error in failures

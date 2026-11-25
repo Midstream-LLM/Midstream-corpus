@@ -11,6 +11,9 @@ JISHUI_RAW = Path(os.environ["MIDSTREAM_JISHUI_RAW"]) if "MIDSTREAM_JISHUI_RAW" 
 EXPORT_ROOT = Path(os.environ.get("MIDSTREAM_EXPORT_ROOT", HOME / "exports"))
 # 段落查重等大临时文件的位置；默认与导出目录同级的 tmp（服务器上在 HDD），不放 /tmp 内存盘。
 TMP_ROOT = Path(os.environ.get("MIDSTREAM_TMP", EXPORT_ROOT.parent / "tmp"))
+# 扫描件 OCR 的逐页结果缓存；按引擎、文件哈希和页码保存，重跑不重复识别。
+OCR_ROOT = Path(os.environ.get("MIDSTREAM_OCR_ROOT", EXPORT_ROOT.parent / "ocr"))
+OCR_CONFIG = Path(os.environ.get("MIDSTREAM_OCR_CONFIG", HOME / "ocr.toml"))
 WORKERS = int(os.environ.get("MIDSTREAM_WORKERS", "8"))
 CHUNK_DOCS = int(os.environ.get("MIDSTREAM_CHUNK_DOCS", "2000"))
 

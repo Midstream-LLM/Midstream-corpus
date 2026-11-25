@@ -499,3 +499,54 @@ def test_missing_glyphs_restored_or_kept_and_ocr_spaced_chars_collapsed():
     redone = _restore({"text": "□与□", "parent_text": "[翟*支]与\ue6c0", "source": "daizhige"})
     assert redone.text == "𭣟与□"
     assert _restore({"text": "无缺字", "parent_text": None, "source": "daizhige"}) is None
+
+
+def test_ocr_vertical_reading_order():
+    from midstream.ingest.ocr import order
+    box = lambda x, y: [[x, y], [x + 20, y], [x + 20, y + 100], [x, y + 100]]
+    lines = [{'text': t, 'box': box(x, y)} for t, x, y in
+             (('左下', 50, 200), ('右上', 100, 0), ('左上', 52, 0), ('右下', 98, 200))]
+    result = order(lines)
+    assert result['vertical'] and [l['text'] for l in result['lines']] == ['右上', '右下', '左上', '左下']
+
+
+def test_kandian_request_and_layout_filter(tmp_path, monkeypatch):
+    import httpx, json as _json
+    from midstream import config
+    from midstream.ingest import ocr
+    (tmp_path / 'ocr.toml').write_text('[kandian]\nemail = "a@b"\ntoken = "t"\n', encoding='utf-8')
+    monkeypatch.setattr(config, 'OCR_CONFIG', tmp_path / 'ocr.toml')
+    seen = {}
+
+    def handler(request):
+        seen.update(_json.loads(request.content))
+        return httpx.Response(200, json={'message': 'success', 'data': {'text_angel': 1, 'text_lines': [
+            {'text': '卷一', 'position': [[0, 0]], 'layout_classes_id': 1},
+            {'text': '天地玄黃', 'position': [[1, 1]], 'layout_classes_id': 0}]}})
+
+    result = ocr.Kandian(httpx.MockTransport(handler)).recognize(b'img')
+    assert seen['image'] == 'aW1n' and seen['version'] == 'v2' and seen['token'] == 't'
+    assert result['vertical'] and ocr.page_text(result) == '天地玄黃'
+
+
+def test_scan_cleaning_drops_pauses_noise_and_vertical_forms():
+    from midstream.corpus.clean import clean_scan
+    raw = '國新舊問題。倘不早日解決。必。愈。演。而“愈。烈。國《法《何。舊觀念﹃舊方法》受學於瑞司特敎徒︵四七︶讀《論語》曰「學而時習之」'
+    assert clean_scan(raw) == '國新舊問題倘不早日解決必愈演而愈烈國法何舊觀念舊方法受學於瑞司特敎徒（四七）讀《論語》曰「學而時習之」'
+
+
+def test_scan_body_lines_drops_front_matter_and_trailing_ads():
+    from midstream.ingest.ocr import body_lines
+    body = ['國新舊問題倘不早日解決所謂新舊之爭必愈演而愈烈試觀數歲以來國法何以朝更夕改'] * 3
+    assert body_lines(body) == body
+    assert body_lines(['靑年雜誌第一卷第一號目次', '敬吿靑年', '陳獨秀'] + body) == []
+    assert body_lines(['新', '靑', '年', '李', '陳']) == []
+    # 文章结束标记之后的广告截掉；无标记时价格前的正文行保留；整页广告去掉。
+    drama = ['好了好了這東西當眞好', '︵未完︶', '精印傳奇小說', '長生殿傳奇', '精裝一册定價八角']
+    assert body_lines(drama) == drama[:2]
+    assert body_lines(body + ['美國公民學定價八角', '美國民主政治大綱', '三角五分']) == body
+    assert body_lines(['無師自習之良書', '〇定價大洋六角〇', '彭耕譯']) == []
+    tail = ['旣不能獲酬於協約必取償於他國君試記吾言他日苟有償之', '者中必國也嗟乎其言若此吾人可以尋釋矣']
+    assert body_lines(tail + ['經濟學大意', '津村氏在日本經濟學新派中最爲知名而著書體裁之賅', '公一滑定價六角', '彭耕譯']) == tail
+    # 正文里出现“目錄”、单字“元”“角”不算。
+    assert body_lines(body + ['墨經目錄之說元帥角逐']) == body + ['墨經目錄之說元帥角逐']

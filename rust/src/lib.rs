@@ -72,6 +72,15 @@ impl Text {
     }
 }
 
+fn compare_char(c: char) -> u32 {
+    let offset = c as usize * 4;
+    if offset < TABLE.len() {
+        u32::from_le_bytes(TABLE[offset..offset + 4].try_into().unwrap())
+    } else {
+        0
+    }
+}
+
 fn mix(mut h: u64) -> u64 {
     h ^= h >> 30;
     h = h.wrapping_mul(0xbf58476d1ce4e5b9);
@@ -653,6 +662,7 @@ fn jaccard(a: &[u64], b: &[u64]) -> f64 {
 fn midstream_dedup(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<Deduper>()?;
     m.add_class::<spans::SpanDeduper>()?;
+    m.add_class::<spans::CoverageProbe>()?;
     m.add_function(wrap_pyfunction!(span_normalize, m)?)?;
     Ok(())
 }

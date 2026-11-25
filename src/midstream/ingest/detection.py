@@ -4,16 +4,22 @@
 前三级算已识别；后两级只是草稿，须人工确认。确认后的方案随批次保存，下次自动复用。
 """
 import json
+import os
 import re
 from pathlib import Path
 
 import pyarrow.parquet as pq
 
 from .adapters.mapped import MappingPlan
+from .ocr import SUFFIXES as OCR_SUFFIXES
 from .profiles import PROFILES, SKIP, SYNONYMS
 from ..corpus.eras import ERA_YEARS
 from ..corpus.management import ManagementError
 from ..llm.services import LLMServices
+
+
+# 规则推断给扫描件的默认引擎；可在确认方案前改选。
+DEFAULT_OCR_ENGINE = os.environ.get('MIDSTREAM_OCR_ENGINE', 'kandian-v2')
 
 
 def legacy_encoding(data):
@@ -42,6 +48,9 @@ def legacy_encoding(data):
 def sample(path):
     with path.open('rb') as handle:
         head = handle.read(32768)
+    if path.suffix.lower() in OCR_SUFFIXES:
+        return {'format': 'scan', 'encoding': 'utf-8-sig', 'record': {},
+                'sample': '扫描件：先运行 OCR，入库时读取识别结果'}
     if head.startswith(b'PAR1'):
         fmt, encoding = 'parquet', 'utf-8-sig'
         batch = next(pq.ParquetFile(path).iter_batches(batch_size=1), None)
@@ -72,11 +81,14 @@ def sample(path):
                     start = start[1:].lstrip()
                 record, _ = json.JSONDecoder().raw_decode(start)
             except ValueError:
-                # 第一条记录超过取样窗口（如整份文件是一个对象）时读全文件。
+                # 第一条记录超过取样窗口时补读：json 读全文件（整份文件是一个对象），jsonl 读完整的第一行（如一卷一行）。
                 if fmt == 'json' and path.stat().st_size <= 64 << 20:
                     with path.open(encoding=encoding) as handle:
                         whole = json.load(handle)
                     record = whole[0] if isinstance(whole, list) and whole else whole
+                elif fmt == 'jsonl':
+                    with path.open(encoding=encoding) as handle:
+                        record = json.loads(handle.readline())
         return {'format': fmt, 'encoding': encoding, 'record': record,
                 'sample': text[:6000]}
     # Parquet 字段保留，样本限制长度；不发送路径或完整文件。
@@ -110,7 +122,7 @@ def _fits(plan, path, fmt, encoding, fields, directories=()):
     # 只按字段匹配会把一个子目录的常量套到整个来源上。
     if str(path.parent) not in directories:
         return False
-    if fmt in ('txt', 'lines'):
+    if fmt in ('txt', 'lines', 'scan'):
         return True
     used = [plan['text_field'], plan['id_field'], *plan['fields'].values()]
     return all(any(option.split('.')[0] in fields | {'_parent'} for option in item.split('|')) for item in used if item)
@@ -119,6 +131,8 @@ def _fits(plan, path, fmt, encoding, fields, directories=()):
 def infer(path, fmt, encoding, record):
     """按字段名和取值给未知来源起草方案；不确定的字段留空。"""
     plan = dict(format=fmt, encoding=encoding)
+    if fmt == 'scan':
+        return dict(plan, ocr_engine=DEFAULT_OCR_ENGINE)
     if fmt == 'txt':
         parts = path.stem.split('_')
         if len(parts) > 1 and any(part in ERA_YEARS for part in parts):
@@ -198,7 +212,7 @@ def detect(names, use_llm=False, profile=None, conn=None):
             path = path.resolve()
             result = detect_one(path, learned)
             data = result.pop('_sample')
-            if not result['known'] and use_llm and data['format'] != 'unsupported':
+            if not result['known'] and use_llm and data['format'] not in ('unsupported', 'scan'):
                 # 只发送文件名、字段和有限样本，不发送目录和完整文件。
                 request = {k: data[k] for k in ('format', 'encoding', 'sample')}
                 request.update(file_name=path.name, draft=result['plan'])

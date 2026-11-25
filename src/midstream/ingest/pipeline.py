@@ -125,7 +125,11 @@ def _cleaned_metadata(source: str, metadata: dict, text: str, raw_fields: dict |
     return RecordMetadata.model_validate(derived).model_dump()
 
 
-def _prepare(record: ParsedRecord, *, ocr: bool = False) -> tuple[ParsedRecord, str | None]:
+def _scan(adapter) -> bool:
+    return getattr(getattr(adapter, 'plan', None), 'format', None) == 'scan'
+
+
+def _prepare(record: ParsedRecord, *, ocr: bool = False, scan: bool = False) -> tuple[ParsedRecord, str | None]:
     """返回 (记录, 清洗后正文)。不能入库的记录转成失败记录。"""
     if record.error is not None:
         return record, None
@@ -137,7 +141,7 @@ def _prepare(record: ParsedRecord, *, ocr: bool = False) -> tuple[ParsedRecord, 
     text = record.text or ""
     if not _storable(text):
         return _failed(record, "正文含 NUL 或非法字符"), None
-    cleaned = clean.clean_text(text, ocr=ocr)
+    cleaned = clean.clean_text(text, ocr=ocr, scan=scan)
     if not cleaned.strip():
         return _failed(record, "清洗后正文为空"), None
     return record, cleaned
@@ -171,7 +175,7 @@ def _stage_chunk(task) -> tuple[bytes, bytes]:
     adapter, batch_id, raw_id, chunk = task
     texts, records = bytearray(), bytearray()
     for parsed in adapter.parse_chunk(chunk):
-        record, cleaned = _prepare(parsed, ocr=adapter.name.endswith('_ocr'))
+        record, cleaned = _prepare(parsed, ocr=adapter.name.endswith('_ocr'), scan=_scan(adapter))
         if cleaned is not None:
             digest = textcodec.text_hash(record.text)
             same = cleaned == record.text
@@ -209,7 +213,8 @@ def stage(conn: psycopg.Connection, batch_id: int, adapter: Adapter,
         (
             batch_id, adapter.parser_version, "{}",
             batch_id, clean.RULE_VERSION,
-            json.dumps({"quality": clean.QUALITY_RULE_VERSION, "taxonomy": classify.MAP_VERSION, "maps": classify.versions()}),
+            json.dumps({"quality": clean.QUALITY_RULE_VERSION, "taxonomy": classify.MAP_VERSION, "maps": classify.versions(),
+                        **({"scan": clean.SCAN_RULE_VERSION} if _scan(adapter) else {})}),
         ),
     )
     tasks = ((adapter, batch_id, raw_id, chunk)

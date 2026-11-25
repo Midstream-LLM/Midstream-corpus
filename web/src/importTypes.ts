@@ -1,6 +1,6 @@
 import type { CurationConfig } from "./Curation";
 export type Plan = {format: string; encoding: string; text_field: string; id_field: string; fields: Record<string, string>;
-  constants?: Record<string, string>; path_pattern?: string; head_patterns?: string[]; trim_start?: string; trim_end?: string};
+  constants?: Record<string, string>; path_pattern?: string; head_patterns?: string[]; trim_start?: string; trim_end?: string; ocr_engine?: string};
 export type FileItem = {path: string; size_bytes: number; known: boolean; source: string | null; adapter: string | null;
   format: string; encoding: string; signature: string; fields: Record<string, {type: string; example: string}>;
   sample: string; plan: Plan | null; note: string; import_status: string; duplicate_of?: string;

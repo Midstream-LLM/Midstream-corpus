@@ -9,6 +9,7 @@ from pathlib import Path
 import pyarrow.parquet as pq
 
 from .adapters.base import JsonlAdapter, JsonlChunk
+from .adapters.mapped import records
 
 
 def _codec(path, encoding):
@@ -159,6 +160,9 @@ def sample(adapter, path: Path):
             record = adapter.parse_chunk([(str(path), offset, raw)])[0]
             yield position, replace(record, source_key=record.source_key if plan.id_field else '',
                                     locator={'path': str(path), 'offset': offset})
+    elif plan.format == 'scan':
+        for record in adapter.parse_chunk([(str(path), 1, raw) for raw in records(path, plan)]):
+            yield 'scan', record
     else:
         # TXT 是一份文档，返回原文三个片段。
         for position, offset in (('start', 0), ('middle', path.stat().st_size // 2), ('end', max(0, path.stat().st_size - 8192))):

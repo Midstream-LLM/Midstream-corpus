@@ -69,3 +69,24 @@ class PublishParams(BatchParams):
 def _batch_publish(conn, params: PublishParams, ctx: Context):
     return _published(batches.publish(conn, params.batch_id, actor=ctx.actor, reason=ctx.reason,
                                        progress=ctx.progress, allow_uncurated=params.allow_uncurated), ctx)
+
+
+class OcrParams(Params):
+    paths: list[str] = Field(min_length=1)
+    engine: str
+    # 本次最多新识别多少页；已缓存的页不计。付费引擎用它控制花费。
+    max_pages: int | None = Field(default=None, gt=0)
+
+    @field_validator('engine')
+    @classmethod
+    def known_engine(cls, value):
+        from .ocr import ENGINES
+        if value not in ENGINES:
+            raise ValueError(f'未知 OCR 引擎：{value}')
+        return value
+
+
+@operation('ocr', '识别扫描件（PDF/图片），逐页缓存结果，供 scan 格式入库')
+def _ocr(conn, params: OcrParams, ctx: Context):
+    from . import ocr
+    return ocr.run(params.paths, params.engine, max_pages=params.max_pages, progress=ctx.progress)

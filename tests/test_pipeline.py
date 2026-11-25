@@ -2238,3 +2238,82 @@ def test_tag_filters_include_descendants_and_untagged(conn, tmp_path):
     assert sorted(keys[c.doc_id] for c in _select(conn, recipe)) == ["t#1", "t#3"]
     with pytest.raises(ValueError):
         query.Filters.from_dict({"tags": {"era": ["no-such-era"]}})
+
+
+def test_batch_estimate_counts_overlap_with_library(conn, tmp_path):
+    from midstream.dedup.estimate import estimate
+    rng = random.Random(7)
+    shared = ''.join(rng.choices('天地玄黄宇宙洪荒日月盈昃辰宿列张寒来暑往秋收冬藏', k=500))
+    fresh = ''.join(rng.choices('甲乙丙丁戊己庚辛壬癸子丑寅卯辰巳午未申酉戌亥', k=300))
+    ingest_inline(conn, 'ccc_corpus', [write(tmp_path / 'old.jsonl', [row('old', shared)])])
+    path = write(tmp_path / 'new.jsonl', [row('new', shared[100:400] + fresh)])
+    batch_id = ingest.register_batch(conn, ADAPTERS['ccc_corpus'], [path])
+    with ProcessPoolExecutor(max_workers=1, mp_context=multiprocessing.get_context('spawn')) as pool:
+        ingest.stage(conn, batch_id, ADAPTERS['ccc_corpus'], pool)
+    result = jobs.run_inline(conn, 'batch_estimate', {'batch_id': batch_id}, 'test', '预估')['result']
+    assert (result['batch_chars'], result['covered_chars'], result['estimated_new_chars']) == (600, 300, 300)
+    assert result['by_source'] == [{'source': 'ccc_corpus', 'chars': 300}]
+    assert batches.inspect(conn, batch_id)['estimate'] == result
+    assert estimate(conn, batch_id, sample_chars=10_000)['overlap_ratio'] == 0.5
+
+
+def _pdf(path, pages):
+    """手写最小 PDF：每页一个空白页。"""
+    objects = ['<< /Type /Catalog /Pages 2 0 R >>',
+               '<< /Type /Pages /Kids [' + ' '.join(f'{3 + i} 0 R' for i in range(pages)) + f'] /Count {pages} >>']
+    objects += ['<< /Type /Page /Parent 2 0 R /MediaBox [0 0 72 72] >>'] * pages
+    out, offsets = bytearray(b'%PDF-1.4\n'), []
+    for number, body in enumerate(objects, 1):
+        offsets.append(len(out))
+        out += f'{number} 0 obj\n{body}\nendobj\n'.encode()
+    xref = len(out)
+    out += f'xref\n0 {len(objects) + 1}\n0000000000 65535 f \n'.encode()
+    out += ''.join(f'{o:010d} 00000 n \n' for o in offsets).encode()
+    out += f'trailer\n<< /Size {len(objects) + 1} /Root 1 0 R >>\nstartxref\n{xref}\n%%EOF\n'.encode()
+    path.write_bytes(bytes(out))
+    return path
+
+
+def test_ocr_page_cache_budget_and_scan_import(conn, tmp_path, monkeypatch):
+    from midstream import config
+    from midstream.ingest import ocr
+    from midstream.ingest.adapters.mapped import MappedAdapter
+    monkeypatch.setattr(config, 'OCR_ROOT', tmp_path / 'ocr')
+    monkeypatch.setattr(config, 'TMP_ROOT', tmp_path / 'tmp')
+    monkeypatch.setenv('MIDSTREAM_OCR_ROOT', str(tmp_path / 'ocr'))
+
+    class Fake:
+        id, label, price_note = 'fake-v1', '测试', ''
+        calls = 0
+
+        def available(self):
+            return True
+
+        def recognize(self, image):
+            Fake.calls += 1
+            return {'lines': [{'text': f'正文第{Fake.calls}次'}, {'text': '版心', 'layout': 1}]}
+
+    monkeypatch.setitem(ocr.ENGINES, 'fake-v1', Fake())
+    scans = tmp_path / 'scans'
+    scans.mkdir()
+    book = _pdf(scans / '甲书.pdf', 2)
+    (scans / '乙图.png').write_bytes(b'\x89PNG fake')
+    first = jobs.run_inline(conn, 'ocr', {'paths': [str(scans)], 'engine': 'fake-v1', 'max_pages': 2}, 'test', 'OCR')['result']
+    assert (first['recognized'], first['remaining'], first['stopped_at_limit']) == (2, 1, True)
+    assert ocr.run([str(scans)], 'fake-v1')['recognized'] == 1
+    assert ocr.run([str(scans)], 'fake-v1')['recognized'] == 0 and Fake.calls == 3
+    text, meta = ocr.load(book, 'fake-v1')
+    # 文件按路径排序：乙图.png 在 甲书.pdf 之前。
+    assert text == '正文第2次\n正文第3次' and meta['page_starts'] == [0, 6] and meta['pages'] == 2
+
+    adapter = MappedAdapter('scan_test', {'format': 'scan', 'ocr_engine': 'fake-v1'})
+    batch_id = ingest.register_batch(conn, adapter, ocr.files([str(scans)]))
+    with ProcessPoolExecutor(max_workers=1, mp_context=multiprocessing.get_context('spawn')) as pool:
+        ingest.stage(conn, batch_id, adapter, pool)
+    assert ingest.validate(conn, batch_id) == 'validated'
+    staged = dict(conn.execute("SELECT metadata->>'title', content FROM staging_text"
+                               " WHERE batch_id = %s AND step = 'decoded'", (batch_id,)).fetchall())
+    assert staged == {'甲书': '正文第2次\n正文第3次', '乙图': '正文第1次'}
+    (scans / '丙图.png').write_bytes(b'\x89PNG other')
+    missing = list(adapter.parse(scans / '丙图.png'))
+    assert missing[0].error == '尚未完成 OCR：0/1 页已识别'

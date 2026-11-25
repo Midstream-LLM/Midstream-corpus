@@ -21,7 +21,7 @@ UNKNOWN = {'佚名', '无名氏', '群星', '不详', '未知', '未分类', 'Un
 class MappingPlan(BaseModel):
     """字段值是记录内的路径：嵌套用点分隔，`a|b` 取第一个非空项，`_parent.x` 取上层记录的字段。"""
     model_config = ConfigDict(extra='forbid')
-    format: Literal['txt', 'json', 'jsonl', 'parquet', 'lines']
+    format: Literal['txt', 'json', 'jsonl', 'parquet', 'lines', 'scan']
     encoding: Literal['utf-8-sig', 'utf-16', 'gb18030', 'big5hkscs'] = 'utf-8-sig'
     text_field: str = ''
     id_field: str = ''
@@ -34,13 +34,16 @@ class MappingPlan(BaseModel):
     trim_end: str = ''                    # 正文到其后第一次匹配之前结束
     accept: dict[str, str] = Field(default_factory=dict)      # 字段值须整体匹配该正则，否则按未知处理
     title_format: str = ''                # 如 '{work_title} {date}'；可用记录字段、路径组和已得元数据
+    ocr_engine: str = ''                  # scan 格式：读取哪个 OCR 引擎的缓存结果
 
     def checked(self):
         if set(self.fields) - TARGETS:
             raise ValueError('只允许映射标题、作者、时代标签、分类和所属作品')
         if set(self.constants) - CONSTANTS:
             raise ValueError('常量只允许许可证、时代标签、分类、单元类型和所属作品')
-        if self.format not in ('txt', 'lines') and not self.text_field:
+        if (self.format == 'scan') != bool(self.ocr_engine):
+            raise ValueError('扫描件（scan）必须且只能用于指定 OCR 引擎的方案')
+        if self.format not in ('txt', 'lines', 'scan') and not self.text_field:
             raise ValueError('结构化数据必须指定正文字段')
         if set(self.accept) - TARGETS or not re.fullmatch(r'(?:[^{}]|\{\w+\})*', self.title_format):
             raise ValueError('取值规则或标题格式无效')
@@ -53,7 +56,8 @@ class MappingPlan(BaseModel):
 
     def identity(self):
         data = self.model_dump()
-        for key in ('constants', 'path_pattern', 'head_patterns', 'trim_start', 'trim_end', 'accept', 'title_format'):
+        for key in ('constants', 'path_pattern', 'head_patterns', 'trim_start', 'trim_end', 'accept', 'title_format',
+                    'ocr_engine'):
             if not data[key]:
                 del data[key]
         return data
@@ -128,6 +132,10 @@ def records(path, plan):
                         yield json.loads(line)
                     except ValueError:
                         yield None
+    elif plan.format == 'scan':
+        from .. import ocr
+        text, meta = ocr.load(path, plan.ocr_engine)
+        yield {'text': text, 'ocr': meta}
     else:
         yield {'text': path.read_text(encoding=plan.encoding)}
 
@@ -161,7 +169,7 @@ class MappedAdapter:
                 for parsed in [self._parse(path, '.'.join(map(str, (index, *trail))), record)]]
 
     def _parse(self, path, index, record):
-        plan, plain = self.plan, self.plan.format in ('txt', 'lines')
+        plan, plain = self.plan, self.plan.format in ('txt', 'lines', 'scan')
         # 文件路径命名空间避免不同分片的行号或局部 ID 冲突。
         key = value(record, plan.id_field) if plan.id_field and isinstance(record, dict) else index
         if key is None or isinstance(key, (dict, list, bool)):
@@ -178,7 +186,7 @@ class MappedAdapter:
         meta = {k: 'import_plan' for k in plan.constants}
         basis, extra = dict(meta), {}
         meta.update(plan.constants)
-        if plan.format == 'txt':
+        if plan.format in ('txt', 'scan'):
             meta['title'], basis['title'] = Path(path).stem, 'path'
         for label, patterns, subject in (('path', [plan.path_pattern], Path(path).as_posix()),
                                          ('text', plan.head_patterns, (text or '')[:HEAD_CHARS])):
@@ -230,8 +238,8 @@ class MappedAdapter:
         for name in body_key.split('|'):
             if '.' not in name:
                 raw_fields.pop(name, None)
-        return ParsedRecord(key, locator, raw_fields, text=text,
-                            error=None if text else '正文为空或类型不符', metadata=meta)
+        error = None if text else (record.get('ocr') or {}).get('error') or '正文为空或类型不符'
+        return ParsedRecord(key, locator, raw_fields, text=text, error=error, metadata=meta)
 
     def parse(self, path):
         for chunk in self.iter_chunks(path):

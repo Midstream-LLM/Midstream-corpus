@@ -636,3 +636,147 @@ impl SpanDeduper {
         (matches, spans)
     }
 }
+
+fn kgrams(chars: &[u32], mut visit: impl FnMut(u64, u32)) {
+    let power = BASE.wrapping_pow((K - 1) as u32);
+    let mut hash = 0u64;
+    for (i, &c) in chars.iter().enumerate() {
+        if i >= K {
+            hash = hash.wrapping_sub((chars[i - K] as u64).wrapping_mul(power));
+        }
+        hash = hash.wrapping_mul(BASE).wrapping_add(c as u64);
+        if i + 1 >= K {
+            visit(mix(hash), (i + 1 - K) as u32);
+        }
+    }
+}
+
+fn merge_hits(mut a: HashMap<u64, i64>, b: HashMap<u64, i64>) -> HashMap<u64, i64> {
+    for (hash, version) in b {
+        let slot = a.entry(hash).or_insert(version);
+        *slot = (*slot).min(version);
+    }
+    a
+}
+
+/// 净增量预估：样本和库内正文都取全部 K 字片段，命中的窗口连起来就是共有区间。
+/// 每个片段记最小的库内版本号，结果与扫描顺序无关。
+#[pyclass]
+pub struct CoverageProbe {
+    input: CopyInput,
+    positions: Vec<Vec<u32>>,
+    heads: HashMap<u64, u32>,
+    entries: Vec<(u32, u32, u32)>,
+    hits: HashMap<u64, i64>,
+}
+
+#[pymethods]
+impl CoverageProbe {
+    #[new]
+    fn new() -> Self {
+        Self {
+            input: CopyInput::default(),
+            positions: Vec::new(),
+            heads: HashMap::new(),
+            entries: Vec::new(),
+            hits: HashMap::new(),
+        }
+    }
+
+    fn add(&mut self, text: &str) {
+        let (mut chars, mut positions) = (Vec::new(), Vec::new());
+        for (position, c) in text.chars().enumerate() {
+            let mapped = super::compare_char(c);
+            if mapped != 0 {
+                chars.push(mapped);
+                positions.push(position as u32);
+            }
+        }
+        let sample = self.positions.len() as u32;
+        kgrams(&chars, |hash, pos| {
+            let next = self
+                .heads
+                .insert(hash, self.entries.len() as u32)
+                .unwrap_or(u32::MAX);
+            self.entries.push((sample, pos, next));
+        });
+        self.positions.push(positions);
+    }
+
+    fn scan(&mut self, py: Python<'_>, data: &[u8]) {
+        let rows = self.input.read::<2>(data);
+        let heads = &self.heads;
+        let found: HashMap<u64, i64> = py.allow_threads(|| {
+            rows.par_iter()
+                .fold(
+                    || (Text::new(), HashMap::new()),
+                    |(mut text, mut found), fields| {
+                        let version = i64::from_be_bytes(fields[0].try_into().unwrap());
+                        text.normalize_span(fields[1], false);
+                        kgrams(&text.chars, |hash, _| {
+                            if heads.contains_key(&hash) {
+                                let slot = found.entry(hash).or_insert(version);
+                                *slot = (*slot).min(version);
+                            }
+                        });
+                        (text, found)
+                    },
+                )
+                .map(|(_, found)| found)
+                .reduce(HashMap::new, merge_hits)
+        });
+        self.hits = merge_hits(std::mem::take(&mut self.hits), found);
+    }
+
+    fn counts(&self) -> (usize, usize, usize) {
+        (self.positions.len(), self.entries.len(), self.hits.len())
+    }
+
+    /// 每个样本：(原文中被覆盖的字数, [(库内版本, 覆盖的规范字数)])；只计不短于 MIN_SPAN 的区间。
+    fn result(&self) -> Vec<(u64, Vec<(i64, u64)>)> {
+        let mut covered: Vec<Vec<i64>> = self.positions.iter().map(|p| vec![0; p.len()]).collect();
+        let mut hits: Vec<_> = self.hits.iter().collect();
+        hits.sort();
+        for (hash, &version) in hits {
+            let mut i = self.heads[hash];
+            while i != u32::MAX {
+                let (sample, pos, next) = self.entries[i as usize];
+                let pos = pos as usize;
+                for slot in &mut covered[sample as usize][pos..pos + K] {
+                    if *slot == 0 {
+                        *slot = version;
+                    }
+                }
+                i = next;
+            }
+        }
+        covered
+            .iter()
+            .zip(&self.positions)
+            .map(|(slots, positions)| {
+                let (mut raw, mut by) = (0u64, HashMap::new());
+                let mut start = 0;
+                while start < slots.len() {
+                    if slots[start] == 0 {
+                        start += 1;
+                        continue;
+                    }
+                    let mut end = start;
+                    while end < slots.len() && slots[end] != 0 {
+                        end += 1;
+                    }
+                    if end - start >= MIN_SPAN {
+                        raw += (positions[end - 1] - positions[start] + 1) as u64;
+                        for &version in &slots[start..end] {
+                            *by.entry(version).or_insert(0u64) += 1;
+                        }
+                    }
+                    start = end;
+                }
+                let mut by: Vec<_> = by.into_iter().collect();
+                by.sort();
+                (raw, by)
+            })
+            .collect()
+    }
+}

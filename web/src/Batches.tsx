@@ -39,7 +39,26 @@ type Detail = {
     locator: unknown;
   }[];
   raw_objects: { path: string; size_bytes: number; sha256: string }[];
+  estimate?: Estimate | null;
 };
+type Estimate = {
+  batch_chars: number; sample_documents: number; batch_documents: number; sample_chars: number; covered_chars: number;
+  overlap_ratio: number; estimated_new_chars: number;
+  sample_distribution: { mostly_duplicate: number; partly_duplicate: number; mostly_new: number };
+  by_source: { source: string; chars: number }[];
+  top_documents: { doc_id: number; title: string | null; source: string; chars: number }[];
+};
+const pct = (x: number) => (x * 100).toFixed(1) + "%";
+function EstimateView({ e }: { e: Estimate }) {
+  return <div className="change-preview">
+    <p>抽样 {count(e.sample_documents)} / {count(e.batch_documents)} 篇、{count(e.sample_chars)} 字，与库内重复 {pct(e.overlap_ratio)}。
+      按此比例，批次 {count(e.batch_chars)} 字去重后约新增 <strong>{count(e.estimated_new_chars)}</strong> 字。</p>
+    <p>样本中基本重复（≥90%）{e.sample_distribution.mostly_duplicate} 篇，部分重复 {e.sample_distribution.partly_duplicate} 篇，基本全新（&lt;10%）{e.sample_distribution.mostly_new} 篇。</p>
+    {e.by_source.length > 0 && <p>重复来自：{e.by_source.map(x => `${x.source} ${count(x.chars)} 字`).join("；")}</p>}
+    {e.top_documents.length > 0 && <details><summary>重复最多的库内文档</summary><ul>{e.top_documents.map(x => <li key={x.doc_id}>{x.title || "无标题"} · {x.source} · #{x.doc_id} · {count(x.chars)} 字</li>)}</ul></details>}
+    <small>只与库内当前版本比较，64 字以上的共同片段算重复；批次内部的重复不计。</small>
+  </div>;
+}
 export default function Batches({ onJob, active = true }: { onJob: (id: number) => void; active?: boolean }) {
   const [creating, setCreating] = useState(false);
   const [all, setAll] = useState(false),
@@ -75,6 +94,12 @@ export default function Batches({ onJob, active = true }: { onJob: (id: number) 
     setMessage("");
     setConfirm(false);
     try {
+      if (action === "estimate") {
+        const job = await api<{ job_id: number }>("jobs", undefined, {
+          kind: "batch_estimate", params: { batch_id: id }, actor, reason: reason.trim() || "发布前估算净增字数" });
+        onJob(job.job_id);
+        return;
+      }
       if (action === "resume" || action === "publish") {
         const job = await api<{ job_id: number }>("jobs", undefined, {
           kind: action === "publish" ? "batch_publish" : "batch_stage", params: action === "publish" && allowUncurated ? { batch_id: id, allow_uncurated: true } : { batch_id: id }, actor, reason: reason.trim() || (action === "publish" ? "人工确认发布批次" : "继续暂存并验证批次"),
@@ -279,6 +304,7 @@ export default function Batches({ onJob, active = true }: { onJob: (id: number) 
                     >
                       暂存并验证
                     </button>}
+                    {d.status === "validated" && <button disabled={busy || !allowed} onClick={() => act("estimate")}>预估净增量</button>}
                     {d.status === "validated" && <button className="primary" disabled={busy || !allowed || (!!d.uncurated && !allowUncurated)} onClick={() => act("publish")}>确认发布</button>}
                   </div>
                   {d.status === "validated" && !!d.uncurated && <label className="check-row"><input type="checkbox" disabled={busy} checked={allowUncurated} onChange={e => setAllowUncurated(e.target.checked)}/>
@@ -301,6 +327,7 @@ export default function Batches({ onJob, active = true }: { onJob: (id: number) 
                     </div>
                   )}
                   </section>}
+                  {d.estimate && <><h3>净增量预估</h3><EstimateView e={d.estimate} /></>}
                   {d.has_partition && !["published","abandoned"].includes(d.status) && <BatchPreview key={d.batch_id} id={d.batch_id} tick={tick}/>}
                   <h3>原文件</h3>
                   {d.raw_objects.map((o) => (

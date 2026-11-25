@@ -85,6 +85,27 @@ def _infer(current: dict) -> Change | None:
     return Change(metadata=patch) if patch else None
 
 
+SCAN_SOURCES: list[str] = []
+
+
+def _prepare_scan(conn) -> None:
+    """用过扫描件（scan）方案的来源；规则只处理这些来源。"""
+    SCAN_SOURCES[:] = [name for name, in conn.execute(
+        "SELECT DISTINCT s.name FROM source_batch b JOIN source s USING (source_id)"
+        " WHERE b.import_plan->>'format' = 'scan' AND b.status = 'published'")]
+
+
+def _scan_pages(current: dict) -> Change | None:
+    """扫描件去掉封面、目录、正误表和广告：从 OCR 缓存重组正文页，再按入库清洗（含 ocr-scan-v1）处理。"""
+    from ..ingest import ocr
+    meta = current["raw_fields"].get("ocr")
+    if not meta or "page_starts" not in meta:
+        return None
+    pages = [ocr.body_text(page) for page in ocr.cached_pages(meta)]
+    text = clean.clean_text("\n".join(page for page in pages if page), scan=True)
+    return Change(text=text) if text != current["text"] else None
+
+
 RULES = {
     rule.version: rule for rule in (
         Rule("quality-v3", None, _quality, step="quality_check"),
@@ -95,6 +116,7 @@ RULES = {
              config={"chise_ids": glyphs.data_info()}),
         Rule(classify.MAP_VERSION, None, _taxonomy, step="tagging", config={"maps": classify.versions()}),
         Rule(infer.RULE_VERSION, infer.SOURCES, _infer, step="tagging", prepare=_prepare_infer),
+        Rule("ocr-scan-pages-v1", SCAN_SOURCES, _scan_pages, step="rule_reprocess", prepare=_prepare_scan),
         Rule("t2s-v1", None, lambda current: Change(text=variants.simplify(current['text'])),
              variant='simplified', config=variants.info(), step='t2s'),
     )

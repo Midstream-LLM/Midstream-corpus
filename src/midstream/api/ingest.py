@@ -178,3 +178,24 @@ def active_batch_jobs(conn, batch_ids):
            ORDER BY params->>'batch_id', job_id DESC""",
         ([str(i) for i in batch_ids],)).fetchall()
     return dict(rows)
+
+
+class OcrStatus(BaseModel):
+    model_config = ConfigDict(extra='forbid')
+    paths: list[str] = Field(min_length=1, max_length=MAX_BATCH_FILES)
+    engine: str
+
+
+@router.get('/api/v1/ocr/engines')
+def ocr_engines():
+    from ..ingest import ocr
+    return ocr.engines()
+
+
+@router.post('/api/v1/ocr/status', dependencies=[Depends(browser_write)])
+def ocr_status(body: OcrStatus):
+    from ..ingest import ocr
+    if body.engine not in ocr.ENGINES:
+        from ..corpus.management import ManagementError
+        raise ManagementError('invalid_input', f'未知 OCR 引擎：{body.engine}')
+    return ocr.status(body.paths, body.engine)

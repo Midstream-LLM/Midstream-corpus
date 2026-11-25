@@ -1,12 +1,13 @@
 import { useState } from "react";
 import { api, show } from "./shared";
 import { statusLabels, type Group, type Plan } from "./importTypes";
+import OcrPanel from "./OcrPanel";
 const targets = [["text_field", "正文"], ["id_field", "原文 ID"], ["title", "标题"], ["authors", "作者"], ["composed_label", "年代"], ["category", "体裁 / 分类"]];
 export default function ImportGroup({group: g, groups, adapters, actor, disabled, onChange, onMove}: {
   group: Group; groups: Group[]; adapters: {name: string; description: string}[]; actor: string; disabled: boolean; onChange: (g: Group) => void; onMove: (file: string, target: string) => void;
 }) {
   const [busy, setBusy] = useState(false), [error, setError] = useState(""), [filePage, setFilePage] = useState(0);
-  const file = g.files[0], fields = file.fields || {}, plain = ["txt", "lines"].includes(g.plan.format);
+  const file = g.files[0], fields = file.fields || {}, plain = ["txt", "lines", "scan"].includes(g.plan.format);
   const blocked = (status: string) => ["unsupported", "error", "pending"].includes(status);
   function planChange(plan: Plan) {onChange({...g, plan, json: undefined, approval: {...g.approval, method: g.approval.method === "llm" ? "llm" : "manual", edited: true, requested_by: g.approval.requested_by || actor}});}
   async function suggest() {
@@ -31,8 +32,10 @@ export default function ImportGroup({group: g, groups, adapters, actor, disabled
         approval: {method: "manual", requested_by: actor}})}><option value="">自定义字段映射</option>{adapters.map(a => <option key={a.name} value={a.name}>{a.name} · {a.description}</option>)}</select></label>
       <label className="import-label">来源名称<input disabled={disabled || !!g.adapter} value={g.source} maxLength={200} onChange={e => onChange({...g, source: e.target.value})}/></label>
       {g.adapter ? <p>使用 {g.adapter} 解析器。预览中可以检查标题、作者、年代和正文。</p> : <>
-        <div className="edit-grid"><label>读取方式<select disabled={disabled} value={g.plan.format} onChange={e => planChange({...g.plan, format: e.target.value})}>{["txt", "lines", "json", "jsonl", "parquet"].map(f => <option key={f} value={f}>{({txt: "TXT · 每个文件一篇", lines: "逐行文本 · 每行一篇", json: "JSON", jsonl: "JSONL", parquet: "Parquet"} as Record<string,string>)[f]}</option>)}</select></label><label>文本编码<select disabled={disabled} value={g.plan.encoding} onChange={e => planChange({...g.plan, encoding: e.target.value})}>{["utf-8-sig", "utf-16", "gb18030", "big5hkscs"].map(e => <option key={e} value={e}>{e === "big5hkscs" ? "big5（含香港增补字符）" : e}</option>)}</select></label></div>
-        {plain ? <p>直接读取文本正文；TXT 使用文件名作为标题。</p> : <div className="table-scroll"><table className="mapping-table"><thead><tr><th>目标字段</th><th>原文件字段</th><th>样例</th></tr></thead><tbody>{targets.map(([key, label]) => {
+        <div className="edit-grid"><label>读取方式<select disabled={disabled} value={g.plan.format} onChange={e => {const {ocr_engine, ...rest} = g.plan; planChange(e.target.value === "scan" ? {...rest, format: "scan", ocr_engine: ocr_engine || "kandian-v2"} : {...rest, format: e.target.value});}}>{["txt", "lines", "json", "jsonl", "parquet", "scan"].map(f => <option key={f} value={f}>{({txt: "TXT · 每个文件一篇", lines: "逐行文本 · 每行一篇", json: "JSON", jsonl: "JSONL", parquet: "Parquet", scan: "扫描件 · OCR 后每个文件一篇"} as Record<string,string>)[f]}</option>)}</select></label><label>文本编码<select disabled={disabled} value={g.plan.encoding} onChange={e => planChange({...g.plan, encoding: e.target.value})}>{["utf-8-sig", "utf-16", "gb18030", "big5hkscs"].map(e => <option key={e} value={e}>{e === "big5hkscs" ? "big5（含香港增补字符）" : e}</option>)}</select></label></div>
+        {g.plan.format === "scan" ? <><p>读取 OCR 结果作正文，文件名作标题；PDF 各页按顺序连成一篇，页起点记在原始字段里。</p>
+          <OcrPanel paths={g.selected} engine={g.plan.ocr_engine || "kandian-v2"} actor={actor} disabled={disabled} onEngine={id => planChange({...g.plan, ocr_engine: id})}/></>
+        : plain ? <p>直接读取文本正文；TXT 使用文件名作为标题。</p> : <div className="table-scroll"><table className="mapping-table"><thead><tr><th>目标字段</th><th>原文件字段</th><th>样例</th></tr></thead><tbody>{targets.map(([key, label]) => {
           const value = key === "text_field" || key === "id_field" ? g.plan[key] : g.plan.fields[key] || "";
           return <tr key={key}><td>{label}{key === "text_field" && " *"}</td><td><select aria-label={label + "字段"} disabled={disabled} value={value} onChange={e => {
             if (key === "text_field" || key === "id_field") planChange({...g.plan, [key]: e.target.value});
