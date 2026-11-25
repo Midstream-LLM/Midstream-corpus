@@ -63,19 +63,23 @@ def _cut_counts(conn, release_id, tokenizer, progress):
     conn.execute('CREATE TEMP TABLE IF NOT EXISTS cut_token_count (version_id bigint PRIMARY KEY,token_count bigint)'
                  ' ON COMMIT PRESERVE ROWS')
     conn.execute('TRUNCATE cut_token_count')
-    count = 0
+    seen = set()
     with store.reader(conn) as reader:
         reader.execute('SET TRANSACTION READ ONLY')
+        # 每段分开计数后按成员累加，与分段写出的 token 分片一致。
         items = ((row['version_id'],row['text']) for row in _documents(reader,release_id,only_cut=True))
         for batch in _text_batches(items):
             if progress:
-                progress(count,0,'统计裁剪后正文的 token 数')
-            counts = tokenizer.count_batch([text for _,text in batch])
+                progress(len(seen),0,'统计裁剪后正文的 token 数')
+            totals = {}
+            for (vid,_),n in zip(batch,tokenizer.count_batch([text for _,text in batch])):
+                totals[vid] = totals.get(vid,0)+n
             with conn.cursor() as writer:
-                writer.executemany('INSERT INTO cut_token_count VALUES(%s,%s)',
-                                   [(vid,n) for (vid,_),n in zip(batch,counts)])
-            count += len(batch)
-    return count
+                writer.executemany('INSERT INTO cut_token_count VALUES(%s,%s) ON CONFLICT (version_id)'
+                                   ' DO UPDATE SET token_count=cut_token_count.token_count+EXCLUDED.token_count',
+                                   list(totals.items()))
+            seen.update(totals)
+    return len(seen)
 
 
 def compute(conn, release_id, tokenizer, *, progress=None):

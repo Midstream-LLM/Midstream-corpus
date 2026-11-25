@@ -20,8 +20,8 @@ from .formats import FORMATS, _HashWriter
 from .samples import SAMPLE_FIELDS, SAMPLERS
 from .template import Template
 
-DEFAULT_FIELDS = ['ordinal', 'version_id', 'doc_id', 'split', 'title', 'text']
-FieldName = Literal['ordinal', 'version_id', 'doc_id', 'split', 'title', 'text',
+DEFAULT_FIELDS = ['ordinal', 'version_id', 'doc_id', 'segment', 'split', 'title', 'text']
+FieldName = Literal['ordinal', 'version_id', 'doc_id', 'segment', 'segment_start', 'split', 'title', 'text',
                     'authors', 'era', 'category', 'genre', 'source', 'composed_years', 'edition_years',
                     'processed_steps', 'contributors', 'tags', 'tune_pattern', 'topics', 'external_ids', 'field_basis']
 CURATION_FIELDS = ['composed_years', 'edition_years', 'processed_steps', 'contributors', 'tags',
@@ -68,14 +68,17 @@ def _documents(conn, release_id, *, only_cut=False):
             (' AND EXISTS(SELECT 1 FROM dataset_member_cut c WHERE c.release_id=m.release_id AND c.version_id=m.version_id)' if only_cut else '') +
             ' ORDER BY m.split, m.ordinal',
             (release_id,))
-        keys = DEFAULT_FIELDS + ['authors', 'era', 'category', 'genre', 'source', '_curation', '_cuts']
+        keys = ['ordinal', 'version_id', 'doc_id', 'split', 'title', 'text',
+                'authors', 'era', 'category', 'genre', 'source', '_curation', '_cuts']
+        from ..corpus.metadata import public_metadata
+        from ..datasets.cuts import pieces
         for row in cursor:
             document = dict(zip(keys, row))
-            from ..corpus.metadata import public_metadata
             document.update(public_metadata(document.pop('_curation')))
-            from ..datasets.cuts import apply
-            document['text'] = apply(textcodec.decompress(bytes(document['text'])),document.pop('_cuts') or [])
-            yield document
+            # 裁剪后每段单独一行：切口两侧原本不相连，拼接会造出假的上下文。
+            text = textcodec.decompress(bytes(document['text']))
+            for segment, (start, piece) in enumerate(pieces(text, document.pop('_cuts') or [])):
+                yield {**document, 'segment': segment, 'segment_start': start, 'text': piece}
 
 
 def _rows(conn, release_id, options):

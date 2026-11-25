@@ -571,7 +571,7 @@ midstream export recipes/small-sources-v1.json
 
 命令先在数据库中固定成员和字符数，再生成 Parquet 文件，输出 `release_id`、`export_id`、名称、字符数、manifest 和文件路径。每次导出独立写到 `MIDSTREAM_EXPORT_ROOT/<name>/<export_id>/`，文件名如 `train-00000.parquet`；空划分不生成数据分片。
 
-默认每行包含 `ordinal`、`version_id`、`doc_id`、`split`、`title`、`text`，保留旧 Parquet 列。划分内按 ordinal 排序；ordinal 是整个发布的成员序号，单个划分中可能不连续。Parquet 使用 zstd 压缩。
+默认每行包含 `ordinal`、`version_id`、`doc_id`、`segment`、`split`、`title`、`text`。span 裁剪过的成员在每个切口处断开，每段单独一行：切口两侧原本不相连，拼成一段会造出假的上下文。`segment` 是段序号（未裁剪的成员只有 0），可选的 `segment_start` 是该段在原文中的字符起点；同一成员按 `version_id` 加 `segment` 唯一确定。sample 单位在每段内部切分，`start_char`/`end_char` 相对该段。划分内按 ordinal 排序；ordinal 是整个发布的成员序号，单个划分中可能不连续。Parquet 使用 zstd 压缩。
 
 没有选中任何文档会报错。同名数据集不能再次创建；要基于当前库状态发布新数据集，应改用新名称。
 
@@ -633,7 +633,7 @@ midstream export-release 1 --format jsonl --template '[《{title}》][{authors}]
 midstream export-release 1 --format jsonl --template '[【{era}·{genre}】]{text}' --template-ratio 0.5 --template-seed 1
 ```
 
-formats 为 parquet/jsonl/pkl；JSONL 可加外层 zst 压缩。fields 默认六列，可增加 authors、era、category、genre、source，也可只取需要的列。pkl 每片是一个 `list[dict]`，**只加载可信的 pkl 文件**；文件校验也会加载这些分片。
+formats 为 parquet/jsonl/pkl；JSONL 可加外层 zst 压缩。fields 默认七列，可增加 segment_start、authors、era、category、genre、source，也可只取需要的列。pkl 每片是一个 `list[dict]`，**只加载可信的 pkl 文件**；文件校验也会加载这些分片。
 
 shard_mb 默认 256，以行的 UTF-8 JSON 大小预算分片，不是压缩后文件字节上限；单篇或单个 sample 超过预算时单独成片。内存受分片预算与最大单篇正文限制，读取不累积全库正文。sample 默认 max_chars=8192、overlap_chars=0，优先段落、其次句末，再按字符截断；自动增加 sample_index/start_char/end_char（Unicode 码点偏移）。相邻 sample 重叠长度固定，去除后续 sample 的重叠前缀可还原原文。原发布的 ordinal、成员和摘要不变。
 
@@ -706,7 +706,7 @@ split/test.jsonl
 split/split_manifest.json
 ```
 
-已只读核对击水的 NPY 及 shard/offset 文档索引布局。每片目标 200M tokens，文档不跨片；超大文档单独成片。vocab_size 含 added tokens，≤65536 用小端 u16，否则用小端 u32。通过 NPY 标准头声明长度，按批写出，不分配整个 200M token 缓冲区。文档索引带 doc_id、version_id、ordinal、source/category/era、tokens、shard、offset、split；offset 为 token 数，不是字节偏移。0-token 文档不进入 token 文件和索引，在根 manifest 记录数量。
+已只读核对击水的 NPY 及 shard/offset 文档索引布局。每片目标 200M tokens，文档不跨片；超大文档单独成片。vocab_size 含 added tokens，≤65536 用小端 u16，否则用小端 u32。通过 NPY 标准头声明长度，按批写出，不分配整个 200M token 缓冲区。文档索引带 doc_id、version_id、ordinal、source/category/era、tokens、shard、offset、split；offset 为 token 数，不是字节偏移。0-token 文档不进入 token 文件和索引，在根 manifest 记录数量。span 裁剪过的成员在切口处断开，每段一条索引（`segment` 为段序号，`segment_start` 为原文字符起点），训练侧按索引行切分文档即可避免跨切口拼接；同一成员的各段仍连续写在同一分片里。根 manifest 与 split_manifest 的 `documents` 是成员数，`segments` 是索引行数。
 
 根 manifest 固定发布、配方、内容摘要、分词器指纹、口径、dtype、总 token 数及各文件行数/字节数/SHA-256；文件哈希边写边算一次。发布划分直接进入 split 索引，采样权重由训练侧提供。本轮只支持完整文档的 token 统计/分片，sample 单位尚未实现；u32 是宽词表扩展，尚未在击水训练端联调。
 
@@ -748,7 +748,7 @@ midstream export /path/to/recipe.json
 
 dup_span 的 start_char/end_char 已是原文 Unicode 字符坐标，左闭右开；source_start_char 为出处起点，出处终点需要用同一 Rust 比较表示映射恢复，不能用两侧原文字数相加猜测。当前 simplified 转换逐字等长，可以组合选用；不等长的转换会报错。span 试算需要读取少量相关正文做偏移映射，不再保证纯元数据，其他试算仍保持只读元数据。
 
-发布把区间固定到 dataset_member_cut。字数为裁后实际值；有裁剪时摘要额外包含按成员顺序排序的区间，没有裁剪时保持旧摘要口径。后续查重重算不改变旧发布；导出与 token 统计使用固定裁后文本。原文缓存只用于未裁剪成员，裁剪成员每次直接计数，任务结果提供 computed_cut_documents，不把裁剪数写回 text_token_count。
+发布把区间固定到 dataset_member_cut。导出和 token 分片在切口处把成员断成多段，不直接拼接，见第 8 节导出字段和 8A 的 token 索引说明。字数为裁后实际值；有裁剪时摘要额外包含按成员顺序排序的区间，没有裁剪时保持旧摘要口径。后续查重重算不改变旧发布；导出与 token 统计使用固定裁后文本。原文缓存只用于未裁剪成员，裁剪成员每次直接计数，任务结果提供 computed_cut_documents，不把裁剪数写回 text_token_count。
 
 ## 8C-1. 浏览重复与人工否决（M9）
 

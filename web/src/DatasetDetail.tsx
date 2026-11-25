@@ -3,12 +3,12 @@ import { api, useLoad, State, count, date } from "./shared";
 import { splitNames, type Recipe, type Release, type TokenStats } from "./datasetTypes";
 type Export = { export_id: number; status: string; format: string; manifest_path: string | null; error: string | null;
   files: { path: string; row_count: number; size_bytes: number; sha256: string }[] };
-const allFields = ["ordinal", "version_id", "doc_id", "split", "title", "text", "authors", "era", "category", "genre", "source"];
+const allFields = ["ordinal", "version_id", "doc_id", "segment", "split", "title", "text", "segment_start", "authors", "era", "category", "genre", "source"];
 export default function DatasetDetail({ id, onCopy, onJob }: { id: number; onCopy: (recipe: Recipe) => void; onJob: (id: number) => void }) {
   const [tick, setTick] = useState(0), [actor, setActor] = useState(""), [reason, setReason] = useState(""),
     [tokenizer, setTokenizer] = useState(""), [format, setFormat] = useState("parquet"), [unit, setUnit] = useState("document"),
     [shard, setShard] = useState(256), [maxChars, setMaxChars] = useState(8192), [overlap, setOverlap] = useState(0),
-    [fields, setFields] = useState(allFields.slice(0, 6)), [zst, setZst] = useState(false), [hash, setHash] = useState(false),
+    [fields, setFields] = useState(allFields.slice(0, 7)), [zst, setZst] = useState(false), [hash, setHash] = useState(false),
     [run, setRun] = useState(""), [busy, setBusy] = useState(false), [message, setMessage] = useState(""),
     [template, setTemplate] = useState(""), [ratio, setRatio] = useState(1), [seed, setSeed] = useState(0);
   const detail = useLoad<Release>("datasets/" + id, tick), stats = useLoad<TokenStats[]>("datasets/" + id + "/token-stats", tick),

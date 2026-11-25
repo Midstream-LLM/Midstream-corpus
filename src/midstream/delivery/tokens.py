@@ -38,8 +38,9 @@ def write_tokens(conn, release_id, tokenizer, *, shard_tokens=200_000_000, progr
     conn.commit()
     base = config.EXPORT_ROOT / release['name']
     target, temporary = base / str(export_id), base / f'.{export_id}.tmp'
-    files, split_counts = [], {split: {'documents': 0, 'tokens': 0} for split in ('train', 'val', 'test')}
-    shard_writer, shard, offset, documents = None, -1, 0, 0
+    files, split_counts = [], {split: {'documents': 0, 'segments': 0, 'tokens': 0}
+                                for split in ('train', 'val', 'test')}
+    shard_writer, shard, offset, documents, rows = None, -1, 0, 0, 0
 
     def line(writer, value):
         writer.write((json.dumps(value, ensure_ascii=False, separators=(',', ':')) + '\n').encode('utf-8'))
@@ -69,11 +70,14 @@ def write_tokens(conn, release_id, tokenizer, *, shard_tokens=200_000_000, progr
                 line(info, {'shard': shard, 'path': str(target / name), 'tokens': offset})
 
             def items():
+                from ..datasets.cuts import pieces
                 for record in token_stats._members(conn, release_id, tokenizer.fingerprint, content=True):
                     content = record.pop('content')
                     if record['tokens']:
-                        from ..datasets.cuts import apply
-                        yield record, apply(textcodec.decompress(bytes(content)),record.pop('_cuts') or [])
+                        # 裁剪成员每段一条索引；分片只在成员之间切换，与预先算好的分片长度一致。
+                        text, cuts = textcodec.decompress(bytes(content)), record.pop('_cuts') or []
+                        for segment, (start, piece) in enumerate(pieces(text, cuts)):
+                            yield {**record, 'segment': segment, 'segment_start': start}, piece
 
             total_docs = sum(value['documents'] for value in release['splits'].values())
             for batch in token_stats._text_batches(items()):
@@ -82,7 +86,8 @@ def write_tokens(conn, release_id, tokenizer, *, shard_tokens=200_000_000, progr
                 encoded = tokenizer.encode_batch([text for _, text in batch])
                 for (record, _), ids in zip(batch, encoded):
                     count = len(ids)
-                    if shard_writer is None or (offset and offset + count > shard_tokens):
+                    first = record['segment'] == 0
+                    if shard_writer is None or (first and offset and offset + record['tokens'] > shard_tokens):
                         close_shard()
                         shard += 1
                         offset = 0
@@ -94,14 +99,16 @@ def write_tokens(conn, release_id, tokenizer, *, shard_tokens=200_000_000, progr
                     line(docs, record)
                     line(splits[record['split']], record)
                     offset += count
-                    documents += 1
-                    split_counts[record['split']]['documents'] += 1
+                    rows += 1
+                    documents += first
+                    split_counts[record['split']]['documents'] += first
+                    split_counts[record['split']]['segments'] += 1
                     split_counts[record['split']]['tokens'] += count
             close_shard()
             files.append(artifact('tokens/shard_info.jsonl', info, len(lengths), 'jsonl'))
-            files.append(artifact('manifest/docs_tokens.jsonl', docs, documents, 'jsonl'))
+            files.append(artifact('manifest/docs_tokens.jsonl', docs, rows, 'jsonl'))
             for split, writer in splits.items():
-                files.append(artifact(f'split/{split}.jsonl', writer, split_counts[split]['documents'], 'jsonl'))
+                files.append(artifact(f'split/{split}.jsonl', writer, split_counts[split]['segments'], 'jsonl'))
             split_manifest = index_writer('split/split_manifest.json')
             split_manifest.write((json.dumps({'release_id': release_id, 'seed': release['recipe']['seed'],
                                              'method': 'fixed_dataset_member', 'splits': split_counts},
@@ -111,7 +118,7 @@ def write_tokens(conn, release_id, tokenizer, *, shard_tokens=200_000_000, progr
             progress(documents, documents, '保存 token manifest 与导出记录')
         manifest = {'export_id': export_id, 'release_id': release_id, 'format': 'tokens',
                     'recipe': release['recipe'], 'content_digest': release['content_digest'], **options,
-                    'total_tokens': sum(lengths), 'documents': documents,
+                    'total_tokens': sum(lengths), 'documents': documents, 'segments': rows,
                     'zero_token_documents': total_docs - documents, 'by_split': split_counts, 'files': files}
         manifest_tmp = temporary / 'manifest.json.tmp'
         manifest_tmp.write_text(json.dumps(manifest, ensure_ascii=False, indent=2) + '\n', encoding='utf-8')

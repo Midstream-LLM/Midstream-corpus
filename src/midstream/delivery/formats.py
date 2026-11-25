@@ -47,7 +47,7 @@ class _HashWriter(io.RawIOBase):
 
 
 def _schema(fields):
-    integers = {'ordinal', 'version_id', 'doc_id', *SAMPLE_FIELDS}
+    integers = {'ordinal', 'version_id', 'doc_id', 'segment', 'segment_start', *SAMPLE_FIELDS}
     structured = {
         'composed_years': pa.struct([('start_year',pa.int32()),('end_year',pa.int32())]),
         'edition_years': pa.struct([('start_year',pa.int32()),('end_year',pa.int32())]),

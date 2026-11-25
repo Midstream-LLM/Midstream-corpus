@@ -125,13 +125,16 @@ def plan(conn, recipe, kept):
     return assign(ordered,links,lambda vid:normalized(vid)[1],recipe.selection.min_cut_chars,minimums)
 
 
-def apply(text, cuts):
-    parts, start = [], 0
+def pieces(text, cuts):
+    """切口两侧原本不相连，各自成段，不拼接；返回 (原文起点, 正文)，去掉空段。"""
+    result, start = [], 0
     for left,right in cuts:
-        parts.append(text[start:left])
+        if left > start:
+            result.append((start, text[start:left]))
         start=right
-    parts.append(text[start:])
-    return ''.join(parts)
+    if start < len(text) or not result:
+        result.append((start, text[start:]))
+    return result
 
 
 def load(conn, release_id):

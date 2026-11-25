@@ -372,12 +372,21 @@ def test_span_cut_release_exports_tokens_and_frozen_proofs(conn,tmp_path,monkeyp
     normalized=[midstream_dedup.span_normalize(item['text'])[0] for item in rows]
     assert sum(shared in text for text in normalized)==1
     assert sum(len(item['text']) for item in rows)==plan.report['chars']<len(left)+len(right)
+    # 切口两侧各成一行，不拼接。
+    assert len(rows)==3 and not any('甲' in item['text'] and '丙' in item['text'] for item in rows)
     exact=token_stats.compute(conn,release,tokenizer)
     assert exact['total']==sum(tokenizer.count_batch([item['text'] for item in rows]))
     assert exact['cache']['computed_cut_documents']==1
     assert conn.execute('SELECT count(*) FROM text_token_count').fetchone()[0]==cached
     token_output=write_tokens(conn,release,tokenizer,shard_tokens=100)
     assert token_output['total_tokens']==exact['total']
+    import numpy as np
+    root=Path(token_output['manifest']).parent
+    index=[json.loads(line) for line in (root/'manifest/docs_tokens.jsonl').read_text().splitlines()]
+    shards={item['shard']:np.load(item['path']) for item in map(json.loads,(root/'tokens/shard_info.jsonl').read_text().splitlines())}
+    texts={(item['version_id'],item['segment']):item['text'] for item in rows}
+    assert len(index)==3 and all(shards[r['shard']][r['offset']:r['offset']+r['tokens']].tolist()==
+                                 tokenizer.encode_batch([texts[r['version_id'],r['segment']]])[0] for r in index)
     conn.execute('TRUNCATE dup_span');conn.commit()
     repeated=read_export(exporters.export_release(conn,release,exporters.Options(format='pkl')))
     assert repeated==rows
