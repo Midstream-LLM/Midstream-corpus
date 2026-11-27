@@ -37,8 +37,12 @@ class Endpoint:
     concurrency: int = 4
     max_retries: int = 2
     requests_per_second: float = 0
+    proxy: str = ""   # 留空直连；如 http://127.0.0.1:7890，只作用于本接入点
 
     def __post_init__(self):
+        proxy = urlsplit(self.proxy) if self.proxy else None
+        if proxy and (proxy.scheme not in ("http", "https") or not proxy.hostname):
+            raise LLMError("invalid_config", "接入点代理地址无效")
         parts = urlsplit(self.base_url)
         if (self.protocol not in PROTOCOLS or parts.scheme not in ("https", "http")
                 or not parts.hostname or parts.username or parts.password or parts.query or parts.fragment):

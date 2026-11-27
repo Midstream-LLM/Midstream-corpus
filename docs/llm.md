@@ -60,6 +60,7 @@ quality_check = "default"
 
 - `credentials` 的值是环境变量名。实际 key 可由运行环境设置，也可通过 Web 保存到同一 TOML 的 `local_keys` 表；环境变量优先，多个接入点可共用同一引用。配置查看不会输出实际 key。
 - `endpoints` 管协议、地址和执行限制；`concurrency` 为该客户端内每个接入点的同时请求上限，`requests_per_second=0`（默认）表示不限制启动速率。不同客户端/进程的限制独立。
+- `proxy`（可选）给单个接入点配 HTTP 代理，如 `http://127.0.0.1:7890`；只作用于该接入点的 `base_url` 源站，其他接入点照常直连。服务器经校园网直连 OpenAI 不通，OpenAI 接入点需走本机代理。
 - `profiles` 将接入点、模型及默认参数组成命名配置。`max_tokens` 在 Responses 下转换为 `max_output_tokens`；`parameters` 使用所选协议的原生参数名，调用时可覆盖。
 - `services` 分别指定生成与质检的默认 profile；函数和 CLI 也可显式选择。
 

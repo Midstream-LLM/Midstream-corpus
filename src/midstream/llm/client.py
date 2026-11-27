@@ -7,6 +7,7 @@ import time
 from contextlib import contextmanager
 from dataclasses import dataclass
 from typing import Iterator
+from urllib.parse import urlsplit
 
 import httpx
 
@@ -25,7 +26,11 @@ class LLMClient:
     def __init__(self, config: LLMConfig, *, transport: httpx.BaseTransport | None = None,
                  sleep=time.sleep):
         self.config = config
-        self._http = httpx.Client(transport=transport, follow_redirects=False)
+        # 代理按接入点挂载到其 base_url 的源站；测试注入 transport 时不挂。
+        mounts = None if transport else {
+            "{0.scheme}://{0.netloc}".format(urlsplit(ep.base_url)): httpx.HTTPTransport(proxy=ep.proxy)
+            for ep in config.endpoints.values() if ep.proxy} or None
+        self._http = httpx.Client(transport=transport, mounts=mounts, follow_redirects=False)
         self._sleep = sleep
         self._locks = {name: threading.Lock() for name in config.endpoints}
         self._slots = {name: threading.BoundedSemaphore(ep.concurrency)
@@ -100,9 +105,15 @@ class LLMClient:
                 if response.status_code >= 300:
                     code = {401: "authentication_failed", 403: "permission_denied",
                             429: "rate_limited"}.get(response.status_code, "api_error")
-                    # 不回显错误正文、headers 或 request，避免服务商回显密钥。
+                    # 只保留错误对象的类型、代码、参数和说明，不回显 headers、request 或其余正文。
+                    try:
+                        error = json.loads(response.read()).get("error")
+                        detail = {"error": {k: str(error[k])[:500] for k in ("type", "code", "param", "message")
+                                            if error.get(k) is not None}} if isinstance(error, dict) else None
+                    except (ValueError, AttributeError):
+                        detail = None
                     raise LLMError(code, f"模型接口返回 HTTP {response.status_code}",
-                                   status_code=response.status_code)
+                                   status_code=response.status_code, response=detail)
                 yield response, endpoint
             except httpx.TransportError as exc:
                 raise LLMError("outcome_unknown", "响应读取中断，服务商可能已执行；未自动重试") from exc

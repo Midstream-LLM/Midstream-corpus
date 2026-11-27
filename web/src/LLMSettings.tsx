@@ -9,6 +9,7 @@ type Endpoint = {
   concurrency: number;
   max_retries: number;
   requests_per_second: number;
+  proxy?: string;
 };
 type Profile = {
   endpoint: string;
@@ -618,6 +619,18 @@ export default function LLMSettings() {
                           <option key={k}>{k}</option>
                         ))}
                       </select>
+                    </label>
+                    <label>
+                      代理 · {name}
+                      <input
+                        value={endpoint.proxy ?? ""}
+                        placeholder="留空直连，如 http://127.0.0.1:7890"
+                        onChange={(e) =>
+                          edit((c) => {
+                            c.endpoints[name].proxy = e.target.value;
+                          })
+                        }
+                      />
                     </label>
                     {(
                       [

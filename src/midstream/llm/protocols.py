@@ -34,9 +34,8 @@ def generation_payload(protocol: str, profile: Profile, prompt: str, system: str
     body = {"model": profile.model, **options}
     if protocol == "responses":
         body.setdefault("max_output_tokens", profile.max_tokens)
-        body["input"] = prompt
-        if system:
-            body["instructions"] = system
+        # system 作为首条输入消息而非 instructions：OpenAI 的 json_object 模式只在输入消息里找 "json" 字样。
+        body["input"] = ([{"role": "system", "content": system}] if system else []) + [{"role": "user", "content": prompt}]
     elif protocol == "fim_completions":
         body.setdefault("max_tokens", profile.max_tokens)
         body["prompt"] = f"{system}\n\n{prompt}" if system else prompt

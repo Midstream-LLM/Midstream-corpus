@@ -64,7 +64,7 @@ def test_protocol_serialization_auth_and_response(protocol):
         else:
             assert request.headers["authorization"] == "Bearer synthetic-test-credential"
         if protocol == "responses":
-            assert body["input"] == "正文" and body["instructions"] == "规则"
+            assert body["input"] == [{"role": "system", "content": "规则"}, {"role": "user", "content": "正文"}]
             assert body["max_output_tokens"] == 200 and "max_tokens" not in body
         elif protocol == "fim_completions":
             assert body["prompt"] == "规则\n\n正文" and body["suffix"] == "后文"
