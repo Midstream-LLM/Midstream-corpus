@@ -152,29 +152,29 @@ def _check_training_history(conn: psycopg.Connection, held_out: list[int]) -> No
     """进过训练的文档不能进验证或测试，经文档、作品和重复簇反查。"""
     if not held_out:
         return
+    # 先从留出文档出发找出相关文档，再与训练过的文档求交；逐条相关子查询在训练集上百万篇时要几个小时。
     leaked = conn.execute(
-        """WITH trained AS (
+        """WITH held AS MATERIALIZED (SELECT DISTINCT unnest(%s::bigint[]) AS doc_id),
+           trained AS MATERIALIZED (
                SELECT DISTINCT v.doc_id
                FROM training_use u
                JOIN dataset_member m ON m.release_id = u.release_id AND m.split = 'train'
                JOIN document_version v USING (version_id)
-           ), trained_clusters AS (
-               SELECT DISTINCT m.cluster_id FROM trained t
-               JOIN document_version v ON v.doc_id = t.doc_id
+           ), related AS (
+               SELECT doc_id AS held, doc_id AS other FROM held
+               UNION ALL
+               SELECT a.doc_id, b.doc_id FROM held h
+               JOIN document_work a USING (doc_id) JOIN document_work b USING (work_id)
+               WHERE a.status <> 'rejected' AND b.status <> 'rejected'
+               UNION ALL
+               SELECT h.doc_id, w.doc_id FROM held h
+               JOIN document_version v USING (doc_id)
                JOIN dup_cluster_member m USING (version_id)
-               JOIN dup_cluster c USING (cluster_id) WHERE c.level = 'document'
+               JOIN dup_cluster c ON c.cluster_id = m.cluster_id AND c.level = 'document'
+               JOIN dup_cluster_member n ON n.cluster_id = m.cluster_id
+               JOIN document_version w ON w.version_id = n.version_id
            )
-           SELECT h.doc_id FROM unnest(%s::bigint[]) AS h(doc_id)
-           WHERE h.doc_id IN (SELECT doc_id FROM trained)
-              OR EXISTS (
-                   SELECT 1 FROM document_work a
-                   JOIN document_work b USING (work_id)
-                   JOIN trained t ON t.doc_id = b.doc_id
-                   WHERE a.doc_id = h.doc_id
-                     AND a.status <> 'rejected' AND b.status <> 'rejected')
-              OR EXISTS (
-                   SELECT 1 FROM document_version v JOIN dup_cluster_member m USING (version_id)
-                   JOIN trained_clusters c USING (cluster_id) WHERE v.doc_id = h.doc_id)
+           SELECT DISTINCT r.held FROM related r JOIN trained t ON t.doc_id = r.other
            LIMIT 5""",
         (held_out,),
     ).fetchall()
