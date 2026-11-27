@@ -1,0 +1,22 @@
+{
+ "version": "source-tiers-v1",
+ "comment": "去重时保留哪一份：数字小的优先。1 校对整理本；2 来源不明的网络录入本；3 OCR。未列出的来源按 default。配方的 source_priority 仍在此之前。用户确认，2026-11-26。",
+ "default": 2,
+ "tiers": {
+  "wikisource": 1,
+  "open_guji_booktext": 1,
+  "ccc_corpus": 1,
+  "chinese_poetry": 1,
+  "daizhige": 2,
+  "greathangpt": 2,
+  "team_texts": 2,
+  "mingqing": 2,
+  "gutenberg": 2,
+  "wanli": 2,
+  "ecpo_jingbao": 2,
+  "dongfang_ocr": 3,
+  "shenbao_ocr": 3,
+  "qing_bureau_ocr": 3,
+  "xinqingnian_scan": 3
+ }
+}

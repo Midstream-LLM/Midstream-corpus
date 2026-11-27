@@ -7,6 +7,7 @@ import midstream_dedup
 from ..dedup import engine as dedup
 from ..store import textcodec
 from ..corpus import variants
+from . import keeper
 from .recipe import ExportError
 from ..corpus.query import where_clause
 
@@ -65,8 +66,8 @@ def plan(conn, recipe, kept):
         raise ExportError('段落查重快照已过期，请先运行 midstream dedup --spans')
     if recipe.variant and not variants.info()['length_preserving']:
         raise ExportError('转换不等长，不能复用段落裁剪偏移')
-    rank = {name: i for i,name in enumerate(recipe.selection.source_priority)}
-    ordered = sorted(kept, key=lambda x: (rank.get(x.source,len(rank)), x.quality!='ok',-x.char_count,x.doc_id))
+    key = keeper.sort_key({name: i for i,name in enumerate(recipe.selection.source_priority)})
+    ordered = sorted(kept, key=key)
     order = {item.version_id:i for i,item in enumerate(ordered)}
     by_doc = {item.doc_id:item for item in ordered}
     hashes = dict(conn.execute(

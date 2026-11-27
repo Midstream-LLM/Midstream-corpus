@@ -588,7 +588,7 @@ midstream dedup --spans
 }
 ```
 
-同一簇内的保留顺序是：来源优先级、质量为 `ok`、字数多、`doc_id` 小。只在通过 `filters` 的文档之间选择。划分仍按去重前的全部文档分组，被舍弃的文档不会让原本相连的文档落到不同划分。
+同一簇内的保留顺序（规则 `keeper-v2`）依次是：配方的 `source_priority`、质量为 `ok`、来源档次、缺字密度、字数多、`doc_id` 小。来源档次在 `src/midstream/data/quality/source_tiers.json`：1 校对整理本（维基文库、Kanripo 与 open-guji、CCC、chinese-poetry），2 来源不明的网络录入本（殆知阁、greathangpt、团队文本等），3 OCR；未列出的来源算 2 档。缺字密度是每万字里 □ 与 � 的个数，分四档（不到 1、不到 10、不到 100、其余），同档才比字数。缺字数预先统计在 `text_quality`，由 `midstream dedup` 增量补齐；统计不全时导出会报错。所用规则和档次表版本写进发布报告的 `keeper` 字段。只在通过 `filters` 的文档之间选择。划分仍按去重前的全部文档分组，被舍弃的文档不会让原本相连的文档落到不同划分。
 
 需要查重快照而快照落后于当前版本时会报错，先运行 `midstream dedup`；span 还需 `midstream dedup --spans`。舍弃篇数和字数写入发布记录，可用 release-stats 的 selection 字段查看。仅 span 模式裁剪段落重复，固定区间后再导出，不改库内原文。
 
@@ -797,7 +797,7 @@ midstream export /path/to/recipe.json
 
 配方 selection.dedup="span" 先文档级去重，再对保留文档裁剪；selection.min_cut_chars 默认 64，按实际原文区间的字符长度过滤。需要文档、段落快照都覆盖当前主线，先运行 dedup 和 dedup --spans。最短查重有效片段仍是比较表示的 64 字，调整 min_cut_chars 不会增加更短的重复证明。
 
-沿用来源优先级、质量、字数、doc_id 排序。高优先级文档先确定，低优先级只裁已有保留出处证明的片段；重叠区间合并，传递证明保留到已保留材料，避免中间文档因太短舍弃后所有副本消失。裁后按命中的 include/filters.min_chars 最小门槛检查；手动 add 保留其覆盖筛选语义，至少保留一个字符。裁掉空文档。
+沿用文档级去重的保留顺序（来源优先级、质量、来源档次、缺字密度、字数、doc_id）。高优先级文档先确定，低优先级只裁已有保留出处证明的片段；重叠区间合并，传递证明保留到已保留材料，避免中间文档因太短舍弃后所有副本消失。裁后按命中的 include/filters.min_chars 最小门槛检查；手动 add 保留其覆盖筛选语义，至少保留一个字符。裁掉空文档。
 
 dup_span 的 start_char/end_char 已是原文 Unicode 字符坐标，左闭右开；source_start_char 为出处起点，出处终点需要用同一 Rust 比较表示映射恢复，不能用两侧原文字数相加猜测。当前 simplified 转换逐字等长，可以组合选用；不等长的转换会报错。span 试算需要读取少量相关正文做偏移映射，不再保证纯元数据，其他试算仍保持只读元数据。
 

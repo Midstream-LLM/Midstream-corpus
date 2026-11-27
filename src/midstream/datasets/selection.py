@@ -5,6 +5,7 @@ from typing import NamedTuple
 import psycopg
 
 from ..corpus.query import where_clause
+from . import keeper
 from .recipe import ExportError, Recipe, Selection
 
 
@@ -18,6 +19,7 @@ class Candidate(NamedTuple):
     category: str | None
     year_from: int | None
     year_to: int | None
+    missing: int | None = None
 
 
 def _selection_where(recipe: Recipe):
@@ -47,12 +49,13 @@ def _select(conn: psycopg.Connection, recipe: Recipe) -> list[Candidate]:
     with conn.cursor(name='plan_candidates') as cursor:
         cursor.execute(
             f"""SELECT v.version_id, v.doc_id, v.text_hash, v.char_count, s.name, v.quality_status,
-                   v.category, lower(v.composed_years), upper(v.composed_years) - 1
+                   v.category, lower(v.composed_years), upper(v.composed_years) - 1, q.missing_chars
             FROM document_version v
             JOIN document d USING (doc_id)
             JOIN source s USING (source_id)
+            LEFT JOIN text_quality q ON q.text_hash = v.text_hash AND q.rule_version = %(missing_rule)s
             WHERE {where} ORDER BY v.version_id""",
-            params,
+            {**params, 'missing_rule': keeper.MISSING_RULE},
         )
         while rows := cursor.fetchmany(10000):
             selected.extend(Candidate(*row) for row in rows)
@@ -60,8 +63,8 @@ def _select(conn: psycopg.Connection, recipe: Recipe) -> list[Candidate]:
 
 
 def _drop_duplicates(conn, selection: Selection, selected: list[Candidate]) -> list[Candidate]:
-    """每个文档簇只留一篇：来源优先，其次质量为 ok、字数多，最后按 doc_id 固定。"""
-    rank = {name: index for index, name in enumerate(selection.source_priority)}
+    """每个文档簇只留一篇，排序见 keeper。"""
+    key = keeper.sort_key({name: index for index, name in enumerate(selection.source_priority)})
     by_document = {item.doc_id: item for item in selected}
     clusters: dict[int, list[Candidate]] = {}
     for cluster_id, doc_id in conn.execute(
@@ -74,14 +77,14 @@ def _drop_duplicates(conn, selection: Selection, selected: list[Candidate]) -> l
         clusters.setdefault(cluster_id, []).append(by_document[doc_id])
     dropped = set()
     for members in clusters.values():
-        keep = min(members, key=lambda item: (
-            rank.get(item.source, len(rank)), item.quality != "ok", -item.char_count, item.doc_id))
+        keep = min(members, key=key)
         dropped.update(item.version_id for item in members if item is not keep)
     return [item for item in selected if item.version_id not in dropped]
 
 
 def _variant_selection(conn, variant, selected):
     current = {item.doc_id: item.version_id for item in selected}
+    gaps = {item.doc_id: item.missing for item in selected}
     chosen, existing = {}, set()
     for row in conn.execute(
         'SELECT v.version_id,v.doc_id,v.text_hash,v.char_count,s.name,v.quality_status,v.category,'
@@ -90,7 +93,8 @@ def _variant_selection(conn, variant, selected):
         ' WHERE v.doc_id=ANY(%s) AND v.variant=%s', (list(current), variant)):
         existing.add(row[1])
         if row[-1] == current[row[1]]:
-            chosen[row[1]] = Candidate(*row[:-1])
+            # 派生版与原文缺字数相同，沿用原文的统计。
+            chosen[row[1]] = Candidate(*row[:-1], missing=gaps[row[1]])
     missing = set(current) - chosen.keys()
     if missing:
         absent = sorted(missing-existing)[:5]

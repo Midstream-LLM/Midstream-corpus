@@ -74,6 +74,7 @@ def conn():
         connection.execute(SCHEMA.with_name("0016_dedup_overrides.sql").read_text(encoding="utf-8"))
         connection.execute(SCHEMA.with_name("0017_backups.sql").read_text(encoding="utf-8"))
         connection.execute(SCHEMA.with_name("0018_curation.sql").read_text(encoding="utf-8"))
+        connection.execute(SCHEMA.with_name("0019_text_quality.sql").read_text(encoding="utf-8"))
         connection.commit()
         yield connection
 
@@ -1830,6 +1831,33 @@ def test_export_selection_keeps_one_per_cluster(conn, tmp_path):
         "selection-test-v1", None, lambda doc: reprocess.Change(text=text())))
     with pytest.raises(ExportError, match="已过期"):
         release("stale", {"dedup": "document"})
+
+
+def test_dedup_keeps_better_tier_and_fewer_missing_glyphs(conn, tmp_path):
+    """重复时先比来源档次，再比缺字密度，最后才比字数。"""
+    rng = random.Random(765)
+    alphabet = "天地玄黄宇宙洪荒日月盈昃辰宿列张寒来暑往秋收冬藏"
+    base = "".join(rng.choices(alphabet, k=1000))
+    holes = base[:500] + "□" * 3 + base[503:]
+    path = write(tmp_path / "keeper.jsonl", [
+        row("clean", base, chapter="甲书‧卷一", book="甲书"),
+        row("holes", holes + "！！", chapter="乙书‧卷一", book="乙书"),
+        row("ocr", base + "！！！！", chapter="丙书‧卷一", book="丙书"),
+    ])
+    ingest_inline(conn, "ccc_corpus", [path])
+    conn.execute("INSERT INTO source (name) VALUES ('dongfang_ocr') ON CONFLICT DO NOTHING")
+    docs = dict(conn.execute("SELECT source_key, doc_id FROM document"))
+    conn.execute("UPDATE document SET source_id = (SELECT source_id FROM source WHERE name = 'dongfang_ocr')"
+                 " WHERE doc_id = %s", (docs["ocr"],))
+    conn.commit()
+    release_id = create_release(conn, Recipe.load({
+        "name": "keeper", "seed": "s", "splits": {"train": 1.0}, "selection": {"dedup": "document"}}))
+    members = {doc for doc, in conn.execute(
+        "SELECT v.doc_id FROM dataset_member m JOIN document_version v USING (version_id)"
+        " WHERE m.release_id = %s", (release_id,))}
+    assert members == {docs["clean"]}
+    assert conn.execute("SELECT missing_chars FROM text_quality q JOIN document_version v USING (text_hash)"
+                        " WHERE v.doc_id = %s AND v.is_current", (docs["holes"],)).fetchone()[0] == 3
 
 
 def test_export_selection_splits_with_dropped_bridge(conn, tmp_path):

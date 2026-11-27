@@ -6,6 +6,7 @@ from dataclasses import dataclass, field
 import psycopg
 
 from ..dedup import engine as dedup
+from . import keeper
 from .recipe import ExportError, Recipe
 from .selection import _drop_duplicates, _select, _variant_selection
 from .split import _assign_splits, _check_training_history, _fraction, _group_keys, _reserved_docs
@@ -59,6 +60,8 @@ def plan_release(conn: psycopg.Connection, recipe: Recipe, *, estimate=None) -> 
     if recipe.selection.dedup != 'none' or conn.execute('SELECT EXISTS(SELECT 1 FROM dedup_override)').fetchone()[0]:
         if not dedup.document_snapshot_current(conn):
             raise ExportError('文档级查重结果已过期，请先运行 midstream dedup')
+        if any(item.missing is None for item in selected):
+            raise ExportError('部分正文还没有缺字统计，请先运行 midstream dedup')
     # 分组用去重前的全集：被舍弃的文档仍可能连接作品和重复簇。
     reserved = _reserved_docs(conn, recipe)
     groups = _group_keys(conn, list({item.doc_id for item in selected} | reserved.keys()))
@@ -94,7 +97,7 @@ def plan_release(conn: psycopg.Connection, recipe: Recipe, *, estimate=None) -> 
         if abs(ratio - recipe.splits.get(split, 0)) > .01:
             warnings.append(f'{split} 实际比例 {ratio:.2%}，与目标偏差超过 1 个百分点')
     plan = ReleasePlan(recipe, members, {
-        **selection_report, 'documents': len(kept), 'chars': chars, 'split_by': recipe.split_by,
+        **selection_report, 'keeper': keeper.describe(), 'documents': len(kept), 'chars': chars, 'split_by': recipe.split_by,
         'splits': splits, 'distributions': _distributions(kept, groups, assigned), 'warnings': warnings,
     }, cuts)
     if estimate is not None:
