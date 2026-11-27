@@ -184,11 +184,12 @@ def consistent_patch(current, patch):
     patch = dict(patch)
     basis = {**(current.get('field_basis') or {}), **patch.get('field_basis', {})}
     if 'contributors' in patch:
-        if not patch['contributors'] and patch.get('authors'):
-            patch['contributors'] = [{'name': name, 'role': 'author', 'entity_id': None}
-                                     for name in patch['authors']]
+        # 只列编者、译者等时，authors 补为作者角色，而不是判为不一致。
+        if patch.get('authors') and not any(p['role'] == 'author' for p in patch['contributors']):
+            patch['contributors'] = patch['contributors'] + [{'name': name, 'role': 'author', 'entity_id': None}
+                                                             for name in patch['authors']]
         authors = [p['name'] for p in patch['contributors'] if p['role'] == 'author'] or None
-        if 'authors' in patch and patch['authors'] != authors:
+        if 'authors' in patch and (patch['authors'] or None) != authors:
             raise ValueError('authors 与 contributors 中的 author 角色不一致')
         patch['authors'] = authors
         if 'contributors' in basis:

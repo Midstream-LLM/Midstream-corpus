@@ -33,7 +33,8 @@ class CurateParams(Params):
     batch_id: int | None = Field(default=None, gt=0)
     filters: dict = Field(default_factory=dict)
     doc_ids: list[int] | None = Field(default=None, min_length=1, max_length=1000)
-    limit: int = Field(default=100, ge=1, le=1000)
+    # 默认：给了 doc_ids 时全部处理，否则 100 条。
+    limit: int | None = Field(default=None, ge=1, le=1000)
     resume_run_id: int | None = Field(default=None, gt=0)
     resume_options: ResumeOptions | None = None
     config: CurationConfig = Field(default_factory=CurationConfig)

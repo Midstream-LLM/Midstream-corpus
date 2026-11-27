@@ -182,8 +182,12 @@ def test_role_projection_preserves_entities_and_rejects_conflicts():
     result=consistent_patch(before,{'authors':['甲','乙']})
     assert result['contributors'][0]['entity_id']=='wikidata:Q42'
     assert 'authors' not in result['field_claims']
+    merged=consistent_patch(before,{'authors':['甲'],'contributors':[{'name':'乙','role':'compiler','entity_id':None}]})
+    assert [(p['name'],p['role']) for p in merged['contributors']]==[('乙','compiler'),('甲','author')]
+    cleared=consistent_patch(before,{'authors':[]})
+    assert consistent_patch(before,cleared)['authors'] is None
     with pytest.raises(ValueError):
-        consistent_patch(before,{'authors':['甲'],'contributors':[{'name':'乙','role':'compiler'}]})
+        consistent_patch(before,{'authors':['甲'],'contributors':[{'name':'乙','role':'author','entity_id':None}]})
 
 
 def test_export_preserves_nested_types(tmp_path):
@@ -223,17 +227,24 @@ def test_facts_need_outside_evidence_and_retrieved_ids():
         assert decide([claim],{},[corpus,wiki],CurationConfig())==[expected], claim.field
 
 
-def test_segments_must_match_text_and_tags_are_merged():
-    text='甲詩一首。乙詩二首。'
-    seg=lambda start,anchor:{'kind':'segment','field':'segments','evidence_keys':['e1'],'confidence':0.9,'rationale':'篇題',
-                             'value':{'start_char':start,'end_char':start+5,'start_text':anchor,'title':None,'unit_type':'poem'}}
+def test_patches_and_segments_are_located_by_quoted_text_and_tags_are_merged():
+    text='甲詩一首。乙詩二首。丙詩一首。'
+    seg=lambda head,tail,hint:{'kind':'segment','field':'segments','evidence_keys':['e1'],'confidence':0.9,'rationale':'篇題',
+                               'value':{'start_text':head,'end_text':tail,'start_char':hint,'end_char':hint+5,'title':None,'unit_type':'poem'}}
+    patch=lambda anchor,before,hint:{'kind':'text_patch','field':'text','evidence_keys':['e1'],'confidence':0.9,'rationale':'改字',
+                                     'value':{'anchor':anchor,'before':before,'after':'二','start_char':hint}}
     tag=lambda tid,tax:{'kind':'metadata','field':'tags','value':[{'taxonomy':tax,'tag_id':tid}],'evidence_keys':['e0'],
                         'confidence':0.9,'rationale':tax}
     fake=FakeServices([{'action':'finish','claims':[tag('yunwen.shi','genre'),tag('nature','topic')]},
-                       {'action':'finish','claims':[seg(5,'乙詩'),seg(0,'丙丁')]}])
-    result=analyze({},text,CurationConfig(use_authorities=False,steps=['tagging','segmentation']),fake,FakeRetrieval())
-    segments=[c for c in result.claims if c.field=='segments']
-    assert [s.value['start_char'] for s in segments]==[5] and len(result.rejected)==1
+                       # 位置报错但原文对的照样定位；重复出现的“一首”取离提示最近的一处；照抄不存在的原文丢弃。
+                       {'action':'finish','claims':[seg('乙詩','二首。',1),seg('丙丁','一首。',0),
+                                                    patch('一首','一',12),patch('戊詩','戊',0)]}])
+    config=CurationConfig(use_authorities=False,steps=['tagging','text_cleanup','segmentation'])
+    result=analyze({},text,config,fake,FakeRetrieval())
+    segments=[c.value for c in result.claims if c.field=='segments']
+    assert [(s['start_char'],s['end_char']) for s in segments]==[(5,10)]
+    patches=[c.value for c in result.claims if c.field=='text']
+    assert patches==[{'start_char':12,'end_char':13,'before':'一','after':'二'}] and len(result.rejected)==2
     tags=[c for c in result.claims if c.field=='tags']
     assert len(tags)==1 and {t['tag_id'] for t in tags[0].value}=={'yunwen.shi','nature'}
 
@@ -263,3 +274,27 @@ def test_over_budget_request_gets_one_forced_finish_and_trailing_json_is_ignored
     from midstream.curation.research import parse
     parsed,_=parse('{"action":"finish","query":"","claims":[],"summary":"甲"}\n\n{"action":"finish"}')
     assert parsed.summary=='甲'
+
+
+def test_failed_lookup_degrades_to_no_evidence():
+    from midstream.llm.errors import LLMError
+    class Down(FakeRetrieval):
+        def lookup(self,action,query):
+            self.calls.append((action,query)); raise LLMError('retrieval_failed','Wikidata 返回查询错误')
+    fake=FakeServices([{'action':'wikidata','query':'甲'},
+                       {'action':'finish','claims':[{'kind':'metadata','field':'tags','evidence_keys':['e0'],'confidence':0.9,
+                                                     'rationale':'体裁','value':[{'taxonomy':'genre','tag_id':'yunwen.shi'}]}]}])
+    result=analyze({'title':'甲'},'床前明月光',CurationConfig(use_search=False,steps=['tagging']),fake,Down())
+    assert [c.field for c in result.claims]==['tags'] and '预查询失败' in result.summary
+
+
+def test_tags_merge_by_taxonomy_without_replacing_existing():
+    from midstream.curation.policy import merge_existing_tags
+    old=[{'taxonomy':'era','tag_id':'suitang.tang'}]
+    claim=Claim(field='tags',value=[{'taxonomy':'era','tag_id':'song'},{'taxonomy':'genre','tag_id':'yunwen.shi'}],
+                confidence=0.95,rationale='体裁',evidence_keys=['e0'])
+    merged=merge_existing_tags([claim],{'tags':old},overwrite=False)[0]
+    assert merged.value==old+[{'taxonomy':'genre','tag_id':'yunwen.shi'}] and 'era=song' in merged.rationale
+    assert decide([merged],{'tags':old},[Evidence(key='e0',provider='corpus',reference='input')],
+                  CurationConfig(steps=['tagging']))==['applied']
+    assert merge_existing_tags([claim],{'tags':old},overwrite=True)[0].value==claim.value

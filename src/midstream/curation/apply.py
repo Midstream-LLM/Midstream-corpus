@@ -11,7 +11,7 @@ from .repository import fingerprint
 from .tracking import record_operation
 
 
-def load_target(conn, item, *, lock=False):
+def load_target(conn, item, *, lock=False, require_current=True):
     if item['record_id'] is not None:
         row = conn.execute("SELECT sc.metadata,coalesce(sc.content,st.content),encode(sc.text_hash,'hex'),"
             "r.source_key,r.batch_id,b.status,s.name FROM source_record r JOIN source_batch b USING(batch_id) JOIN source s USING(source_id)"
@@ -25,7 +25,7 @@ def load_target(conn, item, *, lock=False):
     row = conn.execute('SELECT to_jsonb(v),b.content,encode(v.text_hash,\'hex\')'
         ' FROM document_version v JOIN text_blob b USING(text_hash) WHERE v.version_id=%s' +
         (' FOR UPDATE OF v' if lock else ''), (item['base_version_id'],)).fetchone()
-    if not row or not row[0]['is_current']:
+    if not row or (require_current and not row[0]['is_current']):
         raise ManagementError('conflict', '当前版本已改变；已有结果保留，请重新选择该文档处理')
     identity = conn.execute('SELECT s.name,d.source_key FROM document d JOIN source s USING(source_id) WHERE doc_id=%s', (item['doc_id'],)).fetchone()
     works = conn.execute("SELECT w.work_id,w.canonical_title,dw.relation FROM document_work dw JOIN work w USING(work_id)"
@@ -62,11 +62,19 @@ def apply_item(conn, item_id, config):
     if batch:
         conn.execute('SELECT pg_advisory_xact_lock(%s)', (batch[0],))
     item = conn.execute('SELECT to_jsonb(i) FROM curation_item i WHERE item_id=%s FOR UPDATE', (item_id,)).fetchone()[0]
-    if item['status'] == 'applied':
-        return item.get('result_version_id')
-    if item['status'] != 'proposed':
+    # 已应用后又有人工确认的扣下候选时，从原输入重算全部已接受候选，写在本次结果版本之后。
+    reapply = item['status'] == 'applied'
+    if reapply:
+        pending = conn.execute("SELECT 1 FROM curation_claim WHERE item_id=%s AND application_status='withheld'"
+                               " AND review_outcome='confirmed' LIMIT 1", (item_id,)).fetchone()
+        if not pending or item['record_id'] is not None or item['result_version_id'] is None:
+            return item.get('result_version_id')
+        load_target(conn, {**item, 'base_version_id': item['result_version_id']}, lock=True)
+        target = load_target(conn, item, require_current=False)
+    elif item['status'] != 'proposed':
         raise ManagementError('conflict', '工作项尚无完整可应用结果')
-    target = load_target(conn, item, lock=True)
+    else:
+        target = load_target(conn, item, lock=True)
     current = target['metadata']
     if fingerprint(current, target['text_hash']) != item['input_hash']:
         raise ManagementError('conflict', '输入已改变；候选结果未覆盖新内容')
@@ -74,7 +82,9 @@ def apply_item(conn, item_id, config):
                          ' FROM curation_claim WHERE item_id=%s ORDER BY claim_id FOR UPDATE', (item_id,)).fetchall()
     patch, edits, segments, accepted, field_claims = {}, [], [], [], {}
     for cid, kind, field, value, confidence, rationale, status, review in rows:
-        if status != 'proposed' or review == 'rejected':
+        # 人工确认解除策略扣留；否决的候选一律不用。
+        if status not in ('proposed', 'applied', 'withheld') or review == 'rejected' or (
+                status == 'withheld' and review != 'confirmed'):
             continue
         claim = Claim(kind=kind, field=field, value=value, confidence=confidence, rationale=rationale)
         accepted.append(cid)
@@ -127,13 +137,14 @@ def apply_item(conn, item_id, config):
     else:
         digest = store_blob(conn, text) if edits else None
         db_patch = database_patch(patch)
-        if digest is None and not output_segments and all(value == current.get(key) for key,value in db_patch.items()):
+        if not reapply and digest is None and not output_segments and all(value == current.get(key) for key,value in db_patch.items()):
             version_id = item['base_version_id']
         else:
-            _write_versions(conn, item['run_id'], [(item['doc_id'], item['base_version_id'], digest, db_patch)])
+            parent = item['result_version_id'] if reapply else item['base_version_id']
+            _write_versions(conn, item['run_id'], [(item['doc_id'], parent, digest, db_patch)])
             version_id = conn.execute('SELECT version_id FROM document_version WHERE doc_id=%s AND is_current',
                                       (item['doc_id'],)).fetchone()[0]
-        if output_segments:
+        if output_segments or edits:
             conn.execute('DELETE FROM document_segment WHERE version_id=%s',(version_id,))
         save_segments(conn, version_id, output_segments)
     conn.execute("UPDATE curation_claim SET application_status='applied' WHERE claim_id=ANY(%s)", (accepted,))

@@ -17,9 +17,11 @@ search 用于广泛网页搜索；fetch 只允许读取已得到的网页链接�
 体裁/主题/语体可以引用本段正文；作者/年代等事实必须由书目或明确的正文署名支持。
 重复网页转载不算独立证据。不把命中同名作品当作确认身份。
 只返回请求步骤对应的候选；无需改动时 claims 为空。不改写生僻字、异体字或历史表达。
-文本修复 kind=text_patch,field=text,value={start_char,end_char,before,after}。
-篇章边界 kind=segment,field=segments,value={start_char,end_char,start_text,title,unit_type}，start_text 是从 start_char 起逐字照抄的原文 2–20 字；只有一篇时不要给篇章边界。
-位置均是当前给定正文的 Unicode 码点索引，从零开始、左闭右开，before 必须逐字匹配。
+文本修复 kind=text_patch,field=text,value={anchor,before,after,start_char}：anchor 是逐字照抄、包含 before 的原文 6–40 字，
+在本段里尽量唯一；before 是 anchor 里要替换的部分，after 是替换后的文字。
+篇章边界 kind=segment,field=segments,value={start_text,end_text,title,unit_type,start_char,end_char}：start_text 是篇章开头逐字照抄的原文 2–20 字，
+end_text 是篇章最后 2–20 字；只有一篇时不要给篇章边界。
+程序按照抄的原文定位；start_char/end_char 只是大致位置（当前给定正文的 Unicode 码点索引），用于原文重复出现时取最近的一处。
 本段可能只是长作品的一部分；不把切块边界自动认定为篇章边界，只提议完整篇章。
 每次最多 40 条候选。所有标签合并在一条 field=tags 的候选里。
 元数据 kind=metadata，field/value 按契约。时代、体裁、部类、地域、语体、主题一律写成
@@ -71,11 +73,49 @@ BATCH_SCHEMA = _strict(BatchResponse.model_json_schema())
 BATCH_SCHEMA['$defs']['BatchClaim']['properties']['field'] = SCHEMA['$defs']['Claim']['properties']['field']
 BATCH_PROMPT = _static(SYSTEM + """
 本次输入 records 含多条互不相关的短记录，逐条独立处理。每条候选用 record 写明所属记录编号，
-只引用该记录自己的 evidence_key 或检索得到的证据；字符位置以该记录正文为准。每次最多 200 条候选。""", BATCH_SCHEMA)
+只引用该记录自己的 evidence_key 或检索得到的证据；照抄的原文和大致位置都以该记录正文为准。每次最多 200 条候选。""", BATCH_SCHEMA)
 
 
-def parse(text, response=ResearchResponse, claim=Claim):
-    """整体结构必须合格；单条候选不合格时丢弃并记下原因，不连累同一次输出里的其他候选。"""
+def _nearest(text, needle, hint, start=0):
+    """needle 在 text[start:] 中的位置；多处出现时取离 hint 最近的一处，没有 hint 时要求唯一。"""
+    found, i = [], text.find(needle, start)
+    while i >= 0:
+        found.append(i)
+        i = text.find(needle, i + 1)
+    if not found:
+        raise ValueError('照抄的原文在正文中找不到')
+    if len(found) > 1 and not isinstance(hint, int):
+        raise ValueError('照抄的原文多次出现，且没有给大致位置')
+    return min(found, key=lambda pos: abs(pos - hint)) if len(found) > 1 else found[0]
+
+
+def locate(kind, value, text):
+    """把模型照抄的原文换成码点区间；模型报的位置只用来在重复处挑最近的一处。"""
+    if not isinstance(value, dict):
+        raise ValueError('补丁或篇章的 value 必须是对象')
+    hint = value.get('start_char')
+    if kind == 'text_patch':
+        before = value.get('before')
+        anchor = value.get('anchor') or before
+        if not isinstance(before, str) or not before or not isinstance(anchor, str) or before not in anchor:
+            raise ValueError('anchor 必须逐字包含 before')
+        lead = anchor.index(before)
+        start = _nearest(text, anchor, hint - lead if isinstance(hint, int) else None) + lead
+        return {'start_char': start, 'end_char': start + len(before), 'before': before, 'after': value.get('after')}
+    head, tail = value.get('start_text'), value.get('end_text')
+    if not isinstance(head, str) or not head or not isinstance(tail, str) or not tail:
+        raise ValueError('篇章须给 start_text 和 end_text')
+    start = _nearest(text, head, hint)
+    end_hint = value.get('end_char')
+    end = _nearest(text, tail, end_hint - len(tail) if isinstance(end_hint, int) else None, start + 1) + len(tail)
+    return {'start_char': start, 'end_char': end, 'start_text': head,
+            'title': value.get('title'), 'unit_type': value.get('unit_type')}
+
+
+def parse(text, response=ResearchResponse, claim=Claim, source=None):
+    """整体结构必须合格；单条候选不合格时丢弃并记下原因，不连累同一次输出里的其他候选。
+
+    source(item) 返回补丁和篇章所在的正文，用来把照抄的原文定位成码点区间。"""
     # JSON 模式只保证语法；模型偶尔在完整答案后再接一段，只取第一个完整对象。
     data, _ = json.JSONDecoder().raw_decode(text.strip())
     raw = data.pop('claims', []) if isinstance(data, dict) else []
@@ -83,6 +123,8 @@ def parse(text, response=ResearchResponse, claim=Claim):
     claims, rejected = [], []
     for item in raw if isinstance(raw, list) else []:
         try:
+            if source and isinstance(item, dict) and item.get('kind') in ('text_patch', 'segment'):
+                item = {**item, 'value': locate(item['kind'], item.get('value'), source(item))}
             claims.append(claim.model_validate(item))
         except ValueError as exc:
             field = item.get('field') if isinstance(item, dict) else None
@@ -102,6 +144,16 @@ def merge_tags(claims):
                    rationale='；'.join(c.rationale for c in tags)[:3000])
     rest = [c for c in claims if c not in tags]
     return rest + [merged]
+
+
+def _lookup(retrieval, action, query):
+    """外部检索失败不让整条作废：返回空结果和原因，由模型改用已有证据。"""
+    try:
+        return retrieval.lookup(action, query), None
+    except LLMError as exc:
+        if exc.code != 'retrieval_failed':
+            raise
+        return [], str(exc)
 
 
 def window(text, size):
@@ -153,7 +205,7 @@ def analyze(metadata, text, config, services, retrieval):
             if response.finish_reason not in ('stop', 'end_turn', 'completed'):
                 raise LLMError('invalid_curation_result', '模型未完整返回整理结果')
             try:
-                parsed, rejected = parse(response.text)
+                parsed, rejected = parse(response.text, source=lambda item: chunk)
             except ValueError as exc:
                 raise LLMError('invalid_curation_result', '模型输出未通过结构校验') from exc
             result.rejected.extend(rejected)
@@ -167,11 +219,6 @@ def analyze(metadata, text, config, services, retrieval):
                         continue
                     if claim.kind != 'metadata':
                         value = claim.value
-                        if value['end_char'] > len(chunk) or (
-                                claim.kind == 'text_patch' and chunk[value['start_char']:value['end_char']] != value['before']) or (
-                                claim.kind == 'segment' and not chunk.startswith(value['start_text'], value['start_char'])):
-                            result.rejected.append(f'{claim.field}: 字符位置与原文不符')
-                            continue
                         if claim.kind == 'segment' and value['start_char'] == 0 and value['end_char'] >= len(text):
                             result.rejected.append(f'{claim.field}: 只覆盖全文，不是切分')
                             continue
@@ -193,9 +240,9 @@ def analyze(metadata, text, config, services, retrieval):
             if action == 'fetch' and query not in {e.reference for e in evidence}:
                 raise LLMError('invalid_evidence', '只能读取检索结果中已出现的网页链接')
             result.tool_calls += 1
-            items = retrieval.lookup(action, query)
+            items, error = _lookup(retrieval, action, query)
             add_evidence(items)
-            history.append({'action': action, 'query': query, 'results': len(items)})
+            history.append({'action': action, 'query': query, 'results': f'检索失败：{error}' if error else len(items)})
 
     research_steps = [s for s in config.steps if s in RESEARCH_STEPS]
     if research_steps:
@@ -207,8 +254,11 @@ def analyze(metadata, text, config, services, retrieval):
         first = ('gutenberg', identifiers['gutenberg']) if identifiers.get('gutenberg') else (
             'wikidata', identifiers.get('wikidata') or (title[:200] if title else ''))
         if config.use_authorities and config.max_tool_calls and first[1]:
-            add_evidence(retrieval.lookup(*first))
             result.tool_calls += 1
+            items, error = _lookup(retrieval, *first)
+            add_evidence(items)
+            if error:
+                result.summary += f'{first[0]} 预查询失败，未作证据：{error}\n'
         sample, _ = window(text, config.context_chars)
         # 片段拼接后位置不对应原文，所以这一轮只接受元数据结论。
         loop(research_steps, sample, 0, {('metadata', s) for s in research_steps}, tools=True)
@@ -262,11 +312,14 @@ def analyze_batch(records, config, services, retrieval):
         if response.finish_reason not in ('stop', 'end_turn', 'completed'):
             raise LLMError('invalid_curation_result', '模型未完整返回整理结果')
         try:
-            parsed, rejected = parse(response.text, BatchResponse, BatchClaim)
+            parsed, rejected = parse(
+                response.text, BatchResponse, BatchClaim,
+                source=lambda item: records[item['record']]['text']
+                if isinstance(item.get('record'), int) and 0 <= item['record'] < len(records) else '')
         except ValueError as exc:
             raise LLMError('invalid_curation_result', '模型输出未通过结构校验') from exc
         if rejected:
-            summary += f'整批丢弃 {len(rejected)} 条无法归属的候选：' + '；'.join(rejected[:5]) + '\n'
+            summary += f'整批丢弃 {len(rejected)} 条不合格或无法归属的候选：' + '；'.join(rejected[:5]) + '\n'
         if parsed.action == 'finish':
             break
         action, query = parsed.action, parsed.query
@@ -280,10 +333,10 @@ def analyze_batch(records, config, services, retrieval):
         if action == 'fetch' and query not in {e.reference for e in evidence}:
             raise LLMError('invalid_evidence', '只能读取检索结果中已出现的网页链接')
         tool_calls += 1
-        items = retrieval.lookup(action, query)
+        items, error = _lookup(retrieval, action, query)
         for item in items:
             evidence.append(item.model_copy(update={'key': f'e{len(evidence)}'}))
-        history.append({'action': action, 'query': query, 'results': len(items)})
+        history.append({'action': action, 'query': query, 'results': f'检索失败：{error}' if error else len(items)})
     outside = [e for e in evidence if e.provider != 'corpus']
     for claim in parsed.claims:
         if claim.record >= len(records):
@@ -294,10 +347,6 @@ def analyze_batch(records, config, services, retrieval):
             result.rejected.append(f'{plain.field}: 引用了不存在或不属于本条的证据')
         elif (plain.kind, step_for(plain)) not in kinds:
             result.rejected.append(f'{plain.field}: 本轮未请求此类结果')
-        elif plain.kind != 'metadata' and (plain.value['end_char'] > len(text) or (
-                plain.kind == 'text_patch' and text[plain.value['start_char']:plain.value['end_char']] != plain.value['before']) or (
-                plain.kind == 'segment' and not text.startswith(plain.value['start_text'], plain.value['start_char']))):
-            result.rejected.append(f'{plain.field}: 字符位置与原文不符')
         elif plain.kind == 'segment' and plain.value['start_char'] == 0 and plain.value['end_char'] >= len(text):
             result.rejected.append(f'{plain.field}: 只覆盖全文，不是切分')
         else:

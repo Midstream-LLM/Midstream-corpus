@@ -12,13 +12,15 @@ from .retrieval import Retrieval
 from .research import analyze, analyze_batch
 from .repository import fingerprint, save_result
 from .apply import load_target, apply_item
-from .policy import decide
+from .policy import decide, merge_existing_tags
 
 
 def run(conn, *, actor, reason, config=None, batch_id=None, filters=None, doc_ids=None,
-        limit=100, resume_run_id=None, resume_options=None, progress=None, services=None, retrieval=None):
+        limit=None, resume_run_id=None, resume_options=None, progress=None, services=None, retrieval=None):
     _identity(actor, reason)
     config = config or CurationConfig()
+    if limit is None:
+        limit = len(doc_ids) if doc_ids else 100
     if batch_id is not None:
         conn.execute('SELECT pg_advisory_lock(%s)', (batch_id,))
     try:
@@ -119,13 +121,18 @@ def _run(conn, *, actor, reason, config, batch_id, filters, doc_ids, limit,
                 code = getattr(exc, 'code', 'invalid_result')
                 status = 'conflict' if code == 'conflict' else 'failed'
                 # Retain proposed results on application errors for explicit retry.
+                error = (getattr(exc, 'response', None) or {}).get('error') or {}
+                message = f"{exc}: {error['message']}" if error.get('message') else str(exc)
                 conn.execute("UPDATE curation_item SET status=CASE WHEN status='proposed' AND %s<>'conflict'"
-                             " THEN status ELSE %s END,error_code=%s WHERE item_id=%s", (status, status, code, item_id))
+                             " THEN status ELSE %s END,error_code=%s,"
+                             "summary=CASE WHEN status='proposed' THEN summary ELSE %s END WHERE item_id=%s",
+                             (status, status, code, message[:1000], item_id))
                 conn.commit()
 
             def finish(item_id, target, result):
                 try:
                     if result is not None:
+                        result.claims = merge_existing_tags(result.claims, target['metadata'], config.overwrite)
                         save_result(conn, item_id, result, decide(result.claims, target['metadata'], result.evidence, config))
                         conn.commit()
                     if config.apply:

@@ -52,6 +52,24 @@ def test_auto_apply_review_and_rollback_are_independent(conn):
     assert conn.execute('SELECT count(*) FROM document_version WHERE doc_id=%s',(doc,)).fetchone()[0]==3
 
 
+def test_confirmed_withheld_claims_apply_on_top_and_rollback_restores_input(conn):
+    doc,old=seed(conn)
+    patch={'kind':'text_patch','field':'text','value':{'anchor':'春眠','before':'眠','after':'睡'},
+           'confidence':0.95,'rationale':'校勘','evidence_keys':['e0']}
+    run(conn,services=FakeServices([{'action':'finish','claims':[candidate().model_dump()]},{'action':'finish','claims':[patch]}]))
+    item,first=conn.execute("SELECT item_id,result_version_id FROM curation_item").fetchone()
+    cid=conn.execute("SELECT claim_id FROM curation_claim WHERE kind='text_patch' AND application_status='withheld'").fetchone()[0]
+    assert apply_item(conn,item,CurationConfig())==first
+    repository.review(conn,cid,'confirmed','reviewer','checked scan')
+    second=apply_item(conn,item,CurationConfig());conn.commit()
+    current=query.metadata(conn,doc)
+    assert second!=first and current['version_id']==second and current['composed_label']=='明'
+    assert query.get_text(conn,doc)['text']=='春睡不觉晓。'
+    assert conn.execute("SELECT count(*) FROM curation_claim WHERE application_status='applied'").fetchone()[0]==2
+    rollback_item(conn,item,'test','restore original')
+    assert query.get_text(conn,doc)['text']=='春眠不觉晓。' and query.metadata(conn,doc)['composed_label'] is None
+
+
 def test_empty_result_is_completed_and_manual_edit_inherits_marks(conn):
     doc,old=seed(conn)
     run(conn,services=FakeServices([{'action':'finish'}]))

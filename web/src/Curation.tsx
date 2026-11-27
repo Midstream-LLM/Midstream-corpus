@@ -75,9 +75,11 @@ export function CurationItem({id,onChanged}:{id:number;onChanged?:()=>void}) {
     <p>原版本 {data.data.base_version_id || '暂存'} → 结果版本 {data.data.result_version_id || '待发布/应用'}</p>
     <div className="edit-grid"><label>审核操作人（可选操作）<input value={actor} onChange={e=>setActor(e.target.value)}/></label>
       <label>备注<input value={reason} onChange={e=>setReason(e.target.value)}/></label></div>
-    {data.data.status==='proposed' && <button disabled={busy || !actor.trim()} onClick={apply}>应用符合策略的候选</button>}
+    {data.data.status==='proposed' && <button disabled={busy || !actor.trim()} onClick={apply}>应用符合策略和已确认的候选</button>}
+    {data.data.status==='applied' && data.data.result_version_id && data.data.claims.some(c=>c.application_status==='withheld' && c.review_outcome==='confirmed') &&
+      <button disabled={busy || !actor.trim()} onClick={apply}>补充应用已确认的保留候选</button>}
     {data.data.status==='applied' && data.data.result_version_id && <button disabled={busy || !actor.trim()} onClick={rollback}>撤销本次整理，生成恢复版本</button>}
-    <p className="muted">审核记录与应用状态独立。撤销会恢复本次整理前的文本、元数据和处理标记；已有后续修订时，请在文档中修正具体字段。</p>
+    <p className="muted">人工确认的候选不受策略扣留，否决的不应用。撤销会恢复本次整理前的文本、元数据和处理标记；已有后续修订时，请在文档中修正具体字段。</p>
     {data.data.claims.map(c=><article className="change-preview" key={c.claim_id}>
       <strong>{c.field} · {statusLabels[c.application_status]} · {Math.round(c.confidence*100)}% 模型自评</strong>
       <pre>{show(c.value)}</pre><p>{c.rationale}</p><p>{c.human_reviewed ? `${c.review_outcome==='confirmed'?'已确认':'已否决'} · ${c.reviewed_by}` : '未经人工审核'}</p>

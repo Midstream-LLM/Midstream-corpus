@@ -5,7 +5,7 @@ from ..corpus.metadata import Model, Metadata
 
 
 from ..corpus.taxonomy import TAXONOMY, TAXONOMY_VERSION
-CURATION_VERSION = 'curation-v1'
+CURATION_VERSION = 'curation-v2'
 FIELDS = {'title', 'authors', 'contributors', 'composed_years', 'composed_label',
           'edition_years', 'genre', 'category', 'topics', 'tags', 'tune_pattern', 'quality_flags', 'external_ids'}
 

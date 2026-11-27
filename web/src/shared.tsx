@@ -14,11 +14,19 @@ export const batchLabels: Record<string, string> = {
   abandoned: "已放弃",
 };
 export const count = (n: number = 0) => Number(n).toLocaleString("zh-CN");
+// 数组里的标签显示为“类别:编号”，责任者显示为“姓名（角色）”，其他对象原样转成 JSON。
+const showItem = (v: unknown): string => {
+  if (v === null || typeof v !== "object") return String(v);
+  const o = v as Record<string, unknown>;
+  if (typeof o.taxonomy === "string" && typeof o.tag_id === "string") return `${o.taxonomy}:${o.tag_id}`;
+  if (typeof o.name === "string") return o.role ? `${o.name}（${o.role}）` : o.name;
+  return JSON.stringify(v);
+};
 export const show = (v: unknown): string =>
   v === null || v === undefined || v === ""
     ? "未记录"
     : Array.isArray(v)
-      ? v.join("、") || "未记录"
+      ? v.map(showItem).join("、") || "未记录"
       : typeof v === "object"
         ? JSON.stringify(v, null, 2)
         : String(v);
