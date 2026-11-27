@@ -75,6 +75,7 @@ def conn():
         connection.execute(SCHEMA.with_name("0017_backups.sql").read_text(encoding="utf-8"))
         connection.execute(SCHEMA.with_name("0018_curation.sql").read_text(encoding="utf-8"))
         connection.execute(SCHEMA.with_name("0019_text_quality.sql").read_text(encoding="utf-8"))
+        connection.execute(SCHEMA.with_name("0020_text_script.sql").read_text(encoding="utf-8"))
         connection.commit()
         yield connection
 
@@ -1858,6 +1859,40 @@ def test_dedup_keeps_better_tier_and_fewer_missing_glyphs(conn, tmp_path):
     assert members == {docs["clean"]}
     assert conn.execute("SELECT missing_chars FROM text_quality q JOIN document_version v USING (text_hash)"
                         " WHERE v.doc_id = %s AND v.is_current", (docs["holes"],)).fetchone()[0] == 3
+
+
+def test_dedup_keeps_traditional_and_simplified_copies(conn, tmp_path):
+    from midstream.corpus import variants
+    rng = random.Random(811)
+    trad = "".join(rng.choices("齊歡體國學書雲風龍門馬", k=1000))
+    simp = variants.simplify(trad)
+    path = write(tmp_path / "scripts.jsonl", [
+        row("hant", trad, chapter="甲书‧卷一", book="甲书"),
+        row("hans", simp, chapter="乙书‧卷一", book="乙书"),
+        row("hans2", simp + "！", chapter="丙书‧卷一", book="丙书"),
+    ])
+    ingest_inline(conn, "ccc_corpus", [path])
+    versions = dict(conn.execute("SELECT v.version_id, d.source_key FROM document_version v JOIN document d USING (doc_id)"))
+
+    def kept(selection):
+        plan = plan_release(conn, Recipe.load({"name": "scripts", "seed": "s", "splits": {"train": 1.0}, "selection": selection}))
+        return sorted(versions[member[1]] for member in plan.members), plan
+
+    names, plan = kept({"dedup": "document"})
+    assert len(names) == 2 and "hant" in names and plan.report["scripts"]["mode"] == "separate"
+    assert kept({"dedup": "document", "scripts": "merge"})[0] in (["hant"], ["hans"], ["hans2"])
+    names, plan = kept({"dedup": "span"})
+    assert len(names) == 2 and "hant" in names and not plan.cuts
+    assert len(kept({"dedup": "span", "scripts": "merge"})[0]) == 1
+    only = plan_release(conn, Recipe.load({"name": "hant", "seed": "s", "splits": {"train": 1.0},
+                                           "filters": {"scripts": ["hant"]}}))
+    assert [versions[member[1]] for member in only.members] == ["hant"]
+    # 简体原文转换不变，不建派生版；转简体的配方直接用原文。
+    assert reprocess.reprocess(conn, RULES["t2s-v1"], dry_run=False)["changed"] == 1
+    assert conn.execute("SELECT count(*) FROM document_version WHERE variant IS NOT NULL").fetchone()[0] == 1
+    simplified = plan_release(conn, Recipe.load({"name": "t2s", "seed": "s", "splits": {"train": 1.0},
+                                                 "variant": "simplified"}))
+    assert len(simplified.members) == 3
 
 
 def test_export_selection_splits_with_dropped_bridge(conn, tmp_path):

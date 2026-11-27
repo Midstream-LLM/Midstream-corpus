@@ -73,9 +73,13 @@ def plan(conn, recipe, kept):
     hashes = dict(conn.execute(
         'SELECT v.doc_id,f.compare_hash FROM document_version v JOIN text_fingerprint f USING(text_hash)'
         ' WHERE v.is_current AND v.doc_id=ANY(%s) AND f.rule_version=%s', (list(by_doc),dedup.RULE_VERSION)))
+    # 比较表示不分繁简；scripts=separate 时只在同一字形的保留文档之间裁剪，繁体本和简体本各留一份。
+    separate = recipe.selection.scripts == 'separate'
     canonical={}
     for item in ordered:
-        canonical.setdefault(hashes[item.doc_id],item)
+        canonical.setdefault((hashes[item.doc_id], item.script if separate else None),item)
+    scripts = {s for _, s in canonical}
+    compare_hashes = list({h for h, _ in canonical})
     denied=set(conn.execute('SELECT left_doc_id,right_doc_id FROM dedup_override').fetchall())
 
     @lru_cache(maxsize=8)
@@ -95,27 +99,29 @@ def plan(conn, recipe, kept):
             ' JOIN text_fingerprint a ON a.text_hash=va.text_hash AND a.rule_version=%s'
             ' JOIN text_fingerprint b ON b.text_hash=vb.text_hash AND b.rule_version=%s'
             ' WHERE a.compare_hash=ANY(%s) AND b.compare_hash=ANY(%s)'
-            ' ORDER BY d.version_id,d.start_char', (dedup.RULE_VERSION,dedup.RULE_VERSION,list(canonical),list(canonical)))
+            ' ORDER BY d.version_id,d.start_char', (dedup.RULE_VERSION,dedup.RULE_VERSION,compare_hashes,compare_hashes))
         cursor.itersize=128
         for target,start,end,source,source_start,left_hash,right_hash in cursor:
-            left,right=canonical[left_hash],canonical[right_hash]
-            if left.version_id==right.version_id:
-                continue
-            if tuple(sorted((left.doc_id,right.doc_id))) in denied:
+            pairs=[(canonical[left_hash,s],canonical[right_hash,s]) for s in scripts
+                   if (left_hash,s) in canonical and (right_hash,s) in canonical]
+            pairs=[(left,right) for left,right in pairs if left.version_id!=right.version_id
+                   and tuple(sorted((left.doc_id,right.doc_id))) not in denied]
+            if not pairs:
                 continue
             target_positions=normalized(target)[1]
             target_start=bisect_left(target_positions,start)
             length=bisect_left(target_positions,end)-target_start
-            proofs.append((source,source_start,target_start,length,left,right))
+            proofs.append((source,source_start,target_start,length,pairs))
     proofs.sort(key=lambda proof: proof[0])
     links = {}
-    for source,source_start,target_start,length,left,right in proofs:
+    for source,source_start,target_start,length,pairs in proofs:
         right_start=bisect_left(normalized(source)[1],source_start)
-        if order[left.version_id] < order[right.version_id]:
-            better,worse,bs,ws=left,right,target_start,right_start
-        else:
-            better,worse,bs,ws=right,left,right_start,target_start
-        links.setdefault(worse.version_id,[]).append((better.version_id,bs,ws,length))
+        for left,right in pairs:
+            if order[left.version_id] < order[right.version_id]:
+                better,worse,bs,ws=left,right,target_start,right_start
+            else:
+                better,worse,bs,ws=right,left,right_start,target_start
+            links.setdefault(worse.version_id,[]).append((better.version_id,bs,ws,length))
     del proofs
     minimums = {}
     if any(f.min_chars for f in recipe.include):

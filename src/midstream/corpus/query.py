@@ -2,6 +2,7 @@
 
 import json
 from dataclasses import dataclass, field
+from typing import Literal
 
 import psycopg
 from pydantic import TypeAdapter
@@ -32,6 +33,8 @@ class Filters:
     tags: dict[str, list[str]] = field(default_factory=dict)
     # 这些维度另外接受“没有该维度标签”的文档（与 tags 同维度时取并集）。
     untagged: list[str] = field(default_factory=list)
+    # 正文字形：hans 简体、hant 繁体，判断见 datasets.script；没有字形统计的正文不匹配。
+    scripts: list[Literal['hans', 'hant']] = field(default_factory=list)
 
     @classmethod
     def from_dict(cls, data: dict) -> "Filters":
@@ -113,6 +116,10 @@ def where_clause(filters: Filters) -> tuple[str, dict]:
         clauses.append(overlap)
         params["year_from"] = filters.year_from
         params["year_to"] = filters.year_to
+    if filters.scripts:
+        from ..datasets import script
+        clauses.append(script.CLAUSE)
+        params.update(scripts=filters.scripts, script_rule=script.SCRIPT_RULE, script_ratio=script.TRADITIONAL_RATIO)
     clauses.extend(_tag_clauses(filters, params))
     return " AND ".join(clauses), params
 

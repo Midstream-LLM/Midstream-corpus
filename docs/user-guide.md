@@ -569,6 +569,7 @@ midstream dedup --spans
 | `min_chars` | 整数，默认 `null` | 当前版本字符数下限，含端点；是保存正文的字符数，不是归一化后长度。 |
 | `tags` | 对象 `{维度: [编号]}`，默认 `{}` | 按规范标签筛选，维度为 `era`、`genre`、`class`、`region`、`jurisdiction` 等，编号见 `src/midstream/data/taxonomy/vocabulary.json`（`GET /api/v1/taxonomy` 可取）。选中某级即含全部下级（`song` 含 `song.song.beisong`）；同一维度内任一命中，不同维度须同时满足；未登记的维度或编号报错。 |
 | `untagged` | 字符串数组，默认 `[]` | 这些维度另外接受没有该维度标签的文档；与 `tags` 同维度时取并集。 |
+| `scripts` | `"hans"`、`"hant"` 的数组，默认 `[]` | 按正文字形筛选：hans 简体、hant 繁体（规则 `script-v1`，见去重一节）。配方转简体时按原文判断，可用 `["hant"]` 只取繁体原文的简体副本。 |
 
 例：只排除确认在 1945 年以后的语料、其余（含年份未知）都收，可写收入条件 `{"year_to": 1944, "include_unknown_years": true}`，再加排除条件 `{"tags": {"era": ["dangdai"]}, "only_unknown_years": true, "quality": ["ok", "flagged", "quarantined"]}`；后者只去掉没有年份、但由发布机关等规则判为当代的文档。有年份的文档交给年份条件，按区间相交，跨 1945 年的保留；排除条件不要只写时代标签，否则同时标了民国和当代的跨时期文档也会被去掉。
 
@@ -581,6 +582,7 @@ midstream dedup --spans
 | `dedup` | `"none"`、`"document"` 或 `"span"`，默认 `"none"` | document 每簇留一篇；span 在此基础上裁掉保留文档之间的重复区间。 |
 | `source_priority` | 字符串数组，默认 `[]` | 来源优先顺序，靠前的优先保留；未列出的来源排在最后。 |
 | `min_cut_chars` | 正整数，默认 `64` | span 模式下最短原文裁剪长度，详见 8C。 |
+| `scripts` | `"separate"` 或 `"merge"`，默认 `"separate"` | 繁简重复的处理。查重不分繁简；separate 时繁体本和简体本分开去重、各留一份，merge 时只留一份。配方用 `variant` 转简体时全部算简体，两者相同。 |
 
 ```json
 {
@@ -588,7 +590,7 @@ midstream dedup --spans
 }
 ```
 
-同一簇内的保留顺序（规则 `keeper-v2`）依次是：配方的 `source_priority`、质量为 `ok`、来源档次、缺字密度、字数多、`doc_id` 小。来源档次在 `src/midstream/data/quality/source_tiers.json`：1 校对整理本（维基文库、Kanripo 与 open-guji、CCC、chinese-poetry），2 来源不明的网络录入本（殆知阁、greathangpt、团队文本等），3 OCR；未列出的来源算 2 档。缺字密度是每万字里 □ 与 � 的个数，分四档（不到 1、不到 10、不到 100、其余），同档才比字数。缺字数预先统计在 `text_quality`，由 `midstream dedup` 增量补齐；统计不全时导出会报错。所用规则和档次表版本写进发布报告的 `keeper` 字段。只在通过 `filters` 的文档之间选择。划分仍按去重前的全部文档分组，被舍弃的文档不会让原本相连的文档落到不同划分。
+同一簇内的保留顺序（规则 `keeper-v2`）依次是：配方的 `source_priority`、质量为 `ok`、来源档次、缺字密度、字数多、`doc_id` 小。来源档次在 `src/midstream/data/quality/source_tiers.json`：1 校对整理本（维基文库、Kanripo 与 open-guji、CCC、chinese-poetry），2 来源不明的网络录入本（殆知阁、greathangpt、团队文本等），3 OCR；未列出的来源算 2 档。缺字密度是每万字里 □ 与 � 的个数，分四档（不到 1、不到 10、不到 100、其余），同档才比字数。缺字数预先统计在 `text_quality`，由 `midstream dedup` 增量补齐；统计不全时导出会报错。所用规则和档次表版本写进发布报告的 `keeper` 字段。繁体、简体按正文判断：OpenCC 繁转简字符表里会被改写的字占汉字 5% 以上算繁体（规则 `script-v1`），计数预先统计在 `text_script`，同样由 `midstream dedup` 增量补齐，统计不全时导出报错；模式和阈值写进发布报告的 `scripts` 字段。只在通过 `filters` 的文档之间选择。划分仍按去重前的全部文档分组，被舍弃的文档不会让原本相连的文档落到不同划分。
 
 需要查重快照而快照落后于当前版本时会报错，先运行 `midstream dedup`；span 还需 `midstream dedup --spans`。舍弃篇数和字数写入发布记录，可用 release-stats 的 selection 字段查看。仅 span 模式裁剪段落重复，固定区间后再导出，不改库内原文。
 
@@ -776,9 +778,9 @@ midstream reprocess t2s-v1 --apply
 
 完整配方增加 `"variant": "simplified"` 后再试算/发布。固定使用随项目提供的 OpenCC ver.1.1.9 TSCharacters.txt 第一候选，processing_run 保存规则、表 SHA-256 和 length_preserving。保留标点、空白、段落；当前表逐项检验均为一个 Unicode 码点映射到一个码点，所以原文字符偏移可复用，UTF-8 字节数不保证相同。
 
-派生版保持 is_current=false，parent_version_id 指向转换输入的当前主线。通过 (doc_id,variant,parent_version_id) 的部分唯一索引保证同一有效输入只有一个同类派生版；旧父版本的派生版保留，主线更新后自动识别为过期。重复 --apply 跳过已有有效派生版；原文已经是简体时仍可建立显式派生身份。
+派生版保持 is_current=false，parent_version_id 指向转换输入的当前主线。通过 (doc_id,variant,parent_version_id) 的部分唯一索引保证同一有效输入只有一个同类派生版；旧父版本的派生版保留，主线更新后自动识别为过期。重复 --apply 跳过已有有效派生版。转换后不变的正文（已是简体）不建派生版，只在操作记录里登记检查过，省去约六成的版本行。
 
-配方增加 variant: "simplified" 显式选用。缺失或过期都会报错并列出前几个 doc_id，不回退主线；先运行转换再发布。去重仍按主线 doc_id 关联簇，实际成员固定派生 version_id，字符数和内容摘要使用选中的正文。文档版本列表、详情与数据集向导显示派生类别和过期提示。
+配方增加 variant: "simplified" 显式选用。没有派生版时，若字形统计（`text_script`）显示原文没有会被改写的字，就直接用原文，这与转换结果逐字相同；否则缺失或过期都会报错并列出前几个 doc_id，先运行转换再发布。去重仍按主线 doc_id 关联簇，实际成员固定派生 version_id，字符数和内容摘要使用选中的正文。文档版本列表、详情与数据集向导显示派生类别和过期提示。
 
 ## 8C. 发布时裁剪段落重复（M8）
 

@@ -60,15 +60,19 @@ class Selection:
     dedup: str = "none"
     source_priority: tuple[str, ...] = ()
     min_cut_chars: int = 64
+    scripts: str = "separate"
 
     @classmethod
     def load(cls, data: dict) -> "Selection":
         unknown = set(data) - set(cls.__dataclass_fields__)
         if unknown:
             raise ExportError(f"未知的选用字段：{sorted(unknown)}")
-        selection = cls(data.get("dedup", "none"), tuple(data.get("source_priority", ())), data.get('min_cut_chars',64))
+        selection = cls(data.get("dedup", "none"), tuple(data.get("source_priority", ())), data.get('min_cut_chars',64),
+                        data.get('scripts', 'separate'))
         if type(selection.min_cut_chars) is not int or selection.min_cut_chars < 1:
             raise ExportError('min_cut_chars 必须为正整数')
+        if selection.scripts not in ("separate", "merge"):
+            raise ExportError(f"未知的繁简处理方式：{selection.scripts}")
         if selection.dedup not in ("none", "document", "span"):
             raise ExportError(f"未知的去重方式：{selection.dedup}")
         return selection

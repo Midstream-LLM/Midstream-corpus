@@ -194,11 +194,13 @@ def _fingerprints(source, conn, state):
 def dedup(conn: psycopg.Connection, *, full: bool = False,
           progress: Callable[[int, int, str], None] | None = None) -> dict:
     # 导出去重选保留版本要用缺字统计；与文档查重同步更新。
-    from ..datasets import keeper
+    # 繁简分开去重要用字形统计，同样随文档查重更新。
+    from ..datasets import keeper, script
     added = keeper.refresh(conn, progress=progress)
+    scripts = script.refresh(conn, progress=progress)
     report = _dedup(conn, full=full, progress=progress)
     conn.commit()
-    return {**report, 'missing_counted': added}
+    return {**report, 'missing_counted': added, 'script_counted': scripts}
 
 
 def _dedup(conn: psycopg.Connection, *, full: bool, progress=None) -> dict:

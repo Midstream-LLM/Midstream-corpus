@@ -88,6 +88,12 @@ def _infer(current: dict) -> Change | None:
 SCAN_SOURCES: list[str] = []
 
 
+def _simplify(current: dict) -> Change | None:
+    # 转换后不变的正文（已是简体）不建派生版，只登记检查；导出转简体时直接用原文，见 datasets.selection。
+    text = variants.simplify(current['text'])
+    return None if text == current['text'] else Change(text=text)
+
+
 def _prepare_scan(conn) -> None:
     """用过扫描件（scan）方案的来源；规则只处理这些来源。"""
     SCAN_SOURCES[:] = [name for name, in conn.execute(
@@ -117,7 +123,7 @@ RULES = {
         Rule(classify.MAP_VERSION, None, _taxonomy, step="tagging", config={"maps": classify.versions()}),
         Rule(infer.RULE_VERSION, infer.SOURCES, _infer, step="tagging", prepare=_prepare_infer),
         Rule("ocr-scan-pages-v1", SCAN_SOURCES, _scan_pages, step="rule_reprocess", prepare=_prepare_scan),
-        Rule("t2s-v1", None, lambda current: Change(text=variants.simplify(current['text'])),
+        Rule("t2s-v1", None, _simplify,
              variant='simplified', config=variants.info(), step='t2s'),
     )
 }

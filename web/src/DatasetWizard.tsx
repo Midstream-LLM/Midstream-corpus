@@ -136,6 +136,9 @@ export default function DatasetWizard({ initial, onJob, onClose }: { initial?: R
       <label>去重方式<select value={recipe.selection?.dedup || "none"} onChange={e =>
         setRecipe({ ...recipe, selection: { ...recipe.selection, dedup: e.target.value } })}>
         <option value="none">不去重</option><option value="document">文档级去重</option><option value="span">文档级去重后裁剪重复片段</option></select></label>
+      {(recipe.selection?.dedup || "none") !== "none" && <label>繁简重复<select value={recipe.selection?.scripts || "separate"} onChange={e =>
+        setRecipe({ ...recipe, selection: { ...recipe.selection, scripts: e.target.value } })}>
+        <option value="separate">繁体本、简体本各留一份</option><option value="merge">只留一份</option></select></label>}
       {recipe.selection?.dedup === "span" && <label>最短裁剪字符数<input type="number" min="1" value={recipe.selection.min_cut_chars || 64}
         onChange={e => setRecipe({ ...recipe, selection: { ...recipe.selection, min_cut_chars: Number(e.target.value) } })} /></label>}
       <h3>来源优先级（拖动或用按钮排序）</h3>

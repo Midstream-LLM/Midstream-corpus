@@ -5,7 +5,7 @@ from typing import NamedTuple
 import psycopg
 
 from ..corpus.query import where_clause
-from . import keeper
+from . import keeper, script
 from .recipe import ExportError, Recipe, Selection
 
 
@@ -20,6 +20,7 @@ class Candidate(NamedTuple):
     year_from: int | None
     year_to: int | None
     missing: int | None = None
+    script: str | None = None
 
 
 def _selection_where(recipe: Recipe):
@@ -49,24 +50,27 @@ def _select(conn: psycopg.Connection, recipe: Recipe) -> list[Candidate]:
     with conn.cursor(name='plan_candidates') as cursor:
         cursor.execute(
             f"""SELECT v.version_id, v.doc_id, v.text_hash, v.char_count, s.name, v.quality_status,
-                   v.category, lower(v.composed_years), upper(v.composed_years) - 1, q.missing_chars
+                   v.category, lower(v.composed_years), upper(v.composed_years) - 1, q.missing_chars,
+                   t.han_chars, t.traditional_chars
             FROM document_version v
             JOIN document d USING (doc_id)
             JOIN source s USING (source_id)
             LEFT JOIN text_quality q ON q.text_hash = v.text_hash AND q.rule_version = %(missing_rule)s
+            LEFT JOIN text_script t ON t.text_hash = v.text_hash AND t.rule_version = %(script_rule)s
             WHERE {where} ORDER BY v.version_id""",
-            {**params, 'missing_rule': keeper.MISSING_RULE},
+            {**params, 'missing_rule': keeper.MISSING_RULE, 'script_rule': script.SCRIPT_RULE},
         )
         while rows := cursor.fetchmany(10000):
-            selected.extend(Candidate(*row) for row in rows)
+            selected.extend(Candidate(*row[:-2], script=script.classify(*row[-2:])) for row in rows)
     return selected
 
 
 def _drop_duplicates(conn, selection: Selection, selected: list[Candidate]) -> list[Candidate]:
-    """每个文档簇只留一篇，排序见 keeper。"""
+    """每个文档簇只留一篇，排序见 keeper；scripts=separate 时繁体本、简体本各留一篇。"""
     key = keeper.sort_key({name: index for index, name in enumerate(selection.source_priority)})
+    separate = selection.scripts == 'separate'
     by_document = {item.doc_id: item for item in selected}
-    clusters: dict[int, list[Candidate]] = {}
+    clusters: dict[tuple, list[Candidate]] = {}
     for cluster_id, doc_id in conn.execute(
         """SELECT m.cluster_id, v.doc_id
            FROM dup_cluster_member m JOIN dup_cluster c USING (cluster_id)
@@ -74,7 +78,8 @@ def _drop_duplicates(conn, selection: Selection, selected: list[Candidate]) -> l
            WHERE c.level = 'document' AND v.is_current AND v.doc_id = ANY(%s)""",
         (list(by_document),),
     ):
-        clusters.setdefault(cluster_id, []).append(by_document[doc_id])
+        item = by_document[doc_id]
+        clusters.setdefault((cluster_id, item.script if separate else None), []).append(item)
     dropped = set()
     for members in clusters.values():
         keep = min(members, key=key)
@@ -93,9 +98,18 @@ def _variant_selection(conn, variant, selected):
         ' WHERE v.doc_id=ANY(%s) AND v.variant=%s', (list(current), variant)):
         existing.add(row[1])
         if row[-1] == current[row[1]]:
-            # 派生版与原文缺字数相同，沿用原文的统计。
-            chosen[row[1]] = Candidate(*row[:-1], missing=gaps[row[1]])
+            # 派生版与原文缺字数相同，沿用原文的统计；转换后都是简体。
+            chosen[row[1]] = Candidate(*row[:-1], missing=gaps[row[1]], script='hans')
     missing = set(current) - chosen.keys()
+    if missing:
+        # 没有繁体字的正文转换后不变，不建派生版，直接用原文（OpenCC 表会改写的字都在汉字区，计数为 0 即转换不变）。
+        originals = {item.doc_id: item for item in selected if item.doc_id in missing}
+        for doc_id, in conn.execute(
+                'SELECT v.doc_id FROM document_version v JOIN text_script t USING (text_hash)'
+                ' WHERE v.version_id = ANY(%s) AND t.rule_version = %s AND t.traditional_chars = 0',
+                ([originals[d].version_id for d in originals], script.SCRIPT_RULE)):
+            chosen[doc_id] = originals[doc_id]._replace(script='hans')
+        missing -= chosen.keys()
     if missing:
         absent = sorted(missing-existing)[:5]
         stale = sorted(missing & existing)[:5]
