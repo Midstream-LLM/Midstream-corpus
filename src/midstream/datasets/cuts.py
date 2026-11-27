@@ -83,7 +83,8 @@ def plan(conn, recipe, kept):
                           ' WHERE v.version_id=%s',(version_id,)).fetchone()[0]
         return midstream_dedup.span_normalize(textcodec.decompress(bytes(blob)))
 
-    links = {}
+    # 区间按 target 排序，出处是乱序的；先换算 target 一侧，再按出处排序换算另一侧，每篇最多规范化两次。
+    proofs = []
     with conn.cursor(name='selected_span_proofs') as cursor:
         cursor.execute(
             'SELECT d.version_id,d.start_char,d.end_char,d.source_version_id,d.source_start_char,'
@@ -104,12 +105,17 @@ def plan(conn, recipe, kept):
             target_positions=normalized(target)[1]
             target_start=bisect_left(target_positions,start)
             length=bisect_left(target_positions,end)-target_start
-            right_start=bisect_left(normalized(source)[1],source_start)
-            if order[left.version_id] < order[right.version_id]:
-                better,worse,bs,ws=left,right,target_start,right_start
-            else:
-                better,worse,bs,ws=right,left,right_start,target_start
-            links.setdefault(worse.version_id,[]).append((better.version_id,bs,ws,length))
+            proofs.append((source,source_start,target_start,length,left,right))
+    proofs.sort(key=lambda proof: proof[0])
+    links = {}
+    for source,source_start,target_start,length,left,right in proofs:
+        right_start=bisect_left(normalized(source)[1],source_start)
+        if order[left.version_id] < order[right.version_id]:
+            better,worse,bs,ws=left,right,target_start,right_start
+        else:
+            better,worse,bs,ws=right,left,right_start,target_start
+        links.setdefault(worse.version_id,[]).append((better.version_id,bs,ws,length))
+    del proofs
     minimums = {}
     if any(f.min_chars for f in recipe.include):
         for filters in recipe.include:

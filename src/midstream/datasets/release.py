@@ -35,6 +35,9 @@ def write_release(conn: psycopg.Connection, plan: ReleasePlan) -> int:
             for start,end in intervals:
                 copy.write_row((release_id,version,start,end))
     conn.commit()
+    # 大批写入后统计信息过期，紧接着的导出查询会选到嵌套循环（曾卡 10 小时）
+    conn.execute('ANALYZE dataset_member, dataset_member_cut')
+    conn.commit()
     return release_id
 
 
