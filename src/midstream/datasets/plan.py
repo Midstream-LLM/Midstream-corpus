@@ -8,7 +8,7 @@ import psycopg
 from ..dedup import engine as dedup
 from . import keeper, script
 from .recipe import ExportError, Recipe
-from .selection import _drop_duplicates, _select, _variant_selection
+from .selection import _drop_duplicates, _reference, _select, _variant_selection
 from .split import _assign_splits, _check_training_history, _fraction, _group_keys, _reserved_docs
 
 
@@ -69,11 +69,14 @@ def plan_release(conn: psycopg.Connection, recipe: Recipe, *, estimate=None) -> 
     groups = _group_keys(conn, list({item.doc_id for item in selected} | reserved.keys()))
     kept = selected
     if recipe.selection.dedup in ("document", "span"):
-        kept = _drop_duplicates(conn, recipe.selection, selected)
+        reference = _reference(conn, recipe.selection.dedup_against)
+        if recipe.selection.scripts == 'separate' and any(item.script is None for item in reference):
+            raise ExportError('参照发布中部分正文还没有字形统计，请先运行 midstream dedup')
+        kept = _drop_duplicates(conn, recipe.selection, selected, reference)
     cuts = {}
     if recipe.selection.dedup == 'span':
         from . import cuts as span_cuts
-        kept,cuts = span_cuts.plan(conn,recipe,kept)
+        kept,cuts = span_cuts.plan(conn,recipe,kept,reference)
         if not kept:
             raise ExportError('裁剪后没有满足 min_chars 的文档')
     assigned, totals, warnings = _assign_splits(recipe, kept, groups, reserved)

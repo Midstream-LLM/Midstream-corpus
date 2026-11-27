@@ -65,23 +65,52 @@ def _select(conn: psycopg.Connection, recipe: Recipe) -> list[Candidate]:
     return selected
 
 
-def _drop_duplicates(conn, selection: Selection, selected: list[Candidate]) -> list[Candidate]:
-    """每个文档簇只留一篇，排序见 keeper；scripts=separate 时繁体本、简体本各留一篇。"""
+def _reference(conn, release_ids) -> list[Candidate]:
+    """dedup_against 所列发布的成员（原样版本），按 version_id 去重。"""
+    if not release_ids:
+        return []
+    found = {row[0] for row in conn.execute('SELECT release_id FROM dataset_release WHERE release_id = ANY(%s)',
+                                            (list(release_ids),))}
+    if absent := sorted(set(release_ids) - found):
+        raise ExportError(f'dedup_against 中的发布不存在：{absent}')
+    return [Candidate(*row[:-2], script=script.classify(*row[-2:])) for row in conn.execute(
+        """SELECT DISTINCT ON (v.version_id) v.version_id, v.doc_id, v.text_hash, v.char_count, s.name,
+                  v.quality_status, v.category, lower(v.composed_years), upper(v.composed_years) - 1, NULL::integer,
+                  t.han_chars, t.traditional_chars
+           FROM dataset_member m JOIN document_version v USING (version_id)
+           JOIN document d USING (doc_id) JOIN source s USING (source_id)
+           LEFT JOIN text_script t ON t.text_hash = v.text_hash AND t.rule_version = %s
+           WHERE m.release_id = ANY(%s) ORDER BY v.version_id""", (script.SCRIPT_RULE, list(release_ids)))]
+
+
+def _drop_duplicates(conn, selection: Selection, selected: list[Candidate], reference=()) -> list[Candidate]:
+    """每个文档簇只留一篇，排序见 keeper；scripts=separate 时繁体本、简体本各留一篇。
+
+    簇里有同字形的参照成员（dedup_against）时，簇里的候选全部舍弃；与参照成员同文档同字形的候选也舍弃。
+    """
     key = keeper.sort_key({name: index for index, name in enumerate(selection.source_priority)})
     separate = selection.scripts == 'separate'
     by_document = {item.doc_id: item for item in selected}
+    referenced = {}
+    for item in reference:
+        referenced.setdefault(item.doc_id, set()).add(item.script if separate else None)
+    dropped = {item.version_id for item in selected if (item.script if separate else None) in referenced.get(item.doc_id, ())}
     clusters: dict[tuple, list[Candidate]] = {}
+    covered = set()
     for cluster_id, doc_id in conn.execute(
         """SELECT m.cluster_id, v.doc_id
            FROM dup_cluster_member m JOIN dup_cluster c USING (cluster_id)
            JOIN document_version v USING(version_id)
            WHERE c.level = 'document' AND v.is_current AND v.doc_id = ANY(%s)""",
-        (list(by_document),),
+        (list(by_document.keys() | referenced.keys()),),
     ):
-        item = by_document[doc_id]
-        clusters.setdefault((cluster_id, item.script if separate else None), []).append(item)
-    dropped = set()
-    for members in clusters.values():
+        covered.update((cluster_id, s) for s in referenced.get(doc_id, ()))
+        if item := by_document.get(doc_id):
+            clusters.setdefault((cluster_id, item.script if separate else None), []).append(item)
+    for group, members in clusters.items():
+        if group in covered:
+            dropped.update(item.version_id for item in members)
+            continue
         keep = min(members, key=key)
         dropped.update(item.version_id for item in members if item is not keep)
     return [item for item in selected if item.version_id not in dropped]

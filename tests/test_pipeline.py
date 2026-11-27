@@ -1895,6 +1895,29 @@ def test_dedup_keeps_traditional_and_simplified_copies(conn, tmp_path):
     assert len(simplified.members) == 3
 
 
+def test_dedup_against_release_cuts_simplified_copies(conn, tmp_path):
+    from midstream.corpus import variants
+    rng = random.Random(812)
+    shared = "".join(rng.choices("齊歡體國學書雲風龍門馬", k=600))
+    tail = "".join(rng.choices("鐵龜鳥魚麥黃齒", k=600))
+    path = write(tmp_path / "against.jsonl", [
+        row("hant", shared + tail, chapter="甲书‧卷一", book="甲书"),
+        row("hans", variants.simplify(shared), chapter="乙书‧卷一", book="乙书"),
+    ])
+    ingest_inline(conn, "ccc_corpus", [path])
+    reprocess.reprocess(conn, RULES["t2s-v1"], dry_run=False)
+    base = {"seed": "s", "splits": {"train": 1.0}}
+    first = create_release(conn, Recipe.load({**base, "name": "a", "selection": {"dedup": "span"}}))
+    assert conn.execute("SELECT count(*) FROM dataset_member WHERE release_id = %s", (first,)).fetchone()[0] == 2
+    copies = {**base, "name": "b", "variant": "simplified", "filters": {"scripts": ["hant"]}}
+    alone = plan_release(conn, Recipe.load({**copies, "selection": {"dedup": "span"}}))
+    assert alone.report["chars"] == 1200 and not alone.cuts
+    plan = plan_release(conn, Recipe.load({**copies, "selection": {"dedup": "span", "dedup_against": [first]}}))
+    assert len(plan.members) == 1 and 600 <= plan.report["chars"] < 700
+    with pytest.raises(ExportError, match="不存在"):
+        plan_release(conn, Recipe.load({**copies, "selection": {"dedup": "span", "dedup_against": [first + 99]}}))
+
+
 def test_export_selection_splits_with_dropped_bridge(conn, tmp_path):
     """被舍弃的文档仍要连接作品和重复簇，否则两侧会共享文本。"""
     rng = random.Random(764)

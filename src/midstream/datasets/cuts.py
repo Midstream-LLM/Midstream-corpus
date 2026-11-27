@@ -59,7 +59,8 @@ def assign(ordered, links, positions, min_cut_chars, minimums):
     return kept, cuts
 
 
-def plan(conn, recipe, kept):
+def plan(conn, recipe, kept, reference=()):
+    """reference：dedup_against 的成员，排在全部候选之前当作已保留的出处，自身不进结果。"""
     snapshots = conn.execute("SELECT p.input_digest=d.input_digest FROM dedup_snapshot p CROSS JOIN dedup_snapshot d"
                              " WHERE p.level='paragraph' AND d.level='document'").fetchone()
     if snapshots is None or not snapshots[0]:
@@ -67,17 +68,24 @@ def plan(conn, recipe, kept):
     if recipe.variant and not variants.info()['length_preserving']:
         raise ExportError('转换不等长，不能复用段落裁剪偏移')
     key = keeper.sort_key({name: i for i,name in enumerate(recipe.selection.source_priority)})
-    ordered = sorted(kept, key=key)
-    order = {item.version_id:i for i,item in enumerate(ordered)}
-    by_doc = {item.doc_id:item for item in ordered}
+    by_doc = {item.doc_id:item for item in kept}
     hashes = dict(conn.execute(
         'SELECT v.doc_id,f.compare_hash FROM document_version v JOIN text_fingerprint f USING(text_hash)'
         ' WHERE v.is_current AND v.doc_id=ANY(%s) AND f.rule_version=%s', (list(by_doc),dedup.RULE_VERSION)))
+    # 参照成员按自身版本的正文取比较哈希（可能不是当前版本）；没有指纹的不参与。
+    reference_hashes = dict(conn.execute(
+        'SELECT v.version_id,f.compare_hash FROM document_version v JOIN text_fingerprint f USING(text_hash)'
+        ' WHERE v.version_id=ANY(%s) AND f.rule_version=%s', ([item.version_id for item in reference],dedup.RULE_VERSION)))
+    reference = sorted((item for item in reference if item.version_id in reference_hashes), key=key)
+    ordered = reference + sorted(kept, key=key)
+    order = {item.version_id:i for i,item in enumerate(ordered)}
+    compare_of = {item.version_id: reference_hashes[item.version_id] for item in reference}
+    compare_of.update((item.version_id, hashes[item.doc_id]) for item in kept)
     # 比较表示不分繁简；scripts=separate 时只在同一字形的保留文档之间裁剪，繁体本和简体本各留一份。
     separate = recipe.selection.scripts == 'separate'
     canonical={}
     for item in ordered:
-        canonical.setdefault((hashes[item.doc_id], item.script if separate else None),item)
+        canonical.setdefault((compare_of[item.version_id], item.script if separate else None),item)
     scripts = {s for _, s in canonical}
     compare_hashes = list({h for h, _ in canonical})
     denied=set(conn.execute('SELECT left_doc_id,right_doc_id FROM dedup_override').fetchall())
@@ -135,7 +143,9 @@ def plan(conn, recipe, kept):
         for doc_id in recipe.documents.get('add',[]):
             if doc_id in by_doc:
                 minimums[by_doc[doc_id].version_id]=1
-    return assign(ordered,links,lambda vid:normalized(vid)[1],recipe.selection.min_cut_chars,minimums)
+    kept, cuts = assign(ordered,links,lambda vid:normalized(vid)[1],recipe.selection.min_cut_chars,minimums)
+    skip = {item.version_id for item in reference}
+    return [item for item in kept if item.version_id not in skip], {v: c for v, c in cuts.items() if v not in skip}
 
 
 def pieces(text, cuts):

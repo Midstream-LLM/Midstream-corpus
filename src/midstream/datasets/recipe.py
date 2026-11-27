@@ -61,6 +61,8 @@ class Selection:
     source_priority: tuple[str, ...] = ()
     min_cut_chars: int = 64
     scripts: str = "separate"
+    # 已有发布：其中与候选同字形的成员视为已保留且优先，候选与之重复的部分舍弃或裁掉；这些成员本身不进新发布。
+    dedup_against: tuple[int, ...] = ()
 
     @classmethod
     def load(cls, data: dict) -> "Selection":
@@ -68,13 +70,17 @@ class Selection:
         if unknown:
             raise ExportError(f"未知的选用字段：{sorted(unknown)}")
         selection = cls(data.get("dedup", "none"), tuple(data.get("source_priority", ())), data.get('min_cut_chars',64),
-                        data.get('scripts', 'separate'))
+                        data.get('scripts', 'separate'), tuple(data.get('dedup_against', ())))
         if type(selection.min_cut_chars) is not int or selection.min_cut_chars < 1:
             raise ExportError('min_cut_chars 必须为正整数')
         if selection.scripts not in ("separate", "merge"):
             raise ExportError(f"未知的繁简处理方式：{selection.scripts}")
         if selection.dedup not in ("none", "document", "span"):
             raise ExportError(f"未知的去重方式：{selection.dedup}")
+        if any(type(i) is not int or i < 1 for i in selection.dedup_against):
+            raise ExportError('dedup_against 必须是发布编号列表')
+        if selection.dedup_against and selection.dedup == 'none':
+            raise ExportError('dedup_against 需要 dedup 为 document 或 span')
         return selection
 
 
