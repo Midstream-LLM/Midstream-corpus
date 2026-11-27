@@ -43,6 +43,18 @@ PROFILES = [
          note='OCR 文本含图片标签，需在清洗规则中处理。'),
     dict(source='shenbao_ocr', root=r'/ocr_sources/shenbao/',
          plan=dict(PERIODICAL, constants={'work_title': '申报', 'unit_type': 'issue'})),
+    dict(source='qing_bureau_ocr', root=r'/qing_bureau_jsonl/', require={'id', 'volume', 'text', 'ocr_mean_prob'},
+         plan=dict(text_field='text', id_field='id', title_format='{work_title} 第{volume}卷',
+                   constants={'work_title': '清宫造办处档案', 'composed_label': '清', 'unit_type': 'volume',
+                              'license': 'apache-2.0'}),
+         note='open-guji/qing_bureau_of_construction 的古籍酷 OCR，经 convert.py 按卷拼成 JSONL；'
+              '低置信字原样保留，置信度统计留在原始字段。'),
+    dict(source='open_guji_booktext', root=r'/booktext_jsonl/', require={'id', 'work_id', 'version_key', 'text'},
+         plan=dict(text_field='text', id_field='id', constants={'unit_type': 'work'},
+                   fields={'title': 'title', 'authors': 'authors', 'composed_label': 'dynasty',
+                           'category': 'category', 'license': 'license'}),
+         note='open-guji/book-text 的 Kanripo 与整理本，经 convert.py 每个版本一部书一条；题名、作者、朝代取自 '
+              'open-guji/book-index，分类为 Kanripo 分类码，许可证按版本记录（来源标“版权未知”的留空）。'),
 ]
 
 SKIP = [

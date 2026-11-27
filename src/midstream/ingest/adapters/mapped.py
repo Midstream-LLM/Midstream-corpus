@@ -11,7 +11,7 @@ from pydantic import BaseModel, ConfigDict, Field
 from .base import ParsedRecord
 
 
-TARGETS = {'title', 'authors', 'composed_label', 'category', 'work_title'}
+TARGETS = {'title', 'authors', 'composed_label', 'category', 'work_title', 'license'}
 CONSTANTS = {'license', 'composed_label', 'category', 'unit_type', 'work_title'}
 HEAD_CHARS = 4000
 # 来源用来表示“不知道”的占位词；按未知处理，原值仍留在原始字段里。
@@ -38,7 +38,7 @@ class MappingPlan(BaseModel):
 
     def checked(self):
         if set(self.fields) - TARGETS:
-            raise ValueError('只允许映射标题、作者、时代标签、分类和所属作品')
+            raise ValueError('只允许映射标题、作者、时代标签、分类、所属作品和许可证')
         if set(self.constants) - CONSTANTS:
             raise ValueError('常量只允许许可证、时代标签、分类、单元类型和所属作品')
         if (self.format == 'scan') != bool(self.ocr_engine):

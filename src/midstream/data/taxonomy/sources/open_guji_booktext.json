@@ -1,0 +1,282 @@
+{
+ "version": "open-guji-booktext-map-v1",
+ "key": "category",
+ "match": "prefix",
+ "comment": "category 为 Kanripo 分类码“部/类”（如 KR3/KR3e），按四库类目映射；KR4b–g 都是别集，KR5 道藏、KR6 佛藏与殆知阁一致归子部道家、释家。非 Kanripo 整理本无分类码。",
+ "map": {
+  "KR1": {
+   "class": [
+    "jing"
+   ]
+  },
+  "KR1/KR1a": {
+   "class": [
+    "jing.yi"
+   ]
+  },
+  "KR1/KR1b": {
+   "class": [
+    "jing.shu"
+   ]
+  },
+  "KR1/KR1c": {
+   "class": [
+    "jing.shi"
+   ]
+  },
+  "KR1/KR1d": {
+   "class": [
+    "jing.li"
+   ]
+  },
+  "KR1/KR1e": {
+   "class": [
+    "jing.chunqiu"
+   ]
+  },
+  "KR1/KR1f": {
+   "class": [
+    "jing.xiaojing"
+   ]
+  },
+  "KR1/KR1g": {
+   "class": [
+    "jing.wujing"
+   ]
+  },
+  "KR1/KR1h": {
+   "class": [
+    "jing.sishu"
+   ]
+  },
+  "KR1/KR1i": {
+   "class": [
+    "jing.yue"
+   ]
+  },
+  "KR1/KR1j": {
+   "class": [
+    "jing.xiaoxue"
+   ]
+  },
+  "KR2": {
+   "class": [
+    "shi"
+   ]
+  },
+  "KR2/KR2a": {
+   "class": [
+    "shi.zhengshi"
+   ]
+  },
+  "KR2/KR2b": {
+   "class": [
+    "shi.biannian"
+   ]
+  },
+  "KR2/KR2c": {
+   "class": [
+    "shi.benmo"
+   ]
+  },
+  "KR2/KR2d": {
+   "class": [
+    "shi.bieshi"
+   ]
+  },
+  "KR2/KR2e": {
+   "class": [
+    "shi.zashi"
+   ]
+  },
+  "KR2/KR2f": {
+   "class": [
+    "shi.zhaoling"
+   ]
+  },
+  "KR2/KR2g": {
+   "class": [
+    "shi.zhuanji"
+   ]
+  },
+  "KR2/KR2h": {
+   "class": [
+    "shi.shichao"
+   ]
+  },
+  "KR2/KR2i": {
+   "class": [
+    "shi.zaiji"
+   ]
+  },
+  "KR2/KR2j": {
+   "class": [
+    "shi.shiling"
+   ]
+  },
+  "KR2/KR2k": {
+   "class": [
+    "shi.dili"
+   ]
+  },
+  "KR2/KR2l": {
+   "class": [
+    "shi.zhiguan"
+   ]
+  },
+  "KR2/KR2m": {
+   "class": [
+    "shi.zhengshu"
+   ]
+  },
+  "KR2/KR2n": {
+   "class": [
+    "shi.mulu"
+   ]
+  },
+  "KR2/KR2o": {
+   "class": [
+    "shi.shiping"
+   ]
+  },
+  "KR3": {
+   "class": [
+    "zi"
+   ]
+  },
+  "KR3/KR3a": {
+   "class": [
+    "zi.rujia"
+   ]
+  },
+  "KR3/KR3b": {
+   "class": [
+    "zi.bingjia"
+   ]
+  },
+  "KR3/KR3c": {
+   "class": [
+    "zi.fajia"
+   ]
+  },
+  "KR3/KR3d": {
+   "class": [
+    "zi.nongjia"
+   ]
+  },
+  "KR3/KR3e": {
+   "class": [
+    "zi.yijia"
+   ],
+   "genre": [
+    "zhuanzhu.yifang"
+   ]
+  },
+  "KR3/KR3f": {
+   "class": [
+    "zi.tianwen"
+   ]
+  },
+  "KR3/KR3g": {
+   "class": [
+    "zi.shushu"
+   ]
+  },
+  "KR3/KR3h": {
+   "class": [
+    "zi.yishu"
+   ]
+  },
+  "KR3/KR3i": {
+   "class": [
+    "zi.pulu"
+   ]
+  },
+  "KR3/KR3j": {
+   "class": [
+    "zi.zajia"
+   ]
+  },
+  "KR3/KR3k": {
+   "class": [
+    "zi.leishu"
+   ]
+  },
+  "KR3/KR3l": {
+   "class": [
+    "zi.xiaoshuo"
+   ]
+  },
+  "KR4": {
+   "class": [
+    "ji"
+   ]
+  },
+  "KR4/KR4a": {
+   "class": [
+    "ji.chuci"
+   ]
+  },
+  "KR4/KR4b": {
+   "class": [
+    "ji.bieji"
+   ]
+  },
+  "KR4/KR4c": {
+   "class": [
+    "ji.bieji"
+   ]
+  },
+  "KR4/KR4d": {
+   "class": [
+    "ji.bieji"
+   ]
+  },
+  "KR4/KR4e": {
+   "class": [
+    "ji.bieji"
+   ]
+  },
+  "KR4/KR4f": {
+   "class": [
+    "ji.bieji"
+   ]
+  },
+  "KR4/KR4g": {
+   "class": [
+    "ji.bieji"
+   ]
+  },
+  "KR4/KR4h": {
+   "class": [
+    "ji.zongji"
+   ]
+  },
+  "KR4/KR4i": {
+   "class": [
+    "ji.shiwenping"
+   ]
+  },
+  "KR4/KR4j": {
+   "class": [
+    "ji.ciqu"
+   ]
+  },
+  "KR5": {
+   "class": [
+    "zi.daojia"
+   ],
+   "genre": [
+    "zongjiao.daojing"
+   ]
+  },
+  "KR6": {
+   "class": [
+    "zi.shijia"
+   ],
+   "genre": [
+    "zongjiao.fojing"
+   ]
+  }
+ }
+}

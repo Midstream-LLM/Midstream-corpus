@@ -175,7 +175,7 @@ CLI 同样可用 `midstream jobs list/show/cancel/retry`，详见使用指南。
 | 项 | 作用 |
 |---|---|
 | 字段路径 | 嵌套用点分隔；`a\|b` 取第一个非空项；正文字段是对象数组时逐层展开成多篇，子记录用 `_parent.x` 引用上层字段 |
-| `fields` | 可映射 `title`、`authors`、`composed_label`、`category`、`work_title` |
+| `fields` | 可映射 `title`、`authors`、`composed_label`、`category`、`work_title`、`license`（许可证逐条不同时用） |
 | `path_pattern` | 对文件路径搜索的正则，命名组即字段名；`year` 组写入年份；其他组名记入附加信息 |
 | `head_patterns` | 对正文前 4000 字搜索的正则数组，命名组同上 |
 | `trim_start`、`trim_end` | 去掉固定的头尾声明：正文从第一次匹配之后开始，到其后第一次匹配之前结束 |

@@ -1,6 +1,6 @@
 {
- "version": "era-labels-v1",
- "comment": "来源时代标签 -> 规范时代（可多个）；years 只在不能由标签区间直接得出时给出（之交按前朝最后 30 年至后朝最初 30 年）。",
+ "version": "era-labels-v2",
+ "comment": "来源时代标签 -> 规范时代（可多个）；years 只在不能由标签区间直接得出时给出（之交按前朝最后 30 年至后朝最初 30 年）。 繁体及细分朝代名（北宋、東晉、後秦等）来自 open-guji book-index，2026-11-26 加入。",
  "labels": {
   "先秦": {
    "era": [
@@ -284,6 +284,118 @@
    "years": [
     390,
     450
+   ]
+  },
+  "北宋": {
+   "era": [
+    "song.song.beisong"
+   ]
+  },
+  "南宋": {
+   "era": [
+    "song.song.nansong"
+   ]
+  },
+  "趙宋": {
+   "era": [
+    "song.song"
+   ]
+  },
+  "晉": {
+   "era": [
+    "weijin.jin"
+   ]
+  },
+  "東晉": {
+   "era": [
+    "weijin.jin.dongjin"
+   ]
+  },
+  "西晉": {
+   "era": [
+    "weijin.jin.xijin"
+   ]
+  },
+  "漢": {
+   "era": [
+    "qinhan.han"
+   ]
+  },
+  "東漢": {
+   "era": [
+    "qinhan.han.donghan"
+   ]
+  },
+  "戰國": {
+   "era": [
+    "xianqin.zhou.zhanguo"
+   ]
+  },
+  "三國魏": {
+   "era": [
+    "weijin.sanguo"
+   ]
+  },
+  "南朝陳": {
+   "era": [
+    "weijin.nanchao"
+   ]
+  },
+  "北魏": {
+   "era": [
+    "weijin.beichao"
+   ]
+  },
+  "後秦": {
+   "era": [
+    "weijin"
+   ],
+   "years": [
+    384,
+    417
+   ]
+  },
+  "遼": {
+   "era": [
+    "song.liao"
+   ]
+  },
+  "五代": {
+   "era": [
+    "suitang.wudai"
+   ]
+  },
+  "南唐": {
+   "era": [
+    "suitang.wudai"
+   ]
+  },
+  "後蜀": {
+   "era": [
+    "suitang.wudai"
+   ]
+  },
+  "後周": {
+   "era": [
+    "suitang.wudai"
+   ]
+  },
+  "後晉": {
+   "era": [
+    "suitang.wudai"
+   ]
+  },
+  "遼金元": {
+   "era": [
+    "song.liao",
+    "song.jin",
+    "yuan"
+   ]
+  },
+  "金元": {
+   "era": [
+    "song.jin",
+    "yuan"
    ]
   }
  }
